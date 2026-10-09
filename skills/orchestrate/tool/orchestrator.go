@@ -56,7 +56,10 @@ func cmdNew(a *app, args []string) error {
 	if *base != "" {
 		baseBranch = *base
 	}
-	sha, err := git(s.repo, "rev-parse", "--short=12", baseBranch+"^{commit}")
+	if strings.HasPrefix(baseBranch, "-") {
+		return fail("base %q is not a branch or commit", baseBranch)
+	}
+	sha, err := git(s.repo, "rev-parse", "--verify", "--quiet", "--short=12", baseBranch+"^{commit}")
 	if err != nil || sha == "" {
 		return fail("base %q does not resolve in %s", baseBranch, s.repo)
 	}
