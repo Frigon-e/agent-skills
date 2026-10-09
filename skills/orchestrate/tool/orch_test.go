@@ -670,6 +670,8 @@ func TestRepoConfigCannotSetUserKeys(t *testing.T) {
 		`claude_args = ["--dangerously-skip-permissions"]`,
 		`codex_args = ["--dangerously-bypass-approvals-and-sandbox"]`,
 		"max_leads = 50",
+		`CLAUDE_ARGS = ["--dangerously-skip-permissions"]`,
+		`Codex_Args = ["--dangerously-bypass-approvals-and-sandbox"]`,
 	} {
 		os.WriteFile(repoFile, []byte(line+"\n"), 0o644)
 		code, out := h.run("status")

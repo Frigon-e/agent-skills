@@ -1,7 +1,6 @@
 package main
 
 import (
-	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -11,14 +10,28 @@ import (
 	"github.com/BurntSushi/toml"
 )
 
-type config struct {
+// repoConfig comes from <repo>/.agents/orchestrate.toml, so anyone who can
+// commit to the repo controls it. It only shapes briefs.
+type repoConfig struct {
 	BaseBranch   string   `toml:"base_branch"`
-	MaxLeads     int      `toml:"max_leads"`
 	LeadSkills   []string `toml:"lead_skills"`
 	Check        string   `toml:"check"`
 	QuietMinutes int      `toml:"quiet_minutes"`
-	ClaudeArgs   []string `toml:"claude_args"`
-	CodexArgs    []string `toml:"codex_args"`
+}
+
+// userConfig holds what a repository must not control: how leads launch
+// and how many run on this machine. Each file decodes into its own type, so
+// a repo key can't reach these fields under any spelling (the decoder
+// matches field names case-insensitively).
+type userConfig struct {
+	MaxLeads   int      `toml:"max_leads"`
+	ClaudeArgs []string `toml:"claude_args"`
+	CodexArgs  []string `toml:"codex_args"`
+}
+
+type config struct {
+	repoConfig
+	userConfig
 }
 
 // site is the repo an orchestrator command runs against.
@@ -108,8 +121,6 @@ func rolesDir() string {
 	return expandHome(envOr("ORCH_ROLES_DIR", "~/.local/state/orchestrate/roles"))
 }
 
-// userConfigPath holds the settings a repository must not control: how
-// leads launch and how many run on this machine.
 func userConfigPath() string {
 	if p := os.Getenv("ORCH_CONFIG"); p != "" {
 		return p
@@ -117,41 +128,40 @@ func userConfigPath() string {
 	return filepath.Join(envOr("XDG_CONFIG_HOME", expandHome("~/.config")), "orchestrate", "config.toml")
 }
 
-// userKeys are only read from the user's config. A repo file that sets one
-// is refused, so a commit can't add launch flags such as one that skips
-// permission prompts.
 var userKeys = []string{"max_leads", "claude_args", "codex_args"}
 
-func decodeConfig(path string, cfg *config, allowed func(key string) bool, hint string) error {
+// decodeStrict refuses keys v has no field for. A key that belongs in the
+// other file gets a pointer there instead of "unknown key".
+func decodeStrict(path string, v any, otherKeys []string, otherFile string) error {
 	if _, err := os.Stat(path); err != nil {
 		return nil
 	}
-	md, err := toml.DecodeFile(path, cfg)
+	md, err := toml.DecodeFile(path, v)
 	if err != nil {
 		return fail("%s: %v", path, err)
 	}
-	for _, k := range md.Keys() {
-		if !allowed(k.String()) {
-			return fail("%s: %q is not allowed here%s", path, k.String(), hint)
-		}
-	}
 	if und := md.Undecoded(); len(und) > 0 {
-		return fail("%s: unknown key %q", path, und[0].String())
+		k := und[0].String()
+		if slices.ContainsFunc(otherKeys, func(o string) bool { return strings.EqualFold(o, k) }) {
+			return fail("%s: %q is not allowed here; it belongs in %s", path, k, otherFile)
+		}
+		return fail("%s: unknown key %q", path, k)
 	}
 	return nil
 }
 
 func loadConfig(repo string) (config, error) {
-	cfg := config{MaxLeads: 3, LeadSkills: []string{"route-work"}, QuietMinutes: 30}
+	cfg := config{
+		repoConfig{LeadSkills: []string{"route-work"}, QuietMinutes: 30},
+		userConfig{MaxLeads: 3},
+	}
 	path := filepath.Join(repo, ".agents", "orchestrate.toml")
 	user := userConfigPath()
-	isUserKey := func(k string) bool { return slices.Contains(userKeys, k) }
-	if err := decodeConfig(path, &cfg, func(k string) bool { return !isUserKey(k) },
-		fmt.Sprintf("; %s belong in %s", strings.Join(userKeys, ", "), user)); err != nil {
+	repoKeys := []string{"base_branch", "lead_skills", "check", "quiet_minutes"}
+	if err := decodeStrict(path, &cfg.repoConfig, userKeys, user); err != nil {
 		return cfg, err
 	}
-	if err := decodeConfig(user, &cfg, isUserKey,
-		fmt.Sprintf("; only %s go here, the rest in <repo>/.agents/orchestrate.toml", strings.Join(userKeys, ", "))); err != nil {
+	if err := decodeStrict(user, &cfg.userConfig, repoKeys, "<repo>/.agents/orchestrate.toml"); err != nil {
 		return cfg, err
 	}
 	if cfg.MaxLeads < 1 || cfg.QuietMinutes < 1 {
