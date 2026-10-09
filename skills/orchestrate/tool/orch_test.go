@@ -686,6 +686,42 @@ func TestRepoConfigCannotSetUserKeys(t *testing.T) {
 	}
 }
 
+// Notes reach the orchestrator on every board, so their size is capped.
+func TestRepoNotes(t *testing.T) {
+	h := setup(t)
+	wantContains(t, h.must("status"), "repo config: none")
+	os.MkdirAll(filepath.Join(h.repo, ".agents"), 0o755)
+	repoFile := filepath.Join(h.repo, ".agents", "orchestrate.toml")
+	os.WriteFile(repoFile, []byte(`notes = ["one test VM: run-e2e one lead at a time"]`+"\n"), 0o644)
+	out := h.must("status")
+	wantContains(t, out, "note: one test VM: run-e2e one lead at a time")
+	if strings.Contains(out, "repo config: none") {
+		t.Fatalf("config file present but board says none:\n%s", out)
+	}
+	for name, notes := range map[string]string{
+		"too many":  `["a", "b", "c", "d", "e", "f"]`,
+		"too long":  `["` + strings.Repeat("x", maxNoteLen+1) + `"]`,
+		"multiline": `["a\nb"]`,
+		"blank":     `["  "]`,
+	} {
+		os.WriteFile(repoFile, []byte("notes = "+notes+"\n"), 0o644)
+		if code, out := h.run("status"); code != 1 || !strings.Contains(out, "note") {
+			t.Errorf("%s accepted: %d %q", name, code, out)
+		}
+		if code, _ := h.run("config-check", repoFile); code != 1 {
+			t.Errorf("config-check accepted %s", name)
+		}
+	}
+	// A draft elsewhere (a setup lead's worktree) is checked on its own.
+	draft := filepath.Join(h.tmp, "draft.toml")
+	os.WriteFile(draft, []byte(`check = "make test"`+"\nmax_leads = 9\n"), 0o644)
+	if code, out := h.run("config-check", draft); code != 1 || !strings.Contains(out, "is not allowed here") {
+		t.Errorf("config-check accepted a user key: %d %q", code, out)
+	}
+	os.WriteFile(draft, []byte(`notes = ["one VM"]`+"\n"), 0o644)
+	wantContains(t, h.must("config-check", draft), "ok:", "1 of 5 notes")
+}
+
 func TestParseArgsInterspersed(t *testing.T) {
 	a := &app{errw: &bytes.Buffer{}}
 	fs := a.flags("send")

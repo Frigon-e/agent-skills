@@ -489,7 +489,7 @@ func cmdStatus(a *app, args []string) error {
 	}
 	rows := leadRows(s.root, *all)
 	if *asJSON {
-		b, _ := json.MarshalIndent(map[string]any{"root": s.root, "watcher": watcherAlive(s.root), "leads": rows}, "", "  ")
+		b, _ := json.MarshalIndent(map[string]any{"root": s.root, "watcher": watcherAlive(s.root), "notes": s.cfg.Notes, "leads": rows}, "", "  ")
 		fmt.Fprintln(a.out, string(b))
 		return nil
 	}
@@ -511,6 +511,12 @@ func (a *app) board(s site, rows []row) string {
 	out := []string{
 		"orchestrate: " + s.root,
 		fmt.Sprintf("watcher: %s · leads open: %d/%d", watcher, live, s.cfg.MaxLeads),
+	}
+	if s.cfg.repoFile == "" {
+		out = append(out, "repo config: none, using defaults (see Repo setup in the orchestrate skill)")
+	}
+	for _, n := range s.cfg.Notes {
+		out = append(out, "note: "+n)
 	}
 	if len(rows) == 0 {
 		return strings.Join(append(out, "no tasks yet"), "\n")
@@ -805,6 +811,34 @@ func cmdClose(a *app, args []string) error {
 		return err
 	}
 	fmt.Fprintln(a.out, "closed "+l.Name)
+	return nil
+}
+
+// cmdConfigCheck validates a draft orchestrate.toml, such as one a setup
+// lead wrote in its worktree, where orch status would read the main checkout.
+func cmdConfigCheck(a *app, args []string) error {
+	pos, err := parseArgs(a.flags("config-check"), args)
+	if err != nil {
+		return err
+	}
+	if err := exactArgs(pos, 1, "config-check <file>"); err != nil {
+		return err
+	}
+	path := pos[0]
+	if !filepath.IsAbs(path) {
+		path = filepath.Join(a.cwd, path)
+	}
+	if _, err := os.Stat(path); err != nil {
+		return fail("%s: %v", path, err)
+	}
+	rc := repoConfig{QuietMinutes: 30}
+	if err := readRepoConfig(path, &rc); err != nil {
+		return err
+	}
+	if rc.QuietMinutes < 1 {
+		return fail("%s: quiet_minutes must be at least 1", path)
+	}
+	fmt.Fprintf(a.out, "ok: %s (%d of %d notes)\n", path, len(rc.Notes), maxNotes)
 	return nil
 }
 

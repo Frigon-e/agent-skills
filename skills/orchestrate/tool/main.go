@@ -29,6 +29,7 @@ Orchestrator:
   orch focus <id>
   orch close <id> [--force]
   orch become [--off]
+  orch config-check <file>
 Lead:
   orch report [--dir D] [--key K] <state> <text...>
   orch inbox [--dir D]
@@ -57,19 +58,20 @@ func fail(format string, a ...any) error {
 }
 
 var commands = map[string]func(*app, []string) error{
-	"new":    cmdNew,
-	"check":  cmdCheck,
-	"spawn":  cmdSpawn,
-	"send":   cmdSend,
-	"status": cmdStatus,
-	"watch":  cmdWatch,
-	"peek":   cmdPeek,
-	"focus":  cmdFocus,
-	"close":  cmdClose,
-	"become": cmdBecome,
-	"report": cmdReport,
-	"inbox":  cmdInbox,
-	"hook":   cmdHook,
+	"new":          cmdNew,
+	"check":        cmdCheck,
+	"spawn":        cmdSpawn,
+	"send":         cmdSend,
+	"status":       cmdStatus,
+	"watch":        cmdWatch,
+	"peek":         cmdPeek,
+	"focus":        cmdFocus,
+	"close":        cmdClose,
+	"become":       cmdBecome,
+	"config-check": cmdConfigCheck,
+	"report":       cmdReport,
+	"inbox":        cmdInbox,
+	"hook":         cmdHook,
 }
 
 func main() {

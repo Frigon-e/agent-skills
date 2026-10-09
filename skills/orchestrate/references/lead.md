@@ -38,7 +38,7 @@ One line per state change: `orch report [--key <slug>] <state> "<line>"`.
 | `paused` | You were told to stop, or you are waiting on another task. |
 | `done` | Acceptance is met. Ship: branch, head sha, and the check command with its result. Scout: the report path and a one-line answer. |
 | `failed` | You can't meet Acceptance. Say what you tried and why it failed. |
-| `note` | Something the orchestrator should see in the log that needs no action. |
+| `note` | Something the orchestrator should see in the log that needs no action. Start it with `config:` when every task in this repo would trip on it and the repo's docs don't say so (two leads fighting over one resource, a wrong check command): say what happened, not a fix. |
 
 End every turn with a line written during that turn. A Stop hook sends a
 silent turn back once. `done` without evidence counts as not done.

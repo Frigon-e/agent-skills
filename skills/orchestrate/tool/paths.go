@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/BurntSushi/toml"
 )
@@ -17,7 +18,11 @@ type repoConfig struct {
 	LeadSkills   []string `toml:"lead_skills"`
 	Check        string   `toml:"check"`
 	QuietMinutes int      `toml:"quiet_minutes"`
+	// Notes reach the orchestrator on every board, so loadConfig caps them.
+	Notes []string `toml:"notes"`
 }
+
+const maxNotes, maxNoteLen = 5, 160
 
 // userConfig holds what a repository must not control: how leads launch
 // and how many run on this machine. Each file decodes into its own type, so
@@ -32,6 +37,7 @@ type userConfig struct {
 type config struct {
 	repoConfig
 	userConfig
+	repoFile string // empty when the repo has no orchestrate.toml
 }
 
 // site is the repo an orchestrator command runs against.
@@ -150,16 +156,36 @@ func decodeStrict(path string, v any, otherKeys []string, otherFile string) erro
 	return nil
 }
 
+var repoKeys = []string{"base_branch", "lead_skills", "check", "quiet_minutes", "notes"}
+
+// readRepoConfig decodes a repo file over the defaults already in rc.
+func readRepoConfig(path string, rc *repoConfig) error {
+	if err := decodeStrict(path, rc, userKeys, userConfigPath()); err != nil {
+		return err
+	}
+	if len(rc.Notes) > maxNotes {
+		return fail("%s: %d notes, at most %d: rewrite or drop one before adding another", path, len(rc.Notes), maxNotes)
+	}
+	for _, n := range rc.Notes {
+		if strings.TrimSpace(n) == "" || strings.ContainsAny(n, "\r\n") || utf8.RuneCountInString(n) > maxNoteLen {
+			return fail("%s: each note must be one non-empty line of at most %d characters: %q", path, maxNoteLen, short(n, 40))
+		}
+	}
+	return nil
+}
+
 func loadConfig(repo string) (config, error) {
 	cfg := config{
-		repoConfig{LeadSkills: []string{"route-work"}, QuietMinutes: 30},
-		userConfig{MaxLeads: 3},
+		repoConfig: repoConfig{LeadSkills: []string{"route-work"}, QuietMinutes: 30},
+		userConfig: userConfig{MaxLeads: 3},
 	}
 	path := filepath.Join(repo, ".agents", "orchestrate.toml")
 	user := userConfigPath()
-	repoKeys := []string{"base_branch", "lead_skills", "check", "quiet_minutes"}
-	if err := decodeStrict(path, &cfg.repoConfig, userKeys, user); err != nil {
+	if err := readRepoConfig(path, &cfg.repoConfig); err != nil {
 		return cfg, err
+	}
+	if _, err := os.Stat(path); err == nil {
+		cfg.repoFile = path
 	}
 	if err := decodeStrict(user, &cfg.userConfig, repoKeys, "<repo>/.agents/orchestrate.toml"); err != nil {
 		return cfg, err
