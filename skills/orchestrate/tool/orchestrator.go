@@ -191,7 +191,7 @@ func cmdSpawn(a *app, args []string) error {
 	if len(leads) >= s.cfg.MaxLeads {
 		return &exitError{code: 75, msg: fmt.Sprintf(
 			"deferred: %d/%d leads open; close one first or raise max_leads in %s",
-			len(leads), s.cfg.MaxLeads, filepath.Join(s.repo, ".agents", "orchestrate.toml"))}
+			len(leads), s.cfg.MaxLeads, userConfigPath())}
 	}
 	fm, _, err := readTask(filepath.Join(dir, "task.md"))
 	if err != nil {

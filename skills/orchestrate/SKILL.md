@@ -115,9 +115,11 @@ other way.
   A ship lead removes its own worktree before it reports done after a
   merge; ask it to.
 - Per-repo settings live in `<repo>/.agents/orchestrate.toml`:
-  `base_branch`, `max_leads`, `lead_skills` (named in every brief),
-  `check` (the repo's check command), `quiet_minutes` (default 30),
-  `claude_args` and `codex_args` (extra CLI flags for leads).
+  `base_branch`, `lead_skills` (named in every brief), `check` (the repo's
+  check command) and `quiet_minutes` (default 30). Settings a repo must
+  not control live in `~/.config/orchestrate/config.toml`: `max_leads`,
+  `claude_args` and `codex_args` (extra CLI flags for leads). orch refuses
+  them in a repo file, so a commit can't change how leads launch.
 - Run state lives next to the repo's Herdr worktrees:
   `<herdr worktrees dir>/<repo>/.orchestrate/<id>/`. It holds task.md,
   lead.json, status.log, inbox/ and report.md. Ship worktrees sit beside

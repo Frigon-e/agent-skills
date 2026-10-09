@@ -148,6 +148,7 @@ func setup(t *testing.T) *harness {
 		"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.com",
 		"GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.com",
 		"ORCH_HOME": filepath.Join(tmp, "state"), "ORCH_ROLES_DIR": filepath.Join(tmp, "roles"),
+		"ORCH_CONFIG":       filepath.Join(tmp, "config.toml"),
 		"ORCH_HERDR_CONFIG": filepath.Join(tmp, "none.toml"),
 		"ORCH_SKILL_DIR":    skill, "ORCH_SELF": "/skill/scripts/orch",
 		"HERDR_ENV": "1", "HERDR_WORKSPACE_ID": "w1", "HERDR_PANE_ID": "w1:p0",
@@ -299,8 +300,7 @@ func TestLifecycle(t *testing.T) {
 
 func TestSpawnGridAndCap(t *testing.T) {
 	h := setup(t)
-	os.MkdirAll(filepath.Join(h.repo, ".agents"), 0o755)
-	os.WriteFile(filepath.Join(h.repo, ".agents", "orchestrate.toml"), []byte("max_leads = 5\nclaude_args = [\"--permission-mode\", \"auto\"]\n"), 0o644)
+	os.WriteFile(os.Getenv("ORCH_CONFIG"), []byte("max_leads = 5\nclaude_args = [\"--permission-mode\", \"auto\"]\n"), 0o644)
 	ids := []string{"a", "b", "c", "d", "e", "f"}
 	for _, id := range ids {
 		h.task(id)
@@ -658,6 +658,29 @@ func TestConfigRejectsUnknownKeys(t *testing.T) {
 	code, out := h.run("status")
 	if code != 1 || !strings.Contains(out, `unknown key "max_lead"`) {
 		t.Fatalf("typo accepted: %d %q", code, out)
+	}
+}
+
+// A repository must not choose how leads launch or how many run here.
+func TestRepoConfigCannotSetUserKeys(t *testing.T) {
+	h := setup(t)
+	os.MkdirAll(filepath.Join(h.repo, ".agents"), 0o755)
+	repoFile := filepath.Join(h.repo, ".agents", "orchestrate.toml")
+	for _, line := range []string{
+		`claude_args = ["--dangerously-skip-permissions"]`,
+		`codex_args = ["--dangerously-bypass-approvals-and-sandbox"]`,
+		"max_leads = 50",
+	} {
+		os.WriteFile(repoFile, []byte(line+"\n"), 0o644)
+		code, out := h.run("status")
+		if code != 1 || !strings.Contains(out, "is not allowed here") || !strings.Contains(out, os.Getenv("ORCH_CONFIG")) {
+			t.Fatalf("repo set %s: %d %q", line, code, out)
+		}
+	}
+	os.Remove(repoFile)
+	os.WriteFile(os.Getenv("ORCH_CONFIG"), []byte("check = \"make test\"\n"), 0o644)
+	if code, out := h.run("status"); code != 1 || !strings.Contains(out, `"check" is not allowed here`) {
+		t.Fatalf("user config set a repo key: %d %q", code, out)
 	}
 }
 

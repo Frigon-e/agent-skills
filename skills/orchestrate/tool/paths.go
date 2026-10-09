@@ -1,9 +1,11 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/BurntSushi/toml"
@@ -106,20 +108,54 @@ func rolesDir() string {
 	return expandHome(envOr("ORCH_ROLES_DIR", "~/.local/state/orchestrate/roles"))
 }
 
+// userConfigPath holds the settings a repository must not control: how
+// leads launch and how many run on this machine.
+func userConfigPath() string {
+	if p := os.Getenv("ORCH_CONFIG"); p != "" {
+		return p
+	}
+	return filepath.Join(envOr("XDG_CONFIG_HOME", expandHome("~/.config")), "orchestrate", "config.toml")
+}
+
+// userKeys are only read from the user's config. A repo file that sets one
+// is refused, so a commit can't add launch flags such as one that skips
+// permission prompts.
+var userKeys = []string{"max_leads", "claude_args", "codex_args"}
+
+func decodeConfig(path string, cfg *config, allowed func(key string) bool, hint string) error {
+	if _, err := os.Stat(path); err != nil {
+		return nil
+	}
+	md, err := toml.DecodeFile(path, cfg)
+	if err != nil {
+		return fail("%s: %v", path, err)
+	}
+	for _, k := range md.Keys() {
+		if !allowed(k.String()) {
+			return fail("%s: %q is not allowed here%s", path, k.String(), hint)
+		}
+	}
+	if und := md.Undecoded(); len(und) > 0 {
+		return fail("%s: unknown key %q", path, und[0].String())
+	}
+	return nil
+}
+
 func loadConfig(repo string) (config, error) {
 	cfg := config{MaxLeads: 3, LeadSkills: []string{"route-work"}, QuietMinutes: 30}
 	path := filepath.Join(repo, ".agents", "orchestrate.toml")
-	if _, err := os.Stat(path); err == nil {
-		md, err := toml.DecodeFile(path, &cfg)
-		if err != nil {
-			return cfg, fail("%s: %v", path, err)
-		}
-		if und := md.Undecoded(); len(und) > 0 {
-			return cfg, fail("%s: unknown key %q", path, und[0].String())
-		}
+	user := userConfigPath()
+	isUserKey := func(k string) bool { return slices.Contains(userKeys, k) }
+	if err := decodeConfig(path, &cfg, func(k string) bool { return !isUserKey(k) },
+		fmt.Sprintf("; %s belong in %s", strings.Join(userKeys, ", "), user)); err != nil {
+		return cfg, err
+	}
+	if err := decodeConfig(user, &cfg, isUserKey,
+		fmt.Sprintf("; only %s go here, the rest in <repo>/.agents/orchestrate.toml", strings.Join(userKeys, ", "))); err != nil {
+		return cfg, err
 	}
 	if cfg.MaxLeads < 1 || cfg.QuietMinutes < 1 {
-		return cfg, fail("%s: max_leads and quiet_minutes must be at least 1", path)
+		return cfg, fail("max_leads (%s) and quiet_minutes (%s) must be at least 1", user, path)
 	}
 	if cfg.BaseBranch == "" {
 		cfg.BaseBranch = "HEAD"
