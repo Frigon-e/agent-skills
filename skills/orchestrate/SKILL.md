@@ -21,8 +21,10 @@ that builds the Go tool on first use). Always call it by that full path.
    the board after a restart or compaction.
 2. `orch status` shows the leads, their last reports and any open decisions.
 3. When at least one lead is open, keep a watcher running. On Claude Code,
-   run `orch watch` with the Monitor tool (persistent); each line it prints
-   wakes you. On Codex, run `orch watch --timeout 180` in the foreground and
+   run `orch watch` with the Monitor tool; each line it prints wakes you.
+   Monitor stops at its timeout (30 minutes at most), so start it again
+   when it ends while leads are still open; the watcher keeps its place in
+   `watch.json`, so no event is lost or repeated. On Codex, run `orch watch --timeout 180` in the foreground and
    rerun it after each result (exit 124 means nothing happened). The watcher
    exits when no leads are open, so start it again after the next spawn.
 
