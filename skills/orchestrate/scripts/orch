@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# Builds the orch tool from ../tool on first use or after its source changes,
+# then runs it. Agents and hooks always call this wrapper, never the cached
+# binary, so ORCH_SELF and ORCH_SKILL_DIR point back at the skill.
+set -eo pipefail
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+skill="$(dirname "$here")"
+src="$skill/tool"
+bin="${XDG_CACHE_HOME:-$HOME/.cache}/orchestrate/orch"
+if [ ! -x "$bin" ] || [ -n "$(find "$src" -newer "$bin" \( -name '*.go' -o -name go.mod -o -name go.sum \) ! -name '*_test.go' -print -quit)" ]; then
+  command -v go >/dev/null || { echo "orch: building $src needs Go (https://go.dev/dl/)" >&2; exit 1; }
+  mkdir -p "$(dirname "$bin")"
+  (cd "$src" && go build -trimpath -o "$bin.$$" .) >&2
+  mv -f "$bin.$$" "$bin"
+fi
+export ORCH_SELF="$here/orch" ORCH_SKILL_DIR="$skill"
+exec "$bin" "$@"
