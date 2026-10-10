@@ -17,20 +17,21 @@ launch belongs here (that is the user config).
 | `check` | none | The one command the repo's docs name for verifying a change. Leads run it before `done`. |
 | `quiet_minutes` | 30 | Idle minutes before the watcher says `quiet`. Raise it only when normal steps run silent for longer. |
 | `notes` | none | At most 5 one-line notes of 160 characters, printed on the board. orch refuses more. |
+| `locks` | none | At most 5 `name = "when to hold it"` pairs for resources one lead may use at a time (a test VM, a device, a fixed port). Every brief tells the lead to hold each lock for that span; orch makes others wait. |
 
 ## What a note is for
 
 A fact that changes how you split, schedule or brief tasks in this repo,
 and that the repo's own docs don't tell an orchestrator:
 
-- a resource only one lead may use at a time (a test VM, a fixed port, a
-  device, a licence seat);
 - areas that always change together, so one lead owns both;
 - an ordering rule between kinds of task (schema changes merge before the
   API work that reads them).
 
-Write the rule and its reason, so it can be judged later: `run-e2e uses the
-one shared Proxmox VM: one lead at a time`.
+A resource only one lead may use at a time is a `locks` entry, not a note:
+orch enforces it. Write a note as the rule and its reason, so it can be
+judged later: `schema changes merge before the API work that reads them:
+the API tests run against the merged schema`.
 
 Not a note:
 
@@ -75,6 +76,9 @@ ship lead on a mid-tier model that writes the file on its branch. Its Spec:
   none, and say so.
 - `lead_skills`: `route-work`, plus only skills the repo says every change
   needs.
+- `locks`: each resource the repo's docs or tooling say one run at a
+  time may use, held for the whole span that shares state (deploy through
+  reading results, not just the run).
 - `notes`: only what "What a note is for" allows, each found in the
   repo's docs or tooling. None is a fine answer.
 

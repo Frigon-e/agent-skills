@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -126,6 +127,16 @@ func reportBack(dir, id, kind, repo, base, sha string, cfg config, skill string)
 	}
 	if cfg.Check != "" {
 		lines = append(lines, fmt.Sprintf("- Repo check command: `%s`.", cfg.Check))
+	}
+	names := make([]string, 0, len(cfg.Locks))
+	for name := range cfg.Locks {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		lines = append(lines, fmt.Sprintf("- Lock `%s`: hold it %s. Take it with `%s lock acquire %s --dir %s --wait 3600` "+
+			"(run it in the background: it waits for the current holder), release it with `%s lock release %s --dir %s`. "+
+			"Closing your pane also frees it.", name, cfg.Locks[name], me, name, dir, me, name, dir))
 	}
 	return strings.Join(lines, "\n")
 }
@@ -497,6 +508,35 @@ func cmdStatus(a *app, args []string) error {
 	return nil
 }
 
+// cmdDispatch prints the user's rules for which harness and model take
+// which kind of work; pick from them before `orch new`.
+func cmdDispatch(a *app, args []string) error {
+	if _, err := parseArgs(a.flags("dispatch"), args); err != nil {
+		return err
+	}
+	s, err := a.site()
+	if err != nil {
+		return err
+	}
+	if len(s.cfg.Dispatch) == 0 {
+		fmt.Fprintf(a.out, "no dispatch rules in %s: choose by the skill's Model guidance\n", userConfigPath())
+		return nil
+	}
+	fmt.Fprintf(a.out, "dispatch rules (%s), first good fit wins; a list offers choices:\n", userConfigPath())
+	for _, r := range s.cfg.Dispatch {
+		use := make([]string, len(r.Use))
+		for i, p := range r.Use {
+			use[i] = p.String()
+		}
+		line := fmt.Sprintf("- %s -> %s", r.When, strings.Join(use, " | "))
+		if r.Why != "" {
+			line += " (" + r.Why + ")"
+		}
+		fmt.Fprintln(a.out, line)
+	}
+	return nil
+}
+
 func (a *app) board(s site, rows []row) string {
 	live := 0
 	for _, r := range rows {
@@ -518,6 +558,7 @@ func (a *app) board(s site, rows []row) string {
 	for _, n := range s.cfg.Notes {
 		out = append(out, "note: "+n)
 	}
+	out = append(out, a.lockLines()...)
 	if len(rows) == 0 {
 		return strings.Join(append(out, "no tasks yet"), "\n")
 	}
@@ -807,6 +848,9 @@ func cmdClose(a *app, args []string) error {
 	if *force {
 		note += " (forced)"
 	}
+	if freed := releaseLocks(dir); len(freed) > 0 {
+		note += "; released " + strings.Join(freed, ", ")
+	}
 	if err := a.appendStatus(dir, "note", note, "", "orch"); err != nil {
 		return err
 	}
@@ -838,7 +882,7 @@ func cmdConfigCheck(a *app, args []string) error {
 	if rc.QuietMinutes < 1 {
 		return fail("%s: quiet_minutes must be at least 1", path)
 	}
-	fmt.Fprintf(a.out, "ok: %s (%d of %d notes)\n", path, len(rc.Notes), maxNotes)
+	fmt.Fprintf(a.out, "ok: %s (%d of %d notes, %d locks)\n", path, len(rc.Notes), maxNotes, len(rc.Locks))
 	return nil
 }
 

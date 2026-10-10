@@ -24,15 +24,18 @@ Orchestrator:
   orch spawn <id>
   orch send <id> [--resolve KEY] <text...|->
   orch status [--json] [--all]
+  orch dispatch
   orch watch [--interval S] [--timeout S] [--once]
   orch peek <id> [--lines N]
   orch focus <id>
   orch close <id> [--force]
   orch become [--off]
   orch config-check <file>
+  orch lock list | lock release <name> --force
 Lead:
   orch report [--dir D] [--key K] <state> <text...>
   orch inbox [--dir D]
+  orch lock acquire|release <name> [--dir D] [--wait S]
 Hooks:
   orch hook pretool|stop|session-start
 `
@@ -63,12 +66,14 @@ var commands = map[string]func(*app, []string) error{
 	"spawn":        cmdSpawn,
 	"send":         cmdSend,
 	"status":       cmdStatus,
+	"dispatch":     cmdDispatch,
 	"watch":        cmdWatch,
 	"peek":         cmdPeek,
 	"focus":        cmdFocus,
 	"close":        cmdClose,
 	"become":       cmdBecome,
 	"config-check": cmdConfigCheck,
+	"lock":         cmdLock,
 	"report":       cmdReport,
 	"inbox":        cmdInbox,
 	"hook":         cmdHook,

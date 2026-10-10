@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -148,7 +149,8 @@ func setup(t *testing.T) *harness {
 		"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.com",
 		"GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.com",
 		"ORCH_HOME": filepath.Join(tmp, "state"), "ORCH_ROLES_DIR": filepath.Join(tmp, "roles"),
-		"ORCH_CONFIG":       filepath.Join(tmp, "config.toml"),
+		"ORCH_CONFIG":    filepath.Join(tmp, "config.toml"),
+		"ORCH_LOCKS_DIR": filepath.Join(tmp, "locks"), "ORCH_LOCK_POLL_MS": "50",
 		"ORCH_HERDR_CONFIG": filepath.Join(tmp, "none.toml"),
 		"ORCH_SKILL_DIR":    skill, "ORCH_SELF": "/skill/scripts/orch",
 		"HERDR_ENV": "1", "HERDR_WORKSPACE_ID": "w1", "HERDR_PANE_ID": "w1:p0",
@@ -720,6 +722,133 @@ func TestRepoNotes(t *testing.T) {
 	}
 	os.WriteFile(draft, []byte(`notes = ["one VM"]`+"\n"), 0o644)
 	wantContains(t, h.must("config-check", draft), "ok:", "1 of 5 notes")
+}
+
+// A lock gives one lead a shared resource across many steps, and frees when
+// that lead closes or its pane goes away.
+func TestLocks(t *testing.T) {
+	h := setup(t)
+	os.MkdirAll(filepath.Join(h.repo, ".agents"), 0o755)
+	os.WriteFile(filepath.Join(h.repo, ".agents", "orchestrate.toml"),
+		[]byte(`locks = { e2e-vm = "from deploy until you have read the results" }`+"\n"), 0o644)
+	for _, id := range []string{"t1", "t2", "t3"} {
+		h.task(id)
+	}
+	brief, _ := os.ReadFile(filepath.Join(h.dir("t1"), "task.md"))
+	wantContains(t, string(brief), "Lock `e2e-vm`: hold it from deploy until you have read the results",
+		"lock acquire e2e-vm --dir "+h.dir("t1")+" --wait 3600")
+	os.WriteFile(os.Getenv("ORCH_CONFIG"), []byte("max_leads = 5\n"), 0o644)
+	for _, id := range []string{"t1", "t2", "t3"} {
+		h.must("spawn", id)
+	}
+
+	wantContains(t, h.must("lock", "acquire", "e2e-vm", "--dir", h.dir("t1")), "acquired e2e-vm")
+	h.must("lock", "acquire", "e2e-vm", "--dir", h.dir("t1")) // a holder may take it again
+	code, out := h.run("lock", "acquire", "e2e-vm", "--dir", h.dir("t2"))
+	if code != 75 || !strings.Contains(out, "held by t1") {
+		t.Fatalf("second holder: %d %q", code, out)
+	}
+	if code, out := h.run("lock", "release", "e2e-vm", "--dir", h.dir("t2")); code != 1 || !strings.Contains(out, "held by t1") {
+		t.Fatalf("non-holder released: %d %q", code, out)
+	}
+	wantContains(t, h.must("status"), "lock: e2e-vm held by t1")
+
+	// A waiter reports paused, so the board shows why it is idle.
+	code, _ = h.run("lock", "acquire", "e2e-vm", "--dir", h.dir("t2"), "--wait", "1")
+	if code != 75 || !strings.Contains(lastLine(h.dir("t2")), "paused") || !strings.Contains(lastLine(h.dir("t2")), "waiting for lock e2e-vm") {
+		t.Fatalf("waiter: %d, status %q", code, lastLine(h.dir("t2")))
+	}
+
+	// Closing the holder frees the lock.
+	h.must("report", "--dir", h.dir("t1"), "done", "ran e2e")
+	h.must("close", "t1")
+	if !strings.Contains(lastLine(h.dir("t1")), "released e2e-vm") {
+		t.Fatalf("close note: %q", lastLine(h.dir("t1")))
+	}
+	h.must("lock", "acquire", "e2e-vm", "--dir", h.dir("t2"))
+
+	// A holder whose pane died is stale: the next acquire takes over.
+	h.editFake(func(st *fakeState) { delete(st.Panes, h.lead("t2").PaneID) })
+	wantContains(t, h.must("lock", "list"), "held by t2", "stale")
+	h.must("lock", "acquire", "e2e-vm", "--dir", h.dir("t3"))
+	wantContains(t, h.must("lock", "release", "e2e-vm", "--dir", h.dir("t3")), "released e2e-vm")
+	wantContains(t, h.must("lock", "list"), "no locks held")
+
+	// The orchestrator can force a stuck lock free (with the user's agreement).
+	h.must("lock", "acquire", "e2e-vm", "--dir", h.dir("t3"))
+	wantContains(t, h.must("lock", "release", "e2e-vm", "--force"), "released e2e-vm (forced)")
+
+	for _, bad := range []string{`locks = { "E2E VM" = "x" }`, `locks = { vm = "" }`} {
+		os.WriteFile(filepath.Join(h.repo, ".agents", "orchestrate.toml"), []byte(bad+"\n"), 0o644)
+		if code, _ := h.run("status"); code != 1 {
+			t.Errorf("config accepted %s", bad)
+		}
+	}
+}
+
+// Racing takers get exactly one winner.
+func TestLockRace(t *testing.T) {
+	h := setup(t)
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	winners := 0
+	for i := range 12 {
+		dir := filepath.Join(h.tmp, fmt.Sprintf("task%d", i))
+		os.MkdirAll(dir, 0o755)
+		os.WriteFile(filepath.Join(dir, "task.md"), []byte("x"), 0o644)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			held, err := tryLock(lockHolder{Name: "vm", Lead: filepath.Base(dir), Dir: dir})
+			if err != nil {
+				t.Error(err)
+			}
+			if held == nil {
+				mu.Lock()
+				winners++
+				mu.Unlock()
+			}
+		}()
+	}
+	wg.Wait()
+	if winners != 1 {
+		t.Fatalf("%d leads took the lock", winners)
+	}
+}
+
+// Dispatch rules live in the user config only and are printed, not matched.
+func TestDispatchRules(t *testing.T) {
+	h := setup(t)
+	wantContains(t, h.must("dispatch"), "no dispatch rules")
+	os.WriteFile(os.Getenv("ORCH_CONFIG"), []byte(`
+[[dispatch]]
+when = "mechanical edits a test can verify"
+use = [{ harness = "claude", model = "haiku", effort = "low" }]
+why = "cheap and fast"
+
+[[dispatch]]
+when = "large or ambiguous multi-file work"
+use = [{ harness = "claude", model = "opus", effort = "high" }, { harness = "codex", model = "gpt-5.5", effort = "high" }]
+`), 0o644)
+	wantContains(t, h.must("dispatch"),
+		"- mechanical edits a test can verify -> claude haiku low (cheap and fast)",
+		"- large or ambiguous multi-file work -> claude opus high | codex gpt-5.5 high")
+	os.WriteFile(os.Getenv("ORCH_CONFIG"), []byte("[[dispatch]]\nwhen = \"x\"\nuse = [{ harness = \"gemini\", model = \"m\" }]\n"), 0o644)
+	if code, _ := h.run("dispatch"); code != 1 {
+		t.Fatal("unknown harness accepted")
+	}
+	os.Remove(os.Getenv("ORCH_CONFIG"))
+	os.MkdirAll(filepath.Join(h.repo, ".agents"), 0o755)
+	os.WriteFile(filepath.Join(h.repo, ".agents", "orchestrate.toml"), []byte("[[dispatch]]\nwhen = \"x\"\n"), 0o644)
+	if code, out := h.run("dispatch"); code != 1 || !strings.Contains(out, "is not allowed here") {
+		t.Fatalf("repo set dispatch: %d %q", code, out)
+	}
+}
+
+func lastLine(dir string) string {
+	b, _ := os.ReadFile(filepath.Join(dir, "status.log"))
+	lines := strings.Split(strings.TrimSpace(string(b)), "\n")
+	return lines[len(lines)-1]
 }
 
 func TestParseArgsInterspersed(t *testing.T) {

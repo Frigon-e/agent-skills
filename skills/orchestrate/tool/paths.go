@@ -20,6 +20,8 @@ type repoConfig struct {
 	QuietMinutes int      `toml:"quiet_minutes"`
 	// Notes reach the orchestrator on every board, so loadConfig caps them.
 	Notes []string `toml:"notes"`
+	// Locks maps a lock name to when a lead must hold it; every brief says so.
+	Locks map[string]string `toml:"locks"`
 }
 
 const maxNotes, maxNoteLen = 5, 160
@@ -32,6 +34,25 @@ type userConfig struct {
 	MaxLeads   int      `toml:"max_leads"`
 	ClaudeArgs []string `toml:"claude_args"`
 	CodexArgs  []string `toml:"codex_args"`
+	// Dispatch rules say which harness and model suit which work. orch only
+	// prints them; the orchestrator matches them by judgment.
+	Dispatch []dispatchRule `toml:"dispatch"`
+}
+
+type dispatchRule struct {
+	When string    `toml:"when"`
+	Use  []profile `toml:"use"`
+	Why  string    `toml:"why"`
+}
+
+type profile struct {
+	Harness string `toml:"harness"`
+	Model   string `toml:"model"`
+	Effort  string `toml:"effort"`
+}
+
+func (p profile) String() string {
+	return strings.TrimSpace(p.Harness + " " + p.Model + " " + p.Effort)
 }
 
 type config struct {
@@ -134,7 +155,7 @@ func userConfigPath() string {
 	return filepath.Join(envOr("XDG_CONFIG_HOME", expandHome("~/.config")), "orchestrate", "config.toml")
 }
 
-var userKeys = []string{"max_leads", "claude_args", "codex_args"}
+var userKeys = []string{"max_leads", "claude_args", "codex_args", "dispatch"}
 
 // decodeStrict refuses keys v has no field for. A key that belongs in the
 // other file gets a pointer there instead of "unknown key".
@@ -156,7 +177,7 @@ func decodeStrict(path string, v any, otherKeys []string, otherFile string) erro
 	return nil
 }
 
-var repoKeys = []string{"base_branch", "lead_skills", "check", "quiet_minutes", "notes"}
+var repoKeys = []string{"base_branch", "lead_skills", "check", "quiet_minutes", "notes", "locks"}
 
 // readRepoConfig decodes a repo file over the defaults already in rc.
 func readRepoConfig(path string, rc *repoConfig) error {
@@ -169,6 +190,17 @@ func readRepoConfig(path string, rc *repoConfig) error {
 	for _, n := range rc.Notes {
 		if strings.TrimSpace(n) == "" || strings.ContainsAny(n, "\r\n") || utf8.RuneCountInString(n) > maxNoteLen {
 			return fail("%s: each note must be one non-empty line of at most %d characters: %q", path, maxNoteLen, short(n, 40))
+		}
+	}
+	if len(rc.Locks) > maxNotes {
+		return fail("%s: %d locks, at most %d", path, len(rc.Locks), maxNotes)
+	}
+	for name, when := range rc.Locks {
+		if !lockNameRe.MatchString(name) {
+			return fail("%s: lock name %q must be a short lowercase slug", path, name)
+		}
+		if strings.TrimSpace(when) == "" || strings.ContainsAny(when, "\r\n") || utf8.RuneCountInString(when) > maxNoteLen {
+			return fail("%s: lock %s needs one line of at most %d characters saying when to hold it", path, name, maxNoteLen)
 		}
 	}
 	return nil
@@ -189,6 +221,16 @@ func loadConfig(repo string) (config, error) {
 	}
 	if err := decodeStrict(user, &cfg.userConfig, repoKeys, "<repo>/.agents/orchestrate.toml"); err != nil {
 		return cfg, err
+	}
+	for i, r := range cfg.Dispatch {
+		if strings.TrimSpace(r.When) == "" || len(r.Use) == 0 {
+			return cfg, fail("%s: dispatch rule %d needs `when` and at least one `use` profile", user, i+1)
+		}
+		for _, p := range r.Use {
+			if (p.Harness != "claude" && p.Harness != "codex") || p.Model == "" {
+				return cfg, fail("%s: dispatch rule %d: each profile needs harness claude or codex and a model", user, i+1)
+			}
+		}
 	}
 	if cfg.MaxLeads < 1 || cfg.QuietMinutes < 1 {
 		return cfg, fail("max_leads (%s) and quiet_minutes (%s) must be at least 1", user, path)

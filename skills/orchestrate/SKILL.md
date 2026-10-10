@@ -46,11 +46,15 @@ For each user message, decide which of these it is before acting:
   - **Split by deliverable.** Give one lead to each independent deliverable
     with disjoint files. A change and its tests stay together. Don't split
     small work: each lead is a whole session.
-  - **Model.** A lead decides, routes and verifies, so match the model to
-    the judgment the task still needs: the strongest model for planning and
-    unclear root causes, a mid tier for a settled plan (its subagents do the
-    typing), and `default` to inherit the harness config. Use Codex when the
-    user asks for it or the repo is set up for it.
+  - **Harness and model.** Check the user's rules first: `orch dispatch`
+    prints them (first good fit wins; a list offers choices). Without a
+    fitting rule, match the model to the judgment the task still needs: the
+    strongest for planning and unclear root causes, a mid tier for a settled
+    plan (its subagents do the typing), `default` to inherit the harness
+    config. Effort: low for explicit, well-understood work, high or above
+    for ambiguous investigation or design, never max unless the user asks.
+    Claude and Codex leads are interchangeable; families mix by lead, not
+    inside one.
   - **Ask the user first** when the scope or a product decision is theirs.
     Settle technical questions in the brief.
 
@@ -116,14 +120,18 @@ other way.
 - Close each lead's pane once its work is merged or dropped (`orch close`).
   A ship lead removes its own worktree before it reports done after a
   merge; ask it to.
-- Per-repo settings and notes live in `<repo>/.agents/orchestrate.toml`;
-  the board prints the notes, and says when a repo has no file.
+- Per-repo settings, notes and locks live in
+  `<repo>/.agents/orchestrate.toml`; the board prints the notes and held
+  locks, and says when a repo has no file. Each brief tells the lead which
+  locks to hold and when; a lead waiting on one reports `paused`. A lock
+  frees when its lead closes or its pane dies; `orch lock release <name>
+  --force` only with the user's agreement.
   `references/repo-config.md` owns its keys, what a note may hold, when
   to change it (rarely, with evidence and the user's approval) and setup.
   Settings a repo must not control live in
   `~/.config/orchestrate/config.toml`: `max_leads`, `claude_args` and
-  `codex_args` (extra CLI flags for leads). orch refuses them in a repo
-  file, so a commit can't change how leads launch.
+  `codex_args` (extra CLI flags for leads) and `dispatch` rules. orch
+  refuses them in a repo file, so a commit can't change how leads launch.
 - Run state lives next to the repo's Herdr worktrees:
   `<herdr worktrees dir>/<repo>/.orchestrate/<id>/`. It holds task.md,
   lead.json, status.log, inbox/ and report.md. Ship worktrees sit beside
