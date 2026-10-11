@@ -16,7 +16,7 @@ change: easy
 ## Context
 Markdown, 2-3 sentences.
 
-include: diagram.svg
+include: diagram.svg How a question moves from lead to you
 
 ## Options
 ### script: A script makes the page
@@ -50,9 +50,9 @@ in a section is replaced by the rendered file. `relpath` is relative to the
 | Extension | Result |
 |---|---|
 | `.md` | Rendered markdown (raw HTML is dropped). |
-| `.html`, `.svg` | Inserted as is. |
+| `.html` | Inserted after cleaning: scripts, event handlers, form controls, ids and `javascript:` links are removed. Layout, `class` and `style` stay. |
 | `.mmd`, `.mermaid` | Mermaid diagram. |
-| `.png`, `.jpg`, `.jpeg`, `.webp`, `.gif` | Image; alt text is required. |
+| `.svg`, `.png`, `.jpg`, `.jpeg`, `.webp`, `.gif` | Image; alt text is required. An SVG runs no script. |
 
 Limits: the file must resolve (symlinks followed) inside your task directory,
 exist, and be at most 1 MiB. Other extensions are refused.

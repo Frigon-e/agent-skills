@@ -892,7 +892,7 @@ include: ctx.md
 ## Options
 ### script: A script makes the page
 Gain: fast.
-include: diagram.svg
+include: diagram.svg A diagram
 
 ### orch: The orchestrator writes it
 Gain: flexible.
@@ -946,7 +946,7 @@ func TestAsk(t *testing.T) {
 	wantContains(t, out, "index.html", "2 questions", "lavish-axi ", "lavish-axi poll ")
 	page := h.askPage()
 	wantContains(t, page, "Does a script make the page?", "Question for other?", "Recommended", "Change later: hard",
-		"<strong>bold</strong>", `id="inline-svg"`, `src="files/t1-page-shot.png"`, `alt="A screenshot"`,
+		"<strong>bold</strong>", `src="files/t1-page-diagram.svg"`, `alt="A diagram"`, `src="files/t1-page-shot.png"`, `alt="A screenshot"`,
 		`data-lavish-question="t1/page"`, `data-lavish-question="t1/other"`, "Then we go on.", "Some ")
 	if strings.Contains(page, "<b>context") {
 		t.Error("raw markdown HTML was emitted")
@@ -1035,4 +1035,50 @@ func TestRenderMarkdownKeepsLineBreaks(t *testing.T) {
 		t.Fatal(err)
 	}
 	wantContains(t, got, "Gain: a<br>\nCost: b")
+}
+
+// A key from status.log goes into a shell command on the page, so a key
+// that does not match keyRe must never reach data-resolve.
+func TestAskRejectsUnsafeKey(t *testing.T) {
+	h := setup(t)
+	h.task("t1")
+	h.must("spawn", "t1")
+	f, err := os.OpenFile(filepath.Join(h.dir("t1"), "status.log"), os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fmt.Fprintln(f, "needs-decision [key=x; touch pwned]: Pick one?")
+	f.Close()
+	out := h.must("ask")
+	wantContains(t, out, "1 question\n")
+	page := h.askPage()
+	wantContains(t, page, `data-resolve=""`, "keyless-1", "must match")
+	if strings.Contains(page, "touch pwned\"") || strings.Contains(page, `data-key="x;`) {
+		t.Errorf("unsafe key reached the page attributes")
+	}
+}
+
+// Leads can copy outside text into an include, so .html is cleaned and .svg
+// is an <img>, where no script runs.
+func TestAskIncludeSafety(t *testing.T) {
+	h := setup(t)
+	qd := askLead(t, h, "k")
+	writeFiles(t, qd, map[string]string{
+		"k.md": "---\nquestion: Q?\n---\n## Context\ninclude: mock.html\n\ninclude: d.svg A diagram\n",
+		"mock.html": `<div class="card" style="padding: 8px" id="lavish" onclick="x()"><table><tr><td>Cell</td></tr></table>` +
+			`<script>window.lavish.queuePrompt("evil")</script><a href="javascript:x()">link</a>` +
+			`<button>Go</button><input name="note"><form data-lavish-question="t1/k"></form></div>`,
+		"d.svg": `<svg><script>alert(1)</script></svg>`,
+	})
+	h.must("ask")
+	page := h.askPage()
+	wantContains(t, page, `class="card"`, `style="padding: 8px"`, "<td>Cell</td>", `src="files/t1-k-d.svg"`)
+	for _, bad := range []string{`id="lavish"`, "onclick", `queuePrompt("evil")`, "javascript:", "<button>Go", `<input name="note"`, "alert(1)"} {
+		if strings.Contains(page, bad) {
+			t.Errorf("page contains %q", bad)
+		}
+	}
+	if n := strings.Count(page, `data-lavish-question=`); n != 1 {
+		t.Errorf("page has %d answer forms, want 1", n)
+	}
 }

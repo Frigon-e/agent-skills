@@ -4,6 +4,7 @@ import (
 	"bytes"
 	_ "embed"
 	"fmt"
+	"github.com/microcosm-cc/bluemonday"
 	"html"
 	"html/template"
 	"io"
@@ -247,7 +248,7 @@ func (r *renderer) body(text string) (template.HTML, error) {
 	if err := flush(); err != nil {
 		return "", err
 	}
-	// #nosec: markdown went through goldmark without raw HTML; includes are lead output.
+	// #nosec: markdown went through goldmark without raw HTML, and HTML includes went through htmlPolicy.
 	return template.HTML(out.String()), nil
 }
 
@@ -275,7 +276,8 @@ func (r *renderer) include(rel, alt string) (string, error) {
 	}
 	ext := strings.ToLower(filepath.Ext(rel))
 	switch ext {
-	case ".png", ".jpg", ".jpeg", ".webp", ".gif":
+	// SVG goes in as an image: a browser runs no script in an <img>.
+	case ".png", ".jpg", ".jpeg", ".webp", ".gif", ".svg":
 		if alt == "" {
 			return "", fmt.Errorf("%s: include %s needs alt text: include: %s <alt text>", r.cardPath, rel, rel)
 		}
@@ -284,7 +286,7 @@ func (r *renderer) include(rel, alt string) (string, error) {
 			return "", fmt.Errorf("%s: include %s: %v", r.cardPath, rel, err)
 		}
 		return fmt.Sprintf(`<img src="files/%s" alt="%s">`, url.PathEscape(name), html.EscapeString(alt)), nil
-	case ".md", ".html", ".svg", ".mmd", ".mermaid":
+	case ".md", ".html", ".mmd", ".mermaid":
 	default:
 		return "", fmt.Errorf("%s: include %s has an unsupported extension", r.cardPath, rel)
 	}
@@ -299,10 +301,31 @@ func (r *renderer) include(rel, alt string) (string, error) {
 		r.mermaid = true
 		return `<pre class="mermaid">` + html.EscapeString(string(b)) + `</pre>`, nil
 	}
-	// .html and .svg go in raw. They are the lead's own output, trusted the way
-	// its code is; the page runs in Lavish's sandboxed iframe.
-	return string(b), nil
+	// A lead can copy outside text into an include, so HTML is cleaned: no
+	// script, event handler, form control, id or javascript: link.
+	// The wrapper clips the include so its styles cannot draw over the form.
+	return `<div class="include">` + htmlPolicy.Sanitize(string(b)) + `</div>`, nil
 }
+
+// htmlPolicy is an allowlist that keeps layout, tables, lists and inline
+// styles for UI mocks. It allows no id or name, so an include cannot shadow
+// window globals such as window.lavish.
+var htmlPolicy = func() *bluemonday.Policy {
+	p := bluemonday.NewPolicy()
+	p.AllowStandardURLs()
+	p.AllowAttrs("href").OnElements("a")
+	p.RequireNoFollowOnLinks(true)
+	p.AddTargetBlankToFullyQualifiedLinks(true)
+	p.AllowImages()
+	p.AllowLists()
+	p.AllowTables()
+	p.AllowElements("p", "br", "hr", "div", "span", "h1", "h2", "h3", "h4", "h5", "h6",
+		"strong", "em", "b", "i", "u", "s", "small", "sub", "sup", "mark", "kbd", "code", "pre",
+		"blockquote", "figure", "figcaption", "section", "article", "aside", "header", "footer",
+		"nav", "dl", "dt", "dd", "details", "summary")
+	p.AllowAttrs("class", "style", "title", "lang", "role", "aria-label", "aria-hidden").Globally()
+	return p
+}()
 
 // resolveDir maps a lexical path under the unresolved task dir to the resolved one.
 func (r *renderer) resolveDir(p string) string {
@@ -403,14 +426,23 @@ func cmdAsk(a *app, args []string) error {
 		if err != nil {
 			taskReal = ol.dir
 		}
+		// The lead name and key go into a shell command on the page, so only
+		// names that match their patterns are used there.
+		if name := filepath.Base(ol.dir); !taskIDRe.MatchString(name) {
+			fmt.Fprintf(a.errw, "orch: warning: skipped task directory %q: name must match %s\n", name, taskIDRe)
+			continue
+		}
 		keyless := 0
 		for _, e := range openDecisions(readStatus(ol.dir)) {
 			q := askQuestion{ID: fmt.Sprintf("q%d", len(page.Questions)+1), Lead: filepath.Base(ol.dir), Label: e.Key, Resolve: e.Key}
-			if e.Key == "" {
-				keyless++
-				q.Label = fmt.Sprintf("keyless-%d", keyless)
-			}
 			var werr error
+			if !keyRe.MatchString(e.Key) {
+				if e.Key != "" {
+					werr = fmt.Errorf("key %q must match %s; answer it without --resolve", e.Key, keyRe)
+				}
+				keyless++
+				q.Label, q.Resolve = fmt.Sprintf("keyless-%d", keyless), ""
+			}
 			if keyRe.MatchString(e.Key) {
 				cardPath := filepath.Join(ol.dir, "questions", e.Key+".md")
 				if _, err := os.Stat(cardPath); err == nil {
@@ -447,7 +479,11 @@ func cmdAsk(a *app, args []string) error {
 	if len(page.Questions) == 0 {
 		fmt.Fprintln(a.out, "No open questions.")
 	} else {
-		fmt.Fprintf(a.out, "%d questions\n", len(page.Questions))
+		noun := "questions"
+		if len(page.Questions) == 1 {
+			noun = "question"
+		}
+		fmt.Fprintf(a.out, "%d %s\n", len(page.Questions), noun)
 	}
 	fmt.Fprintf(a.out, "Open it: lavish-axi %s\n", path)
 	fmt.Fprintf(a.out, "Wait for answers: lavish-axi poll %s\n", path)
