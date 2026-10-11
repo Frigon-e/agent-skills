@@ -71,6 +71,11 @@ Scope without In/Out, an Authority without its three lines, and
 dependencies that are not done. Then `orch spawn <id>`. Exit 75 means the
 lead cap is reached: queue the task and spawn it when a lead closes.
 
+When a spec with work packages exists (`references/spec-format.md`), run
+`orch plan <spec>` instead of one `orch new` per package. It makes the
+tasks and prints the waves: check and spawn the first wave, then each later
+wave when its dependencies are done.
+
 What makes a brief work (template: `references/task-template.md`):
 - **Intent** in the user's words. The lead falls back on it when the spec
   runs out.

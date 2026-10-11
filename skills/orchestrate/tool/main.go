@@ -20,11 +20,12 @@ const usage = `orch - one orchestrator, one Herdr pane per lead
 
 Orchestrator:
   orch new <id> --kind ship|scout --harness claude|codex --model M --effort E [--base B] [--depends a,b]
+  orch plan <spec> [--dry-run]
   orch check <id>
   orch spawn <id>
   orch send <id> [--resolve KEY] <text...|->
   orch status [--json] [--all]
-  orch ask [--out DIR]
+  orch ask [--cards DIR] [--out DIR]
   orch dispatch
   orch watch [--interval S] [--timeout S] [--once]
   orch peek <id> [--lines N]
@@ -63,6 +64,7 @@ func fail(format string, a ...any) error {
 
 var commands = map[string]func(*app, []string) error{
 	"new":          cmdNew,
+	"plan":         cmdPlan,
 	"check":        cmdCheck,
 	"spawn":        cmdSpawn,
 	"send":         cmdSend,

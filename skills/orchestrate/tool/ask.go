@@ -3,8 +3,8 @@ package main
 import (
 	"bytes"
 	_ "embed"
+	"errors"
 	"fmt"
-	"github.com/microcosm-cc/bluemonday"
 	"html"
 	"html/template"
 	"io"
@@ -12,8 +12,10 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 
+	"github.com/microcosm-cc/bluemonday"
 	"github.com/yuin/goldmark"
 	gmhtml "github.com/yuin/goldmark/renderer/html"
 )
@@ -393,24 +395,39 @@ func buildCard(r *renderer, q *askQuestion) error {
 
 func cmdAsk(a *app, args []string) error {
 	fs := a.flags("ask")
-	outFlag := fs.String("out", "", "write the page to `DIR` (default <run root>/ask)")
+	outFlag := fs.String("out", "", "write the page to `DIR` (default <run root>/ask, or <cards dir>/../ask)")
+	cardsFlag := fs.String("cards", "", "render every card in `DIR` instead of the leads' open decisions")
 	pos, err := parseArgs(fs, args)
 	if err != nil {
 		return err
 	}
-	if err := exactArgs(pos, 0, "ask [--out DIR]"); err != nil {
+	if err := exactArgs(pos, 0, "ask [--cards DIR] [--out DIR]"); err != nil {
 		return err
 	}
-	s, err := a.site()
-	if err != nil {
-		return err
-	}
-	out := filepath.Join(s.root, "ask")
-	if *outFlag != "" {
-		out = expandHome(*outFlag)
-		if !filepath.IsAbs(out) {
-			out = filepath.Join(a.cwd, out)
+	abs := func(p string) string {
+		p = expandHome(p)
+		if !filepath.IsAbs(p) {
+			p = filepath.Join(a.cwd, p)
 		}
+		return filepath.Clean(p)
+	}
+	var out, cardsDir, root string
+	if *cardsFlag != "" {
+		cardsDir = abs(*cardsFlag)
+		if st, err := os.Stat(cardsDir); err != nil || !st.IsDir() {
+			return fail("--cards %s is not a directory", cardsDir)
+		}
+		out = filepath.Join(filepath.Dir(cardsDir), "ask")
+	} else {
+		s, err := a.site()
+		if err != nil {
+			return err
+		}
+		root = s.root
+		out = filepath.Join(root, "ask")
+	}
+	if *outFlag != "" {
+		out = abs(*outFlag)
 	}
 	filesDir := filepath.Join(out, "files")
 	if err := os.RemoveAll(filesDir); err != nil {
@@ -421,49 +438,86 @@ func cmdAsk(a *app, args []string) error {
 	}
 
 	var page askPage
-	for _, ol := range openLeads(s.root) {
+	var warnings []askWarning
+	add := func(q askQuestion, r *renderer, fallback string) {
+		q.ID = fmt.Sprintf("q%d", len(page.Questions)+1)
+		var werr error
+		if r != nil {
+			card := q
+			if werr = buildCard(r, &card); werr == nil {
+				q = card
+				page.Mermaid = page.Mermaid || r.mermaid
+			}
+		}
+		if q.Question == "" {
+			q.Question = fallback
+			q.Context, q.Next, q.Extra, q.Options, q.Change = "", "", nil, nil, ""
+		}
+		if q.Warning != "" && werr == nil {
+			werr = errors.New(q.Warning)
+		}
+		if werr != nil {
+			msg := werr.Error()
+			if r != nil {
+				msg = strings.TrimPrefix(msg, r.cardPath+": ")
+			}
+			q.Warning = msg
+			warnings = append(warnings, askWarning{q.Lead, q.Label, msg})
+		}
+		page.Questions = append(page.Questions, q)
+	}
+
+	if cardsDir != "" {
+		// Each <key>.md in the folder is one open question; a card that is
+		// answered moves to answered/, which this glob does not read.
+		topic := filepath.Dir(cardsDir)
+		topicReal, err := filepath.EvalSymlinks(topic)
+		if err != nil {
+			topicReal = topic
+		}
+		paths, _ := filepath.Glob(filepath.Join(cardsDir, "*.md"))
+		sort.Strings(paths)
+		for _, cardPath := range paths {
+			key := strings.TrimSuffix(filepath.Base(cardPath), ".md")
+			if !keyRe.MatchString(key) {
+				warnings = append(warnings, askWarning{"", filepath.Base(cardPath), fmt.Sprintf("skipped: the name must match %s.md", keyRe)})
+				continue
+			}
+			r := &renderer{key: key, cardPath: cardPath, taskDir: topicReal, rawTaskDir: topic, qDir: cardsDir, filesDir: filesDir}
+			add(askQuestion{Label: key}, r, key)
+		}
+	}
+	var leads []openLead
+	if root != "" {
+		leads = openLeads(root)
+	}
+	for _, ol := range leads {
 		taskReal, err := filepath.EvalSymlinks(ol.dir)
 		if err != nil {
 			taskReal = ol.dir
 		}
 		// The lead name and key go into a shell command on the page, so only
 		// names that match their patterns are used there.
-		if name := filepath.Base(ol.dir); !taskIDRe.MatchString(name) {
-			fmt.Fprintf(a.errw, "orch: warning: skipped task directory %q: name must match %s\n", name, taskIDRe)
+		lead := filepath.Base(ol.dir)
+		if !taskIDRe.MatchString(lead) {
+			warnings = append(warnings, askWarning{"", lead, fmt.Sprintf("skipped task directory: the name must match %s", taskIDRe)})
 			continue
 		}
 		keyless := 0
 		for _, e := range openDecisions(readStatus(ol.dir)) {
-			q := askQuestion{ID: fmt.Sprintf("q%d", len(page.Questions)+1), Lead: filepath.Base(ol.dir), Label: e.Key, Resolve: e.Key}
-			var werr error
+			q := askQuestion{Lead: lead, Label: e.Key, Resolve: e.Key}
+			var r *renderer
 			if !keyRe.MatchString(e.Key) {
 				if e.Key != "" {
-					werr = fmt.Errorf("key %q must match %s; answer it without --resolve", e.Key, keyRe)
+					q.Warning = fmt.Sprintf("key %q must match %s; answer it without --resolve", e.Key, keyRe)
 				}
 				keyless++
 				q.Label, q.Resolve = fmt.Sprintf("keyless-%d", keyless), ""
+			} else if cardPath := filepath.Join(ol.dir, "questions", e.Key+".md"); fileExists(cardPath) {
+				r = &renderer{lead: lead, key: e.Key, cardPath: cardPath, taskDir: taskReal, rawTaskDir: ol.dir,
+					qDir: filepath.Join(ol.dir, "questions"), filesDir: filesDir}
 			}
-			if keyRe.MatchString(e.Key) {
-				cardPath := filepath.Join(ol.dir, "questions", e.Key+".md")
-				if _, err := os.Stat(cardPath); err == nil {
-					r := &renderer{lead: q.Lead, key: e.Key, cardPath: cardPath, taskDir: taskReal, rawTaskDir: ol.dir,
-						qDir: filepath.Join(ol.dir, "questions"), filesDir: filesDir}
-					card := q
-					if werr = buildCard(r, &card); werr == nil {
-						q = card
-						page.Mermaid = page.Mermaid || r.mermaid
-					}
-				}
-			}
-			if q.Question == "" {
-				q.Question = e.Text
-				q.Context, q.Next, q.Extra, q.Options, q.Change = "", "", nil, nil, ""
-			}
-			if werr != nil {
-				q.Warning = werr.Error()
-				fmt.Fprintf(a.errw, "orch: warning: %s/%s: %v\n", q.Lead, q.Label, werr)
-			}
-			page.Questions = append(page.Questions, q)
+			add(q, r, e.Text)
 		}
 	}
 
@@ -475,17 +529,45 @@ func cmdAsk(a *app, args []string) error {
 	if err := writeAtomic(path, buf.Bytes()); err != nil {
 		return err
 	}
-	fmt.Fprintln(a.out, path)
+	// AXI-style output: short key: value lines an agent reads in a few tokens.
+	fmt.Fprintf(a.out, "page: %s\n", path)
+	fmt.Fprintf(a.out, "questions: %d\n", len(page.Questions))
+	if len(warnings) > 0 {
+		fmt.Fprintf(a.out, "warnings[%d]{question,message}:\n", len(warnings))
+		for _, w := range warnings {
+			fmt.Fprintf(a.out, "  %s,%s\n", toonValue(w.id()), toonValue(w.msg))
+		}
+	}
 	if len(page.Questions) == 0 {
 		fmt.Fprintln(a.out, "No open questions.")
-	} else {
-		noun := "questions"
-		if len(page.Questions) == 1 {
-			noun = "question"
-		}
-		fmt.Fprintf(a.out, "%d %s\n", len(page.Questions), noun)
+		return nil
 	}
-	fmt.Fprintf(a.out, "Open it: lavish-axi %s\n", path)
-	fmt.Fprintf(a.out, "Wait for answers: lavish-axi poll %s\n", path)
+	fmt.Fprintln(a.out, "help[2]:")
+	fmt.Fprintf(a.out, "  lavish-axi %s\n", path)
+	fmt.Fprintf(a.out, "  lavish-axi poll %s\n", path)
 	return nil
+}
+
+type askWarning struct{ lead, label, msg string }
+
+func (w askWarning) id() string {
+	if w.lead == "" {
+		return w.label
+	}
+	return w.lead + "/" + w.label
+}
+
+// toonValue quotes a TOON value when it holds a delimiter, a quote or edge
+// spaces.
+func toonValue(v string) string {
+	if v != "" && !strings.ContainsAny(v, ",:\"\\\n") && strings.TrimSpace(v) == v {
+		return v
+	}
+	r := strings.NewReplacer(`\`, `\\`, `"`, `\"`, "\n", `\n`)
+	return `"` + r.Replace(v) + `"`
+}
+
+func fileExists(p string) bool {
+	_, err := os.Stat(p)
+	return err == nil
 }

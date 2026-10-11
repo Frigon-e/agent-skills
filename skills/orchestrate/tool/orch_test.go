@@ -943,7 +943,7 @@ func TestAsk(t *testing.T) {
 		"shot.png": "PNGDATA",
 	})
 	out := h.must("ask")
-	wantContains(t, out, "index.html", "2 questions", "lavish-axi ", "lavish-axi poll ")
+	wantContains(t, out, "page: ", "index.html", "questions: 2\n", "help[2]:", "  lavish-axi ", "  lavish-axi poll ")
 	page := h.askPage()
 	wantContains(t, page, "Does a script make the page?", "Question for other?", "Recommended", "Change later: hard",
 		"<strong>bold</strong>", `src="files/t1-page-diagram.svg"`, `alt="A diagram"`, `src="files/t1-page-shot.png"`, `alt="A screenshot"`,
@@ -993,7 +993,7 @@ func TestAskRefusals(t *testing.T) {
 			if code != 0 {
 				t.Fatalf("exit %d: %s", code, out)
 			}
-			wantContains(t, out, "warning: t1/k", c.want)
+			wantContains(t, out, "t1/k,", c.want)
 			page := h.askPage()
 			wantContains(t, page, "Question for k?", "Warning: ", `data-lavish-question="t1/k"`)
 			if strings.Contains(page, "SECRET") {
@@ -1050,7 +1050,7 @@ func TestAskRejectsUnsafeKey(t *testing.T) {
 	fmt.Fprintln(f, "needs-decision [key=x; touch pwned]: Pick one?")
 	f.Close()
 	out := h.must("ask")
-	wantContains(t, out, "1 question\n")
+	wantContains(t, out, "questions: 1\n")
 	page := h.askPage()
 	wantContains(t, page, `data-resolve=""`, "keyless-1", "must match")
 	if strings.Contains(page, "touch pwned\"") || strings.Contains(page, `data-key="x;`) {
@@ -1081,4 +1081,201 @@ func TestAskIncludeSafety(t *testing.T) {
 	if n := strings.Count(page, `data-lavish-question=`); n != 1 {
 		t.Errorf("page has %d answer forms, want 1", n)
 	}
+}
+
+// --cards renders a folder of cards with no orchestrate run: no lead, no
+// orch send line, answered/ ignored, includes confined to the topic folder.
+func TestAskCards(t *testing.T) {
+	h := setup(t)
+	topic := filepath.Join(h.tmp, "brainstorm", "pages")
+	qd := filepath.Join(topic, "questions")
+	if err := os.MkdirAll(filepath.Join(qd, "answered"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFiles(t, topic, map[string]string{"map.md": "Idea **map**.\n"})
+	writeFiles(t, qd, map[string]string{
+		"b-pick.md":       "---\nquestion: Pick one?\nrecommend: x\n---\n## Context\ninclude: ../map.md\n\n## Options\n### x: Ex\nGain: a.\n\n### y: Why\nGain: b.\n",
+		"a-out.md":        "---\nquestion: Out?\n---\n## Context\ninclude: ../../secret.md\n",
+		"Bad Name.md":     "---\nquestion: Skipped?\n---\n",
+		"answered/old.md": "---\nquestion: Old?\n---\n",
+	})
+	writeFiles(t, filepath.Dir(topic), map[string]string{"secret.md": "SECRET"})
+	out := h.must("ask", "--cards", qd)
+	page, err := os.ReadFile(filepath.Join(topic, "ask", "index.html"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantContains(t, out, "page: "+filepath.Join(topic, "ask", "index.html"), "questions: 2\n", "a-out,", "outside the task directory", "Bad Name.md,")
+	wantContains(t, string(page), "Pick one?", "Idea <strong>map</strong>.", `data-lavish-question="b-pick"`, `data-lead=""`, "Answer for question ")
+	for _, bad := range []string{"SECRET", "Old?", "Skipped?", `data-lavish-question="/`} {
+		if strings.Contains(string(page), bad) {
+			t.Errorf("page contains %q", bad)
+		}
+	}
+	if strings.Index(string(page), "Out?") > strings.Index(string(page), "Pick one?") {
+		t.Error("cards are not in file name order")
+	}
+	if code, out := h.run("ask", "--cards", filepath.Join(h.tmp, "nope")); code == 0 || !strings.Contains(out, "is not a directory") {
+		t.Errorf("missing --cards dir: exit %d, %s", code, out)
+	}
+}
+
+const planHeader = "---\nharness: claude\nmodel: sonnet\neffort: medium\nbase: main\n---\n# Transfer queue\n\n## Behaviour\nUsers queue transfers.\n\n## Design rules\nOne queue per panel.\n\n## Authority\nMay decide: names\nMust escalate: API shape\nNever: push\n\n## Packages\n\n"
+
+const planTail = "\n## Open questions\nNone.\n"
+
+func planPkg(id, keys, extra string) string {
+	return "### " + id + ": Package " + id + "\n" + keys + "\n\nBuild " + id + ".\n\n#### Acceptance\nTests for " + id + " pass." + extra + "\n\n"
+}
+
+func (h *harness) git(args ...string) {
+	h.t.Helper()
+	if out, err := exec.Command("git", append([]string{"-C", h.repo}, args...)...).CombinedOutput(); err != nil {
+		h.t.Fatalf("git %v: %v\n%s", args, err, out)
+	}
+}
+
+func (h *harness) commitSpec(body string) {
+	h.t.Helper()
+	writeFiles(h.t, h.repo, map[string]string{"spec.md": body})
+	h.git("add", "spec.md")
+	h.git("commit", "-q", "-m", "spec")
+}
+
+func (h *harness) planRefused(want ...string) {
+	h.t.Helper()
+	code, out := h.run("plan", "spec.md")
+	if code != 1 {
+		h.t.Fatalf("plan exited %d, want 1:\n%s", code, out)
+	}
+	wantContains(h.t, out, append([]string{"problems[", "nothing was created"}, want...)...)
+	if entries, _ := os.ReadDir(filepath.Join(h.tmp, "state", "repo")); len(entries) > 0 {
+		h.t.Fatalf("refused plan created tasks: %v", entries)
+	}
+}
+
+func threePkgSpec() string {
+	return planHeader +
+		planPkg("store", "kind: ship\nmodel: haiku\nowns: internal/store.go, migrations/", "") +
+		planPkg("api", "kind: ship\ndepends: store\nowns: internal/api.go", "") +
+		planPkg("docs", "kind: scout\ndepends: api, store", "") +
+		planTail
+}
+
+func TestPlan(t *testing.T) {
+	h := setup(t)
+	h.commitSpec(threePkgSpec())
+	out := h.must("plan", "spec.md")
+	wantContains(t, out, "spec: spec.md", "packages: 3", "tasks[3]{id,kind,model,depends,status}:",
+		"  store,ship,haiku,,created", "  api,ship,sonnet,store,created", "  docs,scout,sonnet,api store,created",
+		"waves[3]:", "  store\n  api\n  docs\n", "orch check <id>")
+	for _, id := range []string{"store", "api", "docs"} {
+		fm, _, err := readTask(filepath.Join(h.dir(id), "task.md"))
+		if err != nil || fm["spec"] != "spec.md#"+id {
+			t.Fatalf("%s: spec = %q, err %v", id, fm["spec"], err)
+		}
+	}
+	b, _ := os.ReadFile(filepath.Join(h.dir("api"), "task.md"))
+	text := string(b)
+	wantContains(t, text, "id: api\nspec: spec.md#api\n", "depends_on: [store]", "effort: medium",
+		"Transfer queue: Package api. The whole feature is in `spec.md`",
+		"In: internal/api.go\nOut: files owned by other packages of this spec: internal/store.go, migrations/\n",
+		"`spec.md` ### api - this package", "Build api.", "Tests for api pass.",
+		"May decide: names\nMust escalate: API shape\nNever: push")
+	if strings.Contains(text, "{{") {
+		t.Errorf("placeholders left:\n%s", text)
+	}
+	if b, _ := os.ReadFile(filepath.Join(h.dir("docs"), "task.md")); !strings.Contains(string(b), "In: research only, no repo edits") {
+		t.Errorf("scout scope wrong:\n%s", b)
+	}
+	problems, _, err := checkTask(h.a.siteRoot(t), "store")
+	if err != nil || len(problems) != 0 {
+		t.Errorf("store should pass check: %v %v", problems, err)
+	}
+	problems, _, _ = checkTask(h.a.siteRoot(t), "api")
+	if len(problems) != 1 || !strings.Contains(problems[0], `depends_on: "store" is not done yet`) {
+		t.Errorf("api should only wait on store: %v", problems)
+	}
+}
+
+func (a *app) siteRoot(t *testing.T) string {
+	t.Helper()
+	s, err := a.site()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return s.root
+}
+
+func TestPlanRerunAndDryRun(t *testing.T) {
+	h := setup(t)
+	h.commitSpec(threePkgSpec())
+	dry := h.must("plan", "spec.md", "--dry-run")
+	wantContains(t, dry, "  store,ship,haiku,,would-create", "  docs,scout,sonnet,api store,would-create")
+	if _, err := os.Stat(filepath.Join(h.tmp, "state", "repo")); err == nil {
+		t.Fatal("dry run created the run directory")
+	}
+	h.must("plan", "spec.md")
+	before, _ := os.ReadFile(filepath.Join(h.dir("api"), "task.md"))
+	out := h.must("plan", "spec.md")
+	if strings.Contains(out, "created") || strings.Count(out, ",exists") != 3 {
+		t.Errorf("rerun should only report exists:\n%s", out)
+	}
+	if after, _ := os.ReadFile(filepath.Join(h.dir("api"), "task.md")); !bytes.Equal(before, after) {
+		t.Error("rerun rewrote task.md")
+	}
+	h.commitSpec(strings.TrimSuffix(threePkgSpec(), planTail) + planPkg("extra", "kind: ship\nowns: internal/extra.go", "") + planTail)
+	out = h.must("plan", "spec.md")
+	wantContains(t, out, "packages: 4", "  extra,ship,sonnet,,created")
+	if strings.Count(out, ",exists") != 3 {
+		t.Errorf("want 3 existing:\n%s", out)
+	}
+}
+
+func TestPlanRefusals(t *testing.T) {
+	pkgs := func(ps ...string) string { return planHeader + strings.Join(ps, "") + planTail }
+	a := planPkg("alpha", "kind: ship\nowns: internal/", "")
+	cases := []struct {
+		name, spec string
+		want       []string
+	}{
+		{"open questions", strings.Replace(pkgs(a), "None.", "Which db?", 1), []string{"open questions"}},
+		{"overlap", pkgs(a, planPkg("beta", "kind: ship\nowns: ./internal/x.go", "")), []string{"ownership overlap: alpha owns", "beta owns"}},
+		{"unknown depends", pkgs(planPkg("alpha", "kind: ship\nowns: a.go\ndepends: ghost", "")), []string{"ghost", "which is not a package of this spec"}},
+		{"cycle", pkgs(planPkg("alpha", "kind: ship\nowns: a.go\ndepends: beta", ""), planPkg("beta", "kind: ship\nowns: b.go\ndepends: alpha", "")), []string{"dependency cycle among: alpha beta"}},
+		{"no acceptance", pkgs("### alpha: A\nkind: ship\nowns: a.go\n\nBody.\n\n"), []string{"package alpha: needs a non-empty `#### Acceptance`"}},
+		{"no owns and bad kind", pkgs(planPkg("alpha", "kind: ship", ""), planPkg("beta", "kind: odd\nwat: 1", "")), []string{"needs `owns:`", "kind must be ship or scout", "unknown key"}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			h := setup(t)
+			h.commitSpec(c.spec)
+			h.planRefused(c.want...)
+		})
+	}
+
+	t.Run("not committed", func(t *testing.T) {
+		h := setup(t)
+		writeFiles(t, h.repo, map[string]string{"spec.md": pkgs(a)})
+		h.planRefused("commit the spec to main first")
+	})
+	t.Run("uncommitted edits", func(t *testing.T) {
+		h := setup(t)
+		h.commitSpec(pkgs(a))
+		writeFiles(t, h.repo, map[string]string{"spec.md": pkgs(a) + "more\n"})
+		h.planRefused("spec has changes not in main")
+	})
+	t.Run("id clash", func(t *testing.T) {
+		h := setup(t)
+		h.commitSpec(pkgs(a))
+		h.task("alpha")
+		code, out := h.run("plan", "spec.md")
+		if code != 1 {
+			t.Fatalf("exit %d:\n%s", code, out)
+		}
+		wantContains(t, out, "task id alpha is already used by another task", "nothing was created")
+		if b, _ := os.ReadFile(filepath.Join(h.dir("alpha"), "task.md")); !strings.Contains(string(b), "filled in") {
+			t.Error("existing task was rewritten")
+		}
+	})
 }

@@ -9,13 +9,13 @@
   color-scheme: light dark;
   --bg: #ffffff; --fg: #1a1a1a; --muted: #4d4d4d; --border: #767676;
   --card: #f5f6f8; --accent: #0b5cad; --accent-fg: #ffffff;
-  --warn-bg: #fff4d6; --warn-fg: #5c3d00; --badge-bg: #e4e8ee;
+  --warn-bg: #fff4d6; --warn-fg: #5c3d00; --badge-bg: #e4e8ee; --rule: #d3d7dd;
 }
 @media (prefers-color-scheme: dark) {
   :root {
     --bg: #121316; --fg: #ececee; --muted: #b8b8c0; --border: #8d8d96;
     --card: #1c1e23; --accent: #7ab4ff; --accent-fg: #0a0a0c;
-    --warn-bg: #3a2d08; --warn-fg: #ffe3a3; --badge-bg: #2b2f38;
+    --warn-bg: #3a2d08; --warn-fg: #ffe3a3; --badge-bg: #2b2f38; --rule: #34373f;
   }
 }
 * { box-sizing: border-box; min-width: 0; }
@@ -37,15 +37,23 @@ img, svg, video { max-width: 100%; height: auto; }
 pre { overflow-x: auto; max-width: 100%; padding: 8px; background: var(--bg); border: 1px solid var(--border); border-radius: 4px; }
 code { overflow-wrap: anywhere; }
 .include { contain: paint; overflow: auto; }
+table { border-collapse: collapse; margin: 8px 0; }
+th, td { border: 1px solid var(--border); padding: 6px 10px; text-align: left; vertical-align: top; }
+th { background: var(--badge-bg); }
 pre.mermaid { background: transparent; border: 0; }
 form { margin: 16px 0 0; }
 fieldset { border: 1px solid var(--border); border-radius: 6px; margin: 0 0 12px; padding: 8px 12px 12px; }
 legend { padding: 0 4px; font-weight: 600; }
-.opt { margin: 8px 0; }
+.opt { padding: 12px 0; }
+.opt + .opt { border-top: 1px solid var(--rule); }
+.opt-head { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; }
 .opt label { font-weight: 600; }
-.opt input[type=radio] { margin-right: 8px; }
+.opt label .rec { margin-left: 8px; }
+.opt input[type=radio] { width: 20px; height: 20px; margin: 0; accent-color: var(--accent); flex: none; }
 .opt .body { margin: 4px 0 0 28px; }
-.rec { font-size: 0.875rem; font-weight: 600; color: var(--accent); margin-left: 8px; }
+.opt .body > :first-child { margin-top: 0; }
+.opt .body > :last-child { margin-bottom: 0; }
+.rec { font-size: 0.875rem; font-weight: 600; color: var(--accent); }
 label.note { display: block; font-weight: 600; margin: 0 0 4px; }
 textarea { width: 100%; min-height: 80px; font: inherit; color: var(--fg); background: var(--bg); border: 1px solid var(--border); border-radius: 4px; padding: 8px; }
 button { font: inherit; font-weight: 600; background: var(--accent); color: var(--accent-fg); border: 2px solid var(--accent); border-radius: 6px; padding: 8px 16px; margin-top: 12px; cursor: pointer; }
@@ -61,19 +69,19 @@ a { color: var(--accent); }
 {{else}}<p class="lead-in">No open questions.</p>
 {{end}}
 {{range $q := .Questions}}<section class="q" aria-labelledby="{{.ID}}-h">
-<div class="meta"><span>{{.Lead}} / {{.Label}}</span>{{if .Change}}<span class="badge">Change later: {{.Change}}</span>{{end}}</div>
+<div class="meta"><span>{{if .Lead}}{{.Lead}} / {{end}}{{.Label}}</span>{{if .Change}}<span class="badge">Change later: {{.Change}}</span>{{end}}</div>
 <h2 id="{{.ID}}-h">{{.Question}}</h2>
 {{if .Warning}}<p class="warn" role="alert">Warning: {{.Warning}}</p>
 {{end}}{{if .Context}}<h3>Context</h3>
 {{.Context}}
 {{end}}{{range .Extra}}<h3>{{.Title}}</h3>
 {{.Body}}
-{{end}}<form data-lavish-question="{{.Lead}}/{{.Label}}" data-lead="{{.Lead}}" data-key="{{.Label}}" data-resolve="{{.Resolve}}">
+{{end}}<form data-lavish-question="{{if .Lead}}{{.Lead}}/{{end}}{{.Label}}" data-lead="{{.Lead}}" data-key="{{.Label}}" data-resolve="{{.Resolve}}">
 <fieldset>
 <legend>{{if .Options}}Your answer{{else}}Your answer (free text){{end}}</legend>
 {{range $o := .Options}}<div class="opt">
-<input type="radio" name="{{$q.ID}}-choice" id="{{$q.ID}}-{{$o.ID}}" value="{{$o.ID}}" data-label="{{$o.Label}}" required>
-<label for="{{$q.ID}}-{{$o.ID}}">{{$o.Label}}</label>{{if $o.Recommended}}<span class="rec">Recommended</span>{{end}}
+<div class="opt-head"><input type="radio" name="{{$q.ID}}-choice" id="{{$q.ID}}-{{$o.ID}}" value="{{$o.ID}}" data-label="{{$o.Label}}" required>
+<label for="{{$q.ID}}-{{$o.ID}}">{{$o.Label}}{{if $o.Recommended}}<span class="rec">Recommended</span>{{end}}</label></div>
 <div class="body">{{$o.Body}}</div>
 </div>
 {{end}}{{if .Options}}<label class="note" for="{{.ID}}-note">Note (optional)</label>
@@ -108,14 +116,15 @@ function queueAnswer(ev) {
     label = note; answer = note;
   }
   var q = '"' + (answer + (hasOptions && note ? '. Note: ' + note : '')).replace(/([\\"$`])/g, '\\$1') + '"';
-  var send = 'orch send ' + d.lead + (d.resolve ? ' --resolve ' + d.resolve : '') + ' ' + q;
-  var text = 'Answer for lead ' + d.lead + ', decision ' + d.key + ': ' + label +
-    (hasOptions ? ' (' + option + '). Note: ' + (note || 'none') : '') +
-    '. Send it with: ' + send;
+  var text = (d.lead ? 'Answer for lead ' + d.lead + ', decision ' : 'Answer for question ') + d.key + ': ' + label +
+    (hasOptions ? ' (' + option + '). Note: ' + (note || 'none') : '');
+  // A lead's question carries the command that sends the answer back to it.
+  if (d.lead) text += '. Send it with: orch send ' + d.lead + (d.resolve ? ' --resolve ' + d.resolve : '') + ' ' + q;
+  var who = d.lead ? d.lead + '/' + d.key : d.key;
   if (window.lavish && window.lavish.queuePrompt) {
     window.lavish.queuePrompt(text, {
-      tag: 'decision', text: d.lead + '/' + d.key + ': ' + label, element: form,
-      queueKey: d.lead + '/' + d.key, data: {lead: d.lead, key: d.key, option: option, note: note}
+      tag: 'decision', text: who + ': ' + label, element: form,
+      queueKey: who, data: {lead: d.lead, key: d.key, option: option, note: note}
     });
     status.textContent = 'Queued. Press Send to Agent when you are done.';
   } else {

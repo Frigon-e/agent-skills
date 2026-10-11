@@ -32,75 +32,115 @@ func cmdNew(a *app, args []string) error {
 	if err := exactArgs(pos, 1, "new <id> --kind ship|scout --harness claude|codex --model M --effort E"); err != nil {
 		return err
 	}
-	switch {
-	case *kind != "ship" && *kind != "scout":
-		return fail("--kind must be ship or scout")
-	case *harness != "claude" && *harness != "codex":
-		return fail("--harness must be claude or codex")
-	case *model == "" || *effort == "":
-		return fail("--model and --effort are required (use `default` to inherit)")
-	}
-	id := pos[0]
 	s, err := a.site()
 	if err != nil {
 		return err
 	}
-	dir, err := taskDir(s.root, id)
-	if err != nil {
-		return err
-	}
-	path := filepath.Join(dir, "task.md")
-	if _, err := os.Stat(path); err == nil {
-		return fail("%s already exists; edit it instead", path)
-	}
-	baseBranch := s.cfg.BaseBranch
-	if *base != "" {
-		baseBranch = *base
-	}
-	if strings.HasPrefix(baseBranch, "-") {
-		return fail("base %q is not a branch or commit", baseBranch)
-	}
-	sha, err := git(s.repo, "rev-parse", "--verify", "--quiet", "--short=12", baseBranch+"^{commit}")
-	if err != nil || sha == "" {
-		return fail("base %q does not resolve in %s", baseBranch, s.repo)
-	}
 	var depList []string
 	for _, d := range strings.Split(*deps, ",") {
-		if d = strings.TrimSpace(d); d == "" {
-			continue
+		if d = strings.TrimSpace(d); d != "" {
+			depList = append(depList, d)
 		}
-		if !taskIDRe.MatchString(d) {
-			return fail("--depends: %q is not a task id", d)
-		}
-		depList = append(depList, d)
 	}
-	skill, err := skillDir()
+	path, err := newTask(s, taskOpts{id: pos[0], kind: *kind, harness: *harness, model: *model, effort: *effort, base: *base, deps: depList})
 	if err != nil {
-		return err
-	}
-	tmpl, err := os.ReadFile(filepath.Join(skill, "references", "task-template.md"))
-	if err != nil {
-		return err
-	}
-	if err := os.MkdirAll(filepath.Join(dir, "inbox", "handled"), 0o755); err != nil {
-		return err
-	}
-	text := strings.NewReplacer(
-		"@@ID@@", id,
-		"@@KIND@@", *kind,
-		"@@REPO@@", s.repo,
-		"@@BASE@@", baseBranch+"@"+sha,
-		"@@HARNESS@@", *harness,
-		"@@MODEL@@", *model,
-		"@@EFFORT@@", *effort,
-		"@@DEPENDS@@", strings.Join(depList, ", "),
-		"@@REPORT_BACK@@", reportBack(dir, id, *kind, s.repo, baseBranch, sha, s.cfg, skill),
-	).Replace(string(tmpl))
-	if err := os.WriteFile(path, []byte(text), 0o644); err != nil {
 		return err
 	}
 	fmt.Fprintln(a.out, path)
 	return nil
+}
+
+// taskOpts describes one task.md to scaffold. fill replaces the body of the
+// named `# Section` of the template; spec, when set, adds a `spec:` line.
+type taskOpts struct {
+	id, kind, harness, model, effort, base string
+	deps                                   []string
+	fill                                   map[string]string
+	spec                                   string
+}
+
+// newTask scaffolds task.md for one task and returns its path.
+func newTask(s site, o taskOpts) (string, error) {
+	switch {
+	case o.kind != "ship" && o.kind != "scout":
+		return "", fail("--kind must be ship or scout")
+	case o.harness != "claude" && o.harness != "codex":
+		return "", fail("--harness must be claude or codex")
+	case o.model == "" || o.effort == "":
+		return "", fail("--model and --effort are required (use `default` to inherit)")
+	}
+	id := o.id
+	dir, err := taskDir(s.root, id)
+	if err != nil {
+		return "", err
+	}
+	path := filepath.Join(dir, "task.md")
+	if _, err := os.Stat(path); err == nil {
+		return "", fail("%s already exists; edit it instead", path)
+	}
+	baseBranch := s.cfg.BaseBranch
+	if o.base != "" {
+		baseBranch = o.base
+	}
+	if strings.HasPrefix(baseBranch, "-") {
+		return "", fail("base %q is not a branch or commit", baseBranch)
+	}
+	sha, err := git(s.repo, "rev-parse", "--verify", "--quiet", "--short=12", baseBranch+"^{commit}")
+	if err != nil || sha == "" {
+		return "", fail("base %q does not resolve in %s", baseBranch, s.repo)
+	}
+	for _, d := range o.deps {
+		if !taskIDRe.MatchString(d) {
+			return "", fail("--depends: %q is not a task id", d)
+		}
+	}
+	skill, err := skillDir()
+	if err != nil {
+		return "", err
+	}
+	tmpl, err := os.ReadFile(filepath.Join(skill, "references", "task-template.md"))
+	if err != nil {
+		return "", err
+	}
+	if err := os.MkdirAll(filepath.Join(dir, "inbox", "handled"), 0o755); err != nil {
+		return "", err
+	}
+	text := strings.NewReplacer(
+		"@@ID@@", id,
+		"@@KIND@@", o.kind,
+		"@@REPO@@", s.repo,
+		"@@BASE@@", baseBranch+"@"+sha,
+		"@@HARNESS@@", o.harness,
+		"@@MODEL@@", o.model,
+		"@@EFFORT@@", o.effort,
+		"@@DEPENDS@@", strings.Join(o.deps, ", "),
+		"@@REPORT_BACK@@", reportBack(dir, id, o.kind, s.repo, baseBranch, sha, s.cfg, skill),
+	).Replace(string(tmpl))
+	if o.spec != "" {
+		text = strings.Replace(text, "id: "+id+"\n", "id: "+id+"\nspec: "+o.spec+"\n", 1)
+	}
+	for name, body := range o.fill {
+		text = fillSection(text, name, body)
+	}
+	if err := os.WriteFile(path, []byte(text), 0o644); err != nil {
+		return "", err
+	}
+	return path, nil
+}
+
+// fillSection swaps the body of `# name` for body.
+func fillSection(text, name, body string) string {
+	head := "\n# " + name + "\n\n"
+	i := strings.Index(text, head)
+	if i < 0 {
+		return text
+	}
+	start := i + len(head)
+	end := len(text)
+	if j := strings.Index(text[start:], "\n# "); j >= 0 {
+		end = start + j
+	}
+	return text[:start] + body + "\n" + text[end:]
 }
 
 // reportBack is the generated section that tells a lead how to talk back.
