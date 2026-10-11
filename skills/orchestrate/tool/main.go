@@ -24,6 +24,7 @@ Orchestrator:
   orch spawn <id>
   orch send <id> [--resolve KEY] <text...|->
   orch status [--json] [--all]
+  orch ask [--out DIR]
   orch dispatch
   orch watch [--interval S] [--timeout S] [--once]
   orch peek <id> [--lines N]
@@ -66,6 +67,7 @@ var commands = map[string]func(*app, []string) error{
 	"spawn":        cmdSpawn,
 	"send":         cmdSend,
 	"status":       cmdStatus,
+	"ask":          cmdAsk,
 	"dispatch":     cmdDispatch,
 	"watch":        cmdWatch,
 	"peek":         cmdPeek,

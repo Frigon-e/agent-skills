@@ -35,7 +35,7 @@ One line per state change: `orch report [--key <slug>] <state> "<line>"`.
 | State | When |
 |---|---|
 | `working` | Starting, resuming after a message, or ending a turn while waiting on your own subagents (say on what). |
-| `needs-decision` | Something only the orchestrator or user can settle. Give a `--key`, state the options and your recommendation, then keep going on parts it doesn't block. |
+| `needs-decision` | Something only the orchestrator or user can settle. Write a question card (`question-card` skill) to `questions/<key>.md` in your task directory in the format of `references/question-file.md`, report with that `--key` and the question as the line, then keep going on parts it doesn't block. |
 | `blocked` | You can't continue at all. Say what would unblock you. |
 | `paused` | You were told to stop, or you are waiting on another task. |
 | `done` | Acceptance is met. Ship: branch, head sha, and the check command with its result. Scout: the report path and a one-line answer. |

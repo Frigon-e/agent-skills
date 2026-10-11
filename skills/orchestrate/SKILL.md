@@ -109,6 +109,14 @@ other way.
 - Report each lead in one line, with an outcome and its evidence. Never
   paste a lead's output.
 - Ask questions in one batch, and say which lead is waiting on each.
+  Show each one as a question card (`question-card` skill); a lead's card
+  is in its task directory at `questions/<key>.md`.
+- With two or more open questions, or any card with options or visuals, run
+  `orch ask`, open the page with `lavish-axi <page>`, and wait with
+  `lavish-axi poll <page>` under Monitor (Claude Code) or in the foreground
+  (Codex). Each answer arrives with its `orch send ... --resolve` line; send
+  it, then rerun `orch ask` so answered questions leave the page. A single
+  yes-or-no question stays in chat. Never run `lavish-axi share`.
 - Before closing a lead whose work isn't done, before force-closing, and
   before anything that pushes or merges, ask.
 

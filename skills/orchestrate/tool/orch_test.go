@@ -878,3 +878,161 @@ func TestOpenDecisions(t *testing.T) {
 		t.Fatalf("lead moving on should close only keyless decisions: %+v", got)
 	}
 }
+
+const askCard = `---
+question: Does a script make the page?
+recommend: orch
+change: hard
+---
+## Context
+Some <b>context</b> here.
+
+include: ctx.md
+
+## Options
+### script: A script makes the page
+Gain: fast.
+include: diagram.svg
+
+### orch: The orchestrator writes it
+Gain: flexible.
+include: shot.png A screenshot
+
+## Next
+Then we go on.
+`
+
+// askLead spawns a lead t1 with the given open decisions and returns its questions dir.
+func askLead(t *testing.T, h *harness, keys ...string) string {
+	t.Helper()
+	h.task("t1")
+	h.must("spawn", "t1")
+	for _, k := range keys {
+		h.must("report", "--dir", h.dir("t1"), "--key", k, "needs-decision", "Question for "+k+"?")
+	}
+	qd := filepath.Join(h.dir("t1"), "questions")
+	if err := os.MkdirAll(qd, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return qd
+}
+
+func writeFiles(t *testing.T, dir string, files map[string]string) {
+	t.Helper()
+	for name, body := range files {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func (h *harness) askPage() string {
+	h.t.Helper()
+	b, err := os.ReadFile(filepath.Join(h.tmp, "state", "repo", "ask", "index.html"))
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	return string(b)
+}
+
+func TestAsk(t *testing.T) {
+	h := setup(t)
+	qd := askLead(t, h, "page", "other")
+	writeFiles(t, qd, map[string]string{
+		"page.md": askCard, "ctx.md": "Included **bold** text.\n", "diagram.svg": `<svg id="inline-svg"></svg>`,
+		"shot.png": "PNGDATA",
+	})
+	out := h.must("ask")
+	wantContains(t, out, "index.html", "2 questions", "lavish-axi ", "lavish-axi poll ")
+	page := h.askPage()
+	wantContains(t, page, "Does a script make the page?", "Question for other?", "Recommended", "Change later: hard",
+		"<strong>bold</strong>", `id="inline-svg"`, `src="files/t1-page-shot.png"`, `alt="A screenshot"`,
+		`data-lavish-question="t1/page"`, `data-lavish-question="t1/other"`, "Then we go on.", "Some ")
+	if strings.Contains(page, "<b>context") {
+		t.Error("raw markdown HTML was emitted")
+	}
+	if strings.Index(page, "The orchestrator writes it") > strings.Index(page, "A script makes the page") {
+		t.Error("recommended option is not first")
+	}
+	if b, err := os.ReadFile(filepath.Join(h.tmp, "state", "repo", "ask", "files", "t1-page-shot.png")); err != nil || string(b) != "PNGDATA" {
+		t.Errorf("png not copied: %v", err)
+	}
+	h.must("send", "t1", "--resolve", "page", "go")
+	h.must("ask")
+	page = h.askPage()
+	if strings.Contains(page, "Does a script make the page?") || !strings.Contains(page, "Question for other?") {
+		t.Errorf("resolved question should leave the page:\n%s", page)
+	}
+	if _, err := os.Stat(filepath.Join(h.tmp, "state", "repo", "ask", "files", "t1-page-shot.png")); err == nil {
+		t.Error("files/ should be rebuilt without the resolved png")
+	}
+}
+
+func TestAskRefusals(t *testing.T) {
+	cases := map[string]struct{ card, want string }{
+		"outside":   {"---\nquestion: Q one?\n---\n## Context\ninclude: ../../x.svg\n", "outside the task directory"},
+		"symlink":   {"---\nquestion: Q one?\n---\n## Context\ninclude: link.svg\n", "outside the task directory"},
+		"noalt":     {"---\nquestion: Q one?\n---\n## Context\ninclude: a.png\n", "needs alt text"},
+		"ext":       {"---\nquestion: Q one?\n---\n## Context\ninclude: a.txt\n", "unsupported extension"},
+		"missing":   {"---\nquestion: Q one?\n---\n## Context\ninclude: nope.md\n", "file not found"},
+		"oneoption": {"---\nquestion: Q one?\n---\n## Options\n### a: Only\nx\n", "one option"},
+		"badrec":    {"---\nquestion: Q one?\nrecommend: z\n---\n## Options\n### a: A\nx\n### b: B\ny\n", "not an option"},
+		"noq":       {"---\nchange: easy\n---\n", "needs a question"},
+	}
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			h := setup(t)
+			qd := askLead(t, h, "k")
+			outside := filepath.Join(h.tmp, "secret.svg")
+			writeFiles(t, h.tmp, map[string]string{"secret.svg": "<svg>SECRET</svg>"})
+			writeFiles(t, qd, map[string]string{"k.md": c.card, "a.png": "x", "a.txt": "x"})
+			if err := os.Symlink(outside, filepath.Join(qd, "link.svg")); err != nil {
+				t.Fatal(err)
+			}
+			code, out := h.run("ask")
+			if code != 0 {
+				t.Fatalf("exit %d: %s", code, out)
+			}
+			wantContains(t, out, "warning: t1/k", c.want)
+			page := h.askPage()
+			wantContains(t, page, "Question for k?", "Warning: ", `data-lavish-question="t1/k"`)
+			if strings.Contains(page, "SECRET") {
+				t.Error("outside file leaked into page")
+			}
+		})
+	}
+}
+
+func TestAskEscaping(t *testing.T) {
+	h := setup(t)
+	h.task("t1")
+	h.must("spawn", "t1")
+	h.must("report", "--dir", h.dir("t1"), "--key", "k", "needs-decision", "Use <b>bold</b>?")
+	h.must("report", "--dir", h.dir("t1"), "--key", "c", "needs-decision", "card?")
+	qd := filepath.Join(h.dir("t1"), "questions")
+	os.MkdirAll(qd, 0o755)
+	writeFiles(t, qd, map[string]string{"c.md": "---\nquestion: Card <i>q</i>?\n---\n## Context\n<script>alert(1)</script>\n\nplain\n"})
+	h.must("ask")
+	page := h.askPage()
+	wantContains(t, page, "Use &lt;b&gt;bold&lt;/b&gt;?", "Card &lt;i&gt;q&lt;/i&gt;?", "plain")
+	for _, bad := range []string{"<b>bold", "alert(1)</script>", "<i>q"} {
+		if strings.Contains(page, bad) {
+			t.Errorf("page contains unescaped %q", bad)
+		}
+	}
+}
+
+func TestAskEmpty(t *testing.T) {
+	h := setup(t)
+	out := h.must("ask")
+	wantContains(t, out, "No open questions.")
+	wantContains(t, h.askPage(), "No open questions.")
+}
+
+func TestRenderMarkdownKeepsLineBreaks(t *testing.T) {
+	got, err := renderMarkdown("Gain: a\nCost: b\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantContains(t, got, "Gain: a<br>\nCost: b")
+}

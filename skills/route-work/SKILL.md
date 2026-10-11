@@ -39,7 +39,7 @@ Then answer:
 - **Open decisions:** is the root cause known? Is the intended behavior unambiguous? Are there design choices left (data shape, algorithm, error semantics, API)?
 - **Risk:** auth or security, persistence or migrations, concurrency, money, public APIs, external I/O.
 
-Ask the user only when an open decision is truly theirs (product behavior, compatibility tradeoffs). Settle technical ones yourself.
+Ask the user only when an open decision is truly theirs (product behavior, compatibility tradeoffs), as a question card (`question-card` skill). Settle technical ones yourself.
 
 ## 3. Route
 

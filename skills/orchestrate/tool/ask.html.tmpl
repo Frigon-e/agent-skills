@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Open questions</title>
+<style>
+:root {
+  color-scheme: light dark;
+  --bg: #ffffff; --fg: #1a1a1a; --muted: #4d4d4d; --border: #767676;
+  --card: #f5f6f8; --accent: #0b5cad; --accent-fg: #ffffff;
+  --warn-bg: #fff4d6; --warn-fg: #5c3d00; --badge-bg: #e4e8ee;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #121316; --fg: #ececee; --muted: #b8b8c0; --border: #8d8d96;
+    --card: #1c1e23; --accent: #7ab4ff; --accent-fg: #0a0a0c;
+    --warn-bg: #3a2d08; --warn-fg: #ffe3a3; --badge-bg: #2b2f38;
+  }
+}
+* { box-sizing: border-box; min-width: 0; }
+body {
+  margin: 0; padding: 16px; background: var(--bg); color: var(--fg);
+  font: 16px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+  overflow-wrap: anywhere;
+}
+main { max-width: 760px; margin: 0 auto; }
+h1 { font-size: 1.5rem; margin: 0 0 4px; }
+h2 { font-size: 1.25rem; margin: 0 0 8px; }
+h3 { font-size: 1rem; margin: 16px 0 4px; color: var(--muted); }
+.lead-in { color: var(--muted); margin: 0 0 16px; }
+section.q { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 16px; margin: 0 0 16px; }
+.meta { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; color: var(--muted); font-size: 0.875rem; margin: 0 0 8px; }
+.badge { background: var(--badge-bg); color: var(--fg); border: 1px solid var(--border); border-radius: 4px; padding: 0 6px; }
+.warn { background: var(--warn-bg); color: var(--warn-fg); border: 1px solid var(--warn-fg); border-radius: 6px; padding: 8px 12px; margin: 0 0 12px; }
+img, svg, video { max-width: 100%; height: auto; }
+pre { overflow-x: auto; max-width: 100%; padding: 8px; background: var(--bg); border: 1px solid var(--border); border-radius: 4px; }
+code { overflow-wrap: anywhere; }
+pre.mermaid { background: transparent; border: 0; }
+form { margin: 16px 0 0; }
+fieldset { border: 1px solid var(--border); border-radius: 6px; margin: 0 0 12px; padding: 8px 12px 12px; }
+legend { padding: 0 4px; font-weight: 600; }
+.opt { margin: 8px 0; }
+.opt label { font-weight: 600; }
+.opt input[type=radio] { margin-right: 8px; }
+.opt .body { margin: 4px 0 0 28px; }
+.rec { font-size: 0.875rem; font-weight: 600; color: var(--accent); margin-left: 8px; }
+label.note { display: block; font-weight: 600; margin: 0 0 4px; }
+textarea { width: 100%; min-height: 80px; font: inherit; color: var(--fg); background: var(--bg); border: 1px solid var(--border); border-radius: 4px; padding: 8px; }
+button { font: inherit; font-weight: 600; background: var(--accent); color: var(--accent-fg); border: 2px solid var(--accent); border-radius: 6px; padding: 8px 16px; margin-top: 12px; cursor: pointer; }
+.status { display: block; margin-top: 8px; color: var(--muted); }
+a { color: var(--accent); }
+:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
+</style>
+</head>
+<body>
+<main>
+<h1>Open questions</h1>
+{{if .Questions}}<p class="lead-in">{{len .Questions}} open. Answer each question, then press Send to Agent.</p>
+{{else}}<p class="lead-in">No open questions.</p>
+{{end}}
+{{range $q := .Questions}}<section class="q" aria-labelledby="{{.ID}}-h">
+<div class="meta"><span>{{.Lead}} / {{.Label}}</span>{{if .Change}}<span class="badge">Change later: {{.Change}}</span>{{end}}</div>
+<h2 id="{{.ID}}-h">{{.Question}}</h2>
+{{if .Warning}}<p class="warn" role="alert">Warning: {{.Warning}}</p>
+{{end}}{{if .Context}}<h3>Context</h3>
+{{.Context}}
+{{end}}{{range .Extra}}<h3>{{.Title}}</h3>
+{{.Body}}
+{{end}}<form data-lavish-question="{{.Lead}}/{{.Label}}" data-lead="{{.Lead}}" data-key="{{.Label}}" data-resolve="{{.Resolve}}">
+<fieldset>
+<legend>{{if .Options}}Your answer{{else}}Your answer (free text){{end}}</legend>
+{{range $o := .Options}}<div class="opt">
+<input type="radio" name="{{$q.ID}}-choice" id="{{$q.ID}}-{{$o.ID}}" value="{{$o.ID}}" data-label="{{$o.Label}}" required>
+<label for="{{$q.ID}}-{{$o.ID}}">{{$o.Label}}</label>{{if $o.Recommended}}<span class="rec">Recommended</span>{{end}}
+<div class="body">{{$o.Body}}</div>
+</div>
+{{end}}{{if .Options}}<label class="note" for="{{.ID}}-note">Note (optional)</label>
+<textarea id="{{.ID}}-note" name="note"></textarea>{{else}}<label class="note" for="{{.ID}}-note">Your answer</label>
+<textarea id="{{.ID}}-note" name="note" required></textarea>{{end}}
+</fieldset>
+<button type="submit">Queue this answer</button>
+<span class="status" role="status"></span>
+</form>
+{{if .Next}}<h3>Next</h3>
+{{.Next}}
+{{end}}</section>
+{{end}}</main>
+{{if .Mermaid}}<script type="module">
+import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11.15.0/dist/mermaid.esm.min.mjs";
+mermaid.initialize({startOnLoad:true, securityLevel:"strict", theme: matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'default'});
+</script>
+{{end}}<script>
+function queueAnswer(ev) {
+  ev.preventDefault();
+  var form = ev.target, status = form.querySelector('[role=status]');
+  var d = form.dataset, noteEl = form.elements.note, note = noteEl.value.trim();
+  var picked = form.querySelector('input[type=radio]:checked');
+  var hasOptions = form.querySelector('input[type=radio]') !== null;
+  var label, option = '', answer;
+  if (hasOptions) {
+    if (!picked) { status.textContent = 'Choose an option first.'; return; }
+    label = picked.dataset.label; option = picked.value;
+    answer = label + ' (' + option + ')';
+  } else {
+    if (!note) { status.textContent = 'Write an answer first.'; return; }
+    label = note; answer = note;
+  }
+  var q = '"' + (answer + (hasOptions && note ? '. Note: ' + note : '')).replace(/([\\"$`])/g, '\\$1') + '"';
+  var send = 'orch send ' + d.lead + (d.resolve ? ' --resolve ' + d.resolve : '') + ' ' + q;
+  var text = 'Answer for lead ' + d.lead + ', decision ' + d.key + ': ' + label +
+    (hasOptions ? ' (' + option + '). Note: ' + (note || 'none') : '') +
+    '. Send it with: ' + send;
+  if (window.lavish && window.lavish.queuePrompt) {
+    window.lavish.queuePrompt(text, {
+      tag: 'decision', text: d.lead + '/' + d.key + ': ' + label, element: form,
+      queueKey: d.lead + '/' + d.key, data: {lead: d.lead, key: d.key, option: option, note: note}
+    });
+    status.textContent = 'Queued. Press Send to Agent when you are done.';
+  } else {
+    status.textContent = 'Open this page with lavish-axi to send answers.';
+  }
+}
+document.querySelectorAll('form[data-lavish-question]').forEach(function (f) {
+  f.addEventListener('submit', queueAnswer);
+});
+</script>
+</body>
+</html>
