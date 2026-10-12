@@ -24,7 +24,9 @@ body {
   font: 16px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
   overflow-wrap: anywhere;
 }
-main { max-width: 760px; margin: 0 auto; }
+/* The page is wide so diagrams, tables and UI mocks get room; prose keeps a readable line length. */
+main { max-width: 1200px; margin: 0 auto; }
+main > p, h1, h2, section.q > p, section.q > ul, section.q > ol { max-width: 80ch; }
 h1 { font-size: 1.5rem; margin: 0 0 4px; }
 h2 { font-size: 1.25rem; margin: 0 0 8px; }
 h3 { font-size: 1rem; margin: 16px 0 4px; color: var(--muted); }
@@ -44,12 +46,13 @@ pre.mermaid { background: transparent; border: 0; }
 form { margin: 16px 0 0; }
 fieldset { border: 1px solid var(--border); border-radius: 6px; margin: 0 0 12px; padding: 8px 12px 12px; }
 legend { padding: 0 4px; font-weight: 600; }
-.opt { padding: 12px 0; }
-.opt + .opt { border-top: 1px solid var(--rule); }
-.opt-head { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; }
-.opt label { font-weight: 600; }
+/* Options sit side by side when there is room, so they can be compared at a glance. */
+.opts { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 280px), 1fr)); gap: 12px; margin: 4px 0 12px; }
+.opt { padding: 12px; border: 1px solid var(--rule); border-radius: 6px; background: var(--bg); }
+.opt-head { display: flex; align-items: flex-start; gap: 4px 8px; }
+.opt label { font-weight: 600; flex: 1 1 0; }
 .opt label .rec { margin-left: 8px; }
-.opt input[type=radio] { width: 20px; height: 20px; margin: 0; accent-color: var(--accent); flex: none; }
+.opt input[type=radio] { width: 20px; height: 20px; margin: 2px 0 0; accent-color: var(--accent); flex: none; }
 .opt .body { margin: 4px 0 0 28px; }
 .opt .body > :first-child { margin-top: 0; }
 .opt .body > :last-child { margin-bottom: 0; }
@@ -79,12 +82,14 @@ a { color: var(--accent); }
 {{end}}<form data-lavish-question="{{if .Lead}}{{.Lead}}/{{end}}{{.Label}}" data-lead="{{.Lead}}" data-key="{{.Label}}" data-resolve="{{.Resolve}}">
 <fieldset>
 <legend>{{if .Options}}Your answer{{else}}Your answer (free text){{end}}</legend>
-{{range $o := .Options}}<div class="opt">
+{{if .Options}}<div class="opts">
+{{end}}{{range $o := .Options}}<div class="opt">
 <div class="opt-head"><input type="radio" name="{{$q.ID}}-choice" id="{{$q.ID}}-{{$o.ID}}" value="{{$o.ID}}" data-label="{{$o.Label}}" required>
 <label for="{{$q.ID}}-{{$o.ID}}">{{$o.Label}}{{if $o.Recommended}}<span class="rec">Recommended</span>{{end}}</label></div>
 <div class="body">{{$o.Body}}</div>
 </div>
-{{end}}{{if .Options}}<label class="note" for="{{.ID}}-note">Note (optional)</label>
+{{end}}{{if .Options}}</div>
+<label class="note" for="{{.ID}}-note">Note (optional)</label>
 <textarea id="{{.ID}}-note" name="note"></textarea>{{else}}<label class="note" for="{{.ID}}-note">Your answer</label>
 <textarea id="{{.ID}}-note" name="note" required></textarea>{{end}}
 </fieldset>

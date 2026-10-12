@@ -17,6 +17,7 @@ import (
 
 	"github.com/microcosm-cc/bluemonday"
 	"github.com/yuin/goldmark"
+	"github.com/yuin/goldmark/extension"
 	gmhtml "github.com/yuin/goldmark/renderer/html"
 )
 
@@ -208,7 +209,7 @@ type renderer struct {
 
 // Raw HTML in markdown is not emitted. Hard wraps keep a card's short lines
 // (Gain:, Cost:) on their own lines, as the lead wrote them.
-var md = goldmark.New(goldmark.WithRendererOptions(gmhtml.WithHardWraps()))
+var md = goldmark.New(goldmark.WithExtensions(extension.Table), goldmark.WithRendererOptions(gmhtml.WithHardWraps()))
 
 func renderMarkdown(src string) (string, error) {
 	var b bytes.Buffer

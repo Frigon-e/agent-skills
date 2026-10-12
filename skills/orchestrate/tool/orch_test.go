@@ -1037,6 +1037,15 @@ func TestRenderMarkdownKeepsLineBreaks(t *testing.T) {
 	wantContains(t, got, "Gain: a<br>\nCost: b")
 }
 
+func TestRenderMarkdownTables(t *testing.T) {
+	got, err := renderMarkdown("| Option | Cost |\n|---|---|\n| S3 | $5 |\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantContains(t, got, "<th>Option</th>")
+	wantContains(t, got, "<td>S3</td>")
+}
+
 // A key from status.log goes into a shell command on the page, so a key
 // that does not match keyRe must never reach data-resolve.
 func TestAskRejectsUnsafeKey(t *testing.T) {
