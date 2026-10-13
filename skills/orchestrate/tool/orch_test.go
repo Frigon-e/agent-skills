@@ -465,7 +465,7 @@ func TestWatchCheckpointTimeout(t *testing.T) {
 	if code != 124 || !strings.Contains(out, "checkpoint") {
 		t.Fatalf("checkpoint = %d %q", code, out)
 	}
-	if _, err := os.Stat(filepath.Join(h.tmp, "state", "repo", "watch.pid")); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(h.tmp, "state", "repo", "watch-w1-p0.pid")); !os.IsNotExist(err) {
 		t.Fatal("watch.pid left behind")
 	}
 	h.must("report", "--dir", h.dir("t1"), "failed", "tests do not build")
@@ -473,6 +473,86 @@ func TestWatchCheckpointTimeout(t *testing.T) {
 	if code != 0 || !strings.Contains(out, "orch: t1 failed: tests do not build") {
 		t.Fatalf("checkpoint with an event = %d %q", code, out)
 	}
+}
+
+// Two orchestrators in one repo each watch and list only the leads they
+// spawned, while max_leads and locks stay shared.
+func TestTwoOrchestratorsOneRepo(t *testing.T) {
+	h := setup(t)
+	h.task("a1")
+	h.task("b1")
+	h.must("spawn", "a1")
+	t.Setenv("HERDR_PANE_ID", "w2:p0")
+	h.must("spawn", "b1")
+	if h.lead("a1").Owner != "w1:p0" || h.lead("b1").Owner != "w2:p0" {
+		t.Fatalf("owners = %q, %q", h.lead("a1").Owner, h.lead("b1").Owner)
+	}
+	h.must("report", "--dir", h.dir("a1"), "done", "a finished")
+	h.must("report", "--dir", h.dir("b1"), "done", "b finished")
+
+	if out := h.must("watch", "--once"); out != "orch: b1 done: b finished\n" {
+		t.Fatalf("second orchestrator's watcher printed %q", out)
+	}
+	if _, err := os.Stat(filepath.Join(h.tmp, "state", "repo", "watch-w2-p0.pid")); !os.IsNotExist(err) {
+		t.Fatal("watch pid file left behind")
+	}
+	status := h.must("status")
+	wantContains(t, status, "b1", "leads open: 1 yours, 2/3 total", "other orchestrators: w1:p0 has 1 open (a1)")
+	if strings.Contains(status, "a finished") {
+		t.Fatalf("board lists another orchestrator's lead:\n%s", status)
+	}
+
+	t.Setenv("HERDR_PANE_ID", "w1:p0")
+	if out := h.must("watch", "--once"); out != "orch: a1 done: a finished\n" {
+		t.Fatalf("first orchestrator's watcher printed %q", out)
+	}
+
+	// Taking over a lead keeps the watcher's place, so old events do not repeat.
+	wantContains(t, h.must("adopt", "b1"), "b1 now belongs to w1:p0")
+	if out := h.must("watch", "--once"); out != "" {
+		t.Fatalf("adopted lead replayed old events: %q", out)
+	}
+	h.must("report", "--dir", h.dir("b1"), "failed", "b broke")
+	if out := h.must("watch", "--once"); out != "orch: b1 failed: b broke\n" {
+		t.Fatalf("adopted lead event = %q", out)
+	}
+}
+
+// Leads spawned before owners existed stay visible to every orchestrator,
+// and the board says how to claim them.
+func TestUnownedLeadsAreShared(t *testing.T) {
+	h := setup(t)
+	h.task("old")
+	h.must("spawn", "old")
+	l := h.lead("old")
+	l.Owner = ""
+	saveLead(h.dir("old"), l)
+	wantContains(t, h.must("status"), "old", "unowned: old", "orch adopt <id>")
+	h.must("report", "--dir", h.dir("old"), "done", "legacy")
+	wantContains(t, h.must("watch", "--once"), "orch: old done: legacy")
+}
+
+// A watcher from before per-orchestrator watchers keeps counting until it
+// exits, so the upgrade neither nags nor starts a duplicate.
+func TestLegacyWatcherCountsDuringUpgrade(t *testing.T) {
+	h := setup(t)
+	h.task("t1")
+	h.must("spawn", "t1")
+	old := exec.Command("bash", "-c", `exec -a "orch watch" sleep 30`)
+	if err := old.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { old.Process.Kill(); old.Wait() })
+	time.Sleep(200 * time.Millisecond)
+	os.WriteFile(filepath.Join(h.tmp, "state", "repo", "watch.pid"), []byte(fmt.Sprintf("%d 0\n", old.Process.Pid)), 0o644)
+	wantContains(t, h.must("status"), "watcher: running")
+	code, out := h.run("watch", "--once")
+	if code != 1 || !strings.Contains(out, "already running") {
+		t.Fatalf("watch beside a legacy watcher = %d %q", code, out)
+	}
+	old.Process.Kill()
+	old.Wait()
+	wantContains(t, h.must("status"), "watcher: stopped")
 }
 
 func TestCloseNeedsDoneOrForce(t *testing.T) {

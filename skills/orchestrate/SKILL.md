@@ -23,10 +23,17 @@ that builds the Go tool on first use). Always call it by that full path.
 3. When at least one lead is open, keep a watcher running. On Claude Code,
    run `orch watch` with the Monitor tool; each line it prints wakes you.
    Monitor stops at its timeout (30 minutes at most), so start it again
-   when it ends while leads are still open; the watcher keeps its place in
-   `watch.json`, so no event is lost or repeated. On Codex, run `orch watch --timeout 180` in the foreground and
+   when it ends while leads are still open; the watcher keeps its place on
+   disk, so no event is lost or repeated. On Codex, run `orch watch --timeout 180` in the foreground and
    rerun it after each result (exit 124 means nothing happened). The watcher
-   exits when no leads are open, so start it again after the next spawn.
+   exits when none of your leads are open, so start it again after the next
+   spawn.
+4. Several orchestrators can work in one repo, one per Herdr pane. Each
+   lead belongs to the pane that spawned it; your board and your watcher
+   cover only your leads, and the board names the others' open leads in one
+   line. `max_leads` and locks are shared. Leave another orchestrator's
+   leads alone unless the user asks; `orch adopt <id>` takes one over (for
+   example when its orchestrator ended), keeping the watcher's place.
 
 ## Intake: what is a task
 
@@ -147,7 +154,9 @@ other way.
   refuses them in a repo file, so a commit can't change how leads launch.
 - Run state lives next to the repo's Herdr worktrees:
   `<herdr worktrees dir>/<repo>/.orchestrate/<id>/`. It holds task.md,
-  lead.json, status.log, inbox/ and report.md. Ship worktrees sit beside
+  lead.json (with the owning orchestrator pane), status.log, inbox/ and
+  report.md; each orchestrator's watcher keeps `watch-<pane>.json` beside
+  the task folders. Ship worktrees sit beside
   it at `<herdr worktrees dir>/<repo>/<id>`. Disk is the truth; the board
   is a view of it.
 - `orch status --json` gives the same board in machine-readable form.

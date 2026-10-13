@@ -157,6 +157,25 @@ type lead struct {
 	TabID     string `json:"tab_id"`
 	SpawnedAt int64  `json:"spawned_at"`
 	ClosedAt  int64  `json:"closed_at,omitempty"`
+	// Owner is the Herdr pane of the orchestrator that watches this lead.
+	// Empty on leads spawned before owners existed: every orchestrator sees those.
+	Owner string `json:"owner,omitempty"`
+}
+
+// orchID names the orchestrator running this command by its Herdr pane, so
+// several orchestrators can share one repo. Empty outside Herdr.
+func orchID() string { return os.Getenv("HERDR_PANE_ID") }
+
+// ownedBy says whether orchestrator me watches and lists a lead with owner.
+func ownedBy(owner, me string) bool { return owner == "" || owner == me }
+
+// taskOwner is the lead's owner, or for a draft the orchestrator that wrote it.
+func taskOwner(dir string, l *lead) string {
+	if l != nil {
+		return l.Owner
+	}
+	b, _ := os.ReadFile(filepath.Join(dir, "owner"))
+	return strings.TrimSpace(string(b))
 }
 
 func loadLead(dir string) (*lead, error) {
@@ -220,29 +239,67 @@ func openLeads(root string) []openLead {
 	return out
 }
 
+// myLeads keeps the open leads that orchestrator me watches.
+func myLeads(leads []openLead, me string) []openLead {
+	var out []openLead
+	for _, ol := range leads {
+		if ownedBy(ol.lead.Owner, me) {
+			out = append(out, ol)
+		}
+	}
+	return out
+}
+
 func pendingMessages(dir string) []string {
 	msgs, _ := filepath.Glob(filepath.Join(dir, "inbox", "*.msg"))
 	sort.Strings(msgs)
 	return msgs
 }
 
-// watcherAlive checks the pid file and that the pid still runs `orch watch`,
+var unsafeNameRe = regexp.MustCompile(`[^A-Za-z0-9._-]+`)
+
+// watchFiles are the pid and state files of orchestrator me's watcher. Each
+// orchestrator has its own, so two can watch one repo at once.
+func watchFiles(root, me string) (pidFile, stateFile string) {
+	name := "watch"
+	if me != "" {
+		name += "-" + unsafeNameRe.ReplaceAllString(me, "-")
+	}
+	return filepath.Join(root, name+".pid"), filepath.Join(root, name+".json")
+}
+
+// watcherAlive reports the pid of me's running watcher, or 0. A watcher
+// started before per-orchestrator watchers (watch.pid) counts for everyone
+// until it exits, so the upgrade does not start a duplicate.
+func watcherAlive(root, me string) int {
+	pidFile, _ := watchFiles(root, me)
+	if pid := pidRunsWatch(pidFile); pid != 0 || me == "" {
+		return pid
+	}
+	legacy, _ := watchFiles(root, "")
+	return pidRunsWatch(legacy)
+}
+
+// pidRunsWatch checks a pid file and that the pid still runs `orch watch`,
 // so a reused pid does not count.
-func watcherAlive(root string) bool {
-	b, err := os.ReadFile(filepath.Join(root, "watch.pid"))
+func pidRunsWatch(pidFile string) int {
+	b, err := os.ReadFile(pidFile)
 	if err != nil {
-		return false
+		return 0
 	}
 	fields := strings.Fields(string(b))
 	if len(fields) == 0 {
-		return false
+		return 0
 	}
 	pid, err := strconv.Atoi(fields[0])
 	if err != nil || pid <= 0 || syscall.Kill(pid, 0) != nil {
-		return false
+		return 0
 	}
 	out, _ := exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "command=").Output()
-	return strings.Contains(string(out), "orch") && strings.Contains(string(out), " watch")
+	if strings.Contains(string(out), "orch") && strings.Contains(string(out), " watch") {
+		return pid
+	}
+	return 0
 }
 
 func (a *app) age(ts int64) string {

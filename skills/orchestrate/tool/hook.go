@@ -102,10 +102,11 @@ func (a *app) orchestratorHook(event string, p hookPayload) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	leads := openLeads(s.root)
+	me := orchID()
+	leads := myLeads(openLeads(s.root), me)
 	switch event {
 	case "stop":
-		if p.StopHookActive || len(leads) == 0 || watcherAlive(s.root) {
+		if p.StopHookActive || len(leads) == 0 || watcherAlive(s.root, me) != 0 {
 			return "", nil
 		}
 		return fmt.Sprintf("%d lead(s) in flight and no watcher is running, so nothing will wake you. "+
@@ -114,7 +115,7 @@ func (a *app) orchestratorHook(event string, p hookPayload) (string, error) {
 	case "session-start":
 		fmt.Fprintln(a.out, "You are the orchestrator for this repo: load the `orchestrate` skill before acting.")
 		fmt.Fprintln(a.out, a.board(s, leadRows(s.root, false)))
-		if len(leads) > 0 && !watcherAlive(s.root) {
+		if len(leads) > 0 && watcherAlive(s.root, me) == 0 {
 			fmt.Fprintf(a.out, "Watcher stopped: start `%s watch` with the Monitor tool.\n", selfPath())
 		}
 	}

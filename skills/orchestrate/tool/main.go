@@ -1,4 +1,6 @@
-// Command orch runs one orchestrator with one Herdr pane per lead.
+// Command orch runs orchestrators with one Herdr pane per lead. Several
+// orchestrators can share a repo: each lead records the orchestrator pane
+// that owns it, and each orchestrator runs its own watcher.
 //
 // State for a repo lives in <herdr worktrees dir>/<repo>/.orchestrate/<task-id>/
 // (task.md, lead.json, status.log, inbox/, report.md). ORCH_HOME overrides the
@@ -16,7 +18,7 @@ import (
 	"time"
 )
 
-const usage = `orch - one orchestrator, one Herdr pane per lead
+const usage = `orch - orchestrators, one Herdr pane per lead
 
 Orchestrator:
   orch new <id> --kind ship|scout --harness claude|codex --model M --effort E [--base B] [--depends a,b]
@@ -31,6 +33,7 @@ Orchestrator:
   orch peek <id> [--lines N]
   orch focus <id>
   orch close <id> [--force]
+  orch adopt <id>
   orch become [--off]
   orch config-check <file>
   orch lock list | lock release <name> --force
@@ -72,6 +75,7 @@ var commands = map[string]func(*app, []string) error{
 	"ask":          cmdAsk,
 	"dispatch":     cmdDispatch,
 	"watch":        cmdWatch,
+	"adopt":        cmdAdopt,
 	"peek":         cmdPeek,
 	"focus":        cmdFocus,
 	"close":        cmdClose,

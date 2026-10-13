@@ -125,6 +125,11 @@ func newTask(s site, o taskOpts) (string, error) {
 	if err := os.WriteFile(path, []byte(text), 0o644); err != nil {
 		return "", err
 	}
+	if me := orchID(); me != "" {
+		if err := os.WriteFile(filepath.Join(dir, "owner"), []byte(me+"\n"), 0o644); err != nil {
+			return "", err
+		}
+	}
 	return path, nil
 }
 
@@ -241,6 +246,7 @@ func cmdSpawn(a *app, args []string) error {
 	} else if l != nil && l.ClosedAt == 0 {
 		return fail("lead %s is already open in pane %s", id, l.PaneID)
 	}
+	me := orchID()
 	leads := openLeads(s.root)
 	if len(leads) >= s.cfg.MaxLeads {
 		return &exitError{code: 75, msg: fmt.Sprintf(
@@ -253,12 +259,12 @@ func cmdSpawn(a *app, args []string) error {
 	}
 	name := leadName(id)
 	env := []string{"ORCH_TASK_DIR=" + dir, "ORCH_TASK_ID=" + id, "ORCH_ROLE=lead"}
-	paneID, tabID, err := placePane(leads, s.repo, env)
+	paneID, tabID, err := placePane(myLeads(leads, me), s.repo, env)
 	if err != nil {
 		return err
 	}
 	_, _ = herdrCmd(herdrTimeout, "pane", "rename", paneID, name)
-	l := &lead{ID: id, Name: name, Harness: fm["harness"], Model: fm["model"], PaneID: paneID, TabID: tabID, SpawnedAt: a.now().Unix()}
+	l := &lead{ID: id, Name: name, Harness: fm["harness"], Model: fm["model"], PaneID: paneID, TabID: tabID, SpawnedAt: a.now().Unix(), Owner: me}
 	if err := saveLead(dir, l); err != nil {
 		return err
 	}
@@ -283,7 +289,7 @@ func cmdSpawn(a *app, args []string) error {
 	if waitErr != nil {
 		fmt.Fprintf(a.out, "warning: start of work not confirmed within 20s; check with: orch peek %s\n", id)
 	}
-	if !watcherAlive(s.root) {
+	if watcherAlive(s.root, me) == 0 {
 		fmt.Fprintf(a.out, "no watcher running: start `%s watch` with the Monitor tool\n", selfPath())
 	}
 	return nil
@@ -474,6 +480,7 @@ type row struct {
 	Last      string  `json:"last"`
 	LastAt    int64   `json:"last_at,omitempty"`
 	Pane      string  `json:"pane,omitempty"`
+	Owner     string  `json:"owner,omitempty"`
 	Decisions []entry `json:"decisions"`
 }
 
@@ -493,6 +500,7 @@ func leadRows(root string, includeClosed bool) []row {
 			Kind:      fm["kind"],
 			Agent:     fm["harness"] + "/" + fm["model"],
 			State:     lastState(mine),
+			Owner:     taskOwner(dir, l),
 			Decisions: openDecisions(entries),
 		}
 		last := mine
@@ -540,7 +548,10 @@ func cmdStatus(a *app, args []string) error {
 	}
 	rows := leadRows(s.root, *all)
 	if *asJSON {
-		b, _ := json.MarshalIndent(map[string]any{"root": s.root, "watcher": watcherAlive(s.root), "notes": s.cfg.Notes, "leads": rows}, "", "  ")
+		me := orchID()
+		mine, others := splitRows(rows, me)
+		b, _ := json.MarshalIndent(map[string]any{"root": s.root, "orchestrator": me, "watcher": watcherAlive(s.root, me) != 0,
+			"notes": s.cfg.Notes, "leads": mine, "other_orchestrators": others}, "", "  ")
 		fmt.Fprintln(a.out, string(b))
 		return nil
 	}
@@ -577,20 +588,58 @@ func cmdDispatch(a *app, args []string) error {
 	return nil
 }
 
+// splitRows keeps the rows orchestrator me owns and, per other owner, the
+// ids of its open leads.
+func splitRows(rows []row, me string) (mine []row, others map[string][]string) {
+	others = map[string][]string{}
+	for _, r := range rows {
+		switch {
+		case ownedBy(r.Owner, me):
+			mine = append(mine, r)
+		case r.Herdr != "draft" && r.Herdr != "closed":
+			others[r.Owner] = append(others[r.Owner], r.ID)
+		}
+	}
+	return mine, others
+}
+
 func (a *app) board(s site, rows []row) string {
+	me := orchID()
+	rows, others := splitRows(rows, me)
 	live := 0
+	var unowned []string
 	for _, r := range rows {
 		if r.Herdr != "draft" && r.Herdr != "closed" {
 			live++
+			if r.Owner == "" && me != "" {
+				unowned = append(unowned, r.ID)
+			}
 		}
 	}
+	total := live
+	owners := make([]string, 0, len(others))
+	for o, ids := range others {
+		owners = append(owners, o)
+		total += len(ids)
+	}
+	sort.Strings(owners)
 	watcher := "stopped"
-	if watcherAlive(s.root) {
+	if watcherAlive(s.root, me) != 0 {
 		watcher = "running"
+	}
+	count := fmt.Sprintf("%d/%d", live, s.cfg.MaxLeads)
+	if total != live {
+		count = fmt.Sprintf("%d yours, %d/%d total", live, total, s.cfg.MaxLeads)
 	}
 	out := []string{
 		"orchestrate: " + s.root,
-		fmt.Sprintf("watcher: %s · leads open: %d/%d", watcher, live, s.cfg.MaxLeads),
+		fmt.Sprintf("watcher: %s · leads open: %s", watcher, count),
+	}
+	for _, o := range owners {
+		out = append(out, fmt.Sprintf("other orchestrators: %s has %d open (%s)", o, len(others[o]), short(strings.Join(others[o], ", "), 80)))
+	}
+	if len(unowned) > 0 {
+		out = append(out, fmt.Sprintf("unowned: %s (spawned before per-orchestrator watchers, so every orchestrator sees them; claim with orch adopt <id>)", short(strings.Join(unowned, ", "), 80)))
 	}
 	if s.cfg.repoFile == "" {
 		out = append(out, "repo config: none, using defaults (see Repo setup in the orchestrate skill)")
@@ -646,10 +695,10 @@ func cmdWatch(a *app, args []string) error {
 	if err := os.MkdirAll(s.root, 0o755); err != nil {
 		return err
 	}
-	pidFile, stateFile := filepath.Join(s.root, "watch.pid"), filepath.Join(s.root, "watch.json")
-	if watcherAlive(s.root) {
-		b, _ := os.ReadFile(pidFile)
-		return fail("a watcher is already running (pid %s)", strings.Fields(string(b))[0])
+	me := orchID()
+	pidFile, stateFile := watchFiles(s.root, me)
+	if pid := watcherAlive(s.root, me); pid != 0 {
+		return fail("a watcher is already running for this orchestrator (pid %d)", pid)
 	}
 	myPid := strconv.Itoa(os.Getpid())
 	if err := os.WriteFile(pidFile, []byte(fmt.Sprintf("%s %d\n", myPid, a.now().Unix())), 0o644); err != nil {
@@ -670,9 +719,9 @@ func cmdWatch(a *app, args []string) error {
 	say := func(msg string) { fmt.Fprintln(a.out, "orch: "+msg) }
 	for {
 		emitted := 0
-		leads := openLeads(s.root)
+		leads := myLeads(openLeads(s.root), me)
 		if len(leads) == 0 {
-			say("no open leads; watcher exiting")
+			say("no open leads for this orchestrator; watcher exiting")
 			return nil
 		}
 		agents, err := agentMap()
@@ -687,14 +736,18 @@ func cmdWatch(a *app, args []string) error {
 		}
 		for _, ol := range leads {
 			st := seen[ol.lead.ID]
+			if st == nil {
+				// A lead taken over from another orchestrator keeps that watcher's place.
+				st = otherWatcherSeen(s.root, stateFile, ol.lead)
+			}
 			if st == nil || st.SpawnedAt != ol.lead.SpawnedAt {
 				var offset int64
 				if st != nil {
 					offset = st.Offset
 				}
 				st = &watchSeen{SpawnedAt: ol.lead.SpawnedAt, Offset: offset}
-				seen[ol.lead.ID] = st
 			}
+			seen[ol.lead.ID] = st
 			emitted += a.watchLead(ol, st, agents, s.cfg, say)
 		}
 		b, _ := json.Marshal(seen)
@@ -719,6 +772,26 @@ func cmdWatch(a *app, args []string) error {
 		case <-time.After(time.Duration(*interval * float64(time.Second))):
 		}
 	}
+}
+
+// otherWatcherSeen finds the furthest place another watcher reached in this
+// lead's status log, or nil when none has watched it.
+func otherWatcherSeen(root, stateFile string, l *lead) *watchSeen {
+	files, _ := filepath.Glob(filepath.Join(root, "watch*.json"))
+	var best *watchSeen
+	for _, f := range files {
+		if f == stateFile {
+			continue
+		}
+		var m map[string]*watchSeen
+		if b, err := os.ReadFile(f); err != nil || json.Unmarshal(b, &m) != nil {
+			continue
+		}
+		if st := m[l.ID]; st != nil && st.SpawnedAt == l.SpawnedAt && (best == nil || st.Offset > best.Offset) {
+			best = st
+		}
+	}
+	return best
 }
 
 // watchLead prints one line per actionable event for one lead and returns how
@@ -900,6 +973,35 @@ func cmdClose(a *app, args []string) error {
 
 // cmdConfigCheck validates a draft orchestrate.toml, such as one a setup
 // lead wrote in its worktree, where orch status would read the main checkout.
+// cmdAdopt moves an open lead to this orchestrator, for example after the
+// orchestrator that spawned it ended.
+func cmdAdopt(a *app, args []string) error {
+	if err := exactArgs(args, 1, "adopt <id>"); err != nil {
+		return err
+	}
+	me := orchID()
+	if me == "" {
+		return fail("adopt needs a Herdr pane (HERDR_PANE_ID is unset)")
+	}
+	dir, l, err := a.requireLead(args[0])
+	if err != nil {
+		return err
+	}
+	from := l.Owner
+	l.Owner = me
+	if err := saveLead(dir, l); err != nil {
+		return err
+	}
+	if from == "" {
+		from = "no orchestrator"
+	}
+	if err := a.appendStatus(dir, "note", "adopted by orchestrator "+me+" from "+from, "", "orch"); err != nil {
+		return err
+	}
+	fmt.Fprintf(a.out, "%s now belongs to %s (was %s); its events reach this orchestrator's watcher\n", l.ID, me, from)
+	return nil
+}
+
 func cmdConfigCheck(a *app, args []string) error {
 	pos, err := parseArgs(a.flags("config-check"), args)
 	if err != nil {
