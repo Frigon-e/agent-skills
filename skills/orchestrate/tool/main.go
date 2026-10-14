@@ -33,6 +33,8 @@ Orchestrator:
   orch peek <id> [--lines N]
   orch focus <id>
   orch close <id> [--force]
+  orch compact <id> [focus...]
+  orch respawn <id>
   orch adopt <id>
   orch become [--off]
   orch config-check <file>
@@ -79,6 +81,8 @@ var commands = map[string]func(*app, []string) error{
 	"peek":         cmdPeek,
 	"focus":        cmdFocus,
 	"close":        cmdClose,
+	"compact":      cmdCompact,
+	"respawn":      cmdRespawn,
 	"become":       cmdBecome,
 	"config-check": cmdConfigCheck,
 	"lock":         cmdLock,

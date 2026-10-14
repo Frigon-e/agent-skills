@@ -25,9 +25,10 @@ func TestMain(m *testing.M) {
 }
 
 type fakeAgent struct {
-	Name   string `json:"name"`
-	Kind   string `json:"kind"`
-	Status string `json:"status"`
+	Name    string `json:"name"`
+	Kind    string `json:"kind"`
+	Status  string `json:"status"`
+	Session string `json:"session"`
 }
 
 type fakeState struct {
@@ -81,7 +82,8 @@ func fakeHerdr(path string, args []string) int {
 		}
 		var agents []map[string]any
 		for pane, ag := range st.Agents {
-			agents = append(agents, map[string]any{"pane_id": pane, "tab_id": st.Panes[pane], "agent": ag.Kind, "agent_status": ag.Status})
+			agents = append(agents, map[string]any{"pane_id": pane, "tab_id": st.Panes[pane], "agent": ag.Kind, "agent_status": ag.Status,
+				"agent_session": map[string]any{"value": ag.Session}})
 		}
 		return print(map[string]any{"result": map[string]any{"agents": agents}})
 	case "pane get":
@@ -156,6 +158,7 @@ func setup(t *testing.T) *harness {
 		"HERDR_ENV": "1", "HERDR_WORKSPACE_ID": "w1", "HERDR_PANE_ID": "w1:p0",
 		"ORCH_HERDR": os.Args[0], "ORCH_FAKE_HERDR": filepath.Join(tmp, "herdr.json"),
 		"ORCH_ROLE": "", "ORCH_TASK_DIR": "",
+		"CLAUDE_CONFIG_DIR": filepath.Join(tmp, "claude"), "CODEX_HOME": filepath.Join(tmp, "codex"),
 	} {
 		t.Setenv(k, v)
 	}
@@ -573,6 +576,158 @@ func TestCloseNeedsDoneOrForce(t *testing.T) {
 	}
 }
 
+// transcript writes a session transcript where contextTokens looks for it.
+func (h *harness) transcript(harness, session string, lines ...string) {
+	h.t.Helper()
+	path := filepath.Join(h.tmp, "claude", "projects", "-repo", session+".jsonl")
+	if harness == "codex" {
+		path = filepath.Join(h.tmp, "codex", "sessions", "2026", "10", "14", "rollout-2026-10-14T10-00-00-"+session+".jsonl")
+	}
+	os.MkdirAll(filepath.Dir(path), 0o755)
+	if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
+		h.t.Fatal(err)
+	}
+}
+
+func claudeTurn(input, read, create int, sidechain bool) string {
+	return fmt.Sprintf(`{"type":"assistant","isSidechain":%t,"message":{"usage":{"input_tokens":%d,"cache_read_input_tokens":%d,"cache_creation_input_tokens":%d,"output_tokens":9}}}`, sidechain, input, read, create)
+}
+
+func TestContextTokens(t *testing.T) {
+	h := setup(t)
+	h.transcript("claude", "s1",
+		claudeTurn(10, 1000, 0, false),
+		claudeTurn(5, 180_000, 2_000, false),
+		claudeTurn(1, 3_000, 0, true), // a subagent's turn is not the lead's context
+		`{"type":"user","message":{"content":"the word usage alone"}}`,
+	)
+	if got := contextTokens("claude", "s1"); got != 182_005 {
+		t.Fatalf("claude context = %d, want 182005", got)
+	}
+	h.transcript("claude", "s3",
+		claudeTurn(1, 150_000, 0, false),
+		`{"type":"system","subtype":"compact_boundary","compactMetadata":{"trigger":"manual","preTokens":150001,"postTokens":7379}}`,
+	)
+	if got := contextTokens("claude", "s3"); got != 7379 {
+		t.Fatalf("context after compaction = %d, want 7379", got)
+	}
+	h.transcript("codex", "s2",
+		`{"type":"event_msg","payload":{"type":"token_count","info":null}}`,
+		`{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":900000},"last_token_usage":{"input_tokens":61000,"cached_input_tokens":60000}}}}`,
+		`{"type":"response_item","payload":{"type":"message"}}`,
+	)
+	if got := contextTokens("codex", "s2"); got != 61_000 {
+		t.Fatalf("codex context = %d, want 61000", got)
+	}
+	for _, c := range [][2]string{{"claude", "missing"}, {"claude", ""}, {"claude", "*"}, {"other", "s1"}} {
+		if got := contextTokens(c[0], c[1]); got != 0 {
+			t.Errorf("contextTokens(%q, %q) = %d, want 0", c[0], c[1], got)
+		}
+	}
+}
+
+func TestContextLimitWarnsLeadAndBoard(t *testing.T) {
+	h := setup(t)
+	os.WriteFile(os.Getenv("ORCH_CONFIG"), []byte("lead_context_limit = 100000\n"), 0o644)
+	h.task("t1")
+	h.must("spawn", "t1")
+	h.editFake(func(st *fakeState) { st.Agents["w1:p1"].Session = "s1" })
+	h.transcript("claude", "s1", claudeTurn(1, 90_000, 0, false))
+	d := h.dir("t1")
+
+	h.must("send", "t1", "next: fix the footer")
+	if out := h.must("inbox", "--dir", d); strings.Contains(out, "context:") {
+		t.Fatalf("warned under the limit:\n%s", out)
+	}
+	wantContains(t, h.must("status"), "CTX", " 90K ")
+
+	h.transcript("claude", "s1", claudeTurn(1, 160_000, 0, false))
+	h.must("send", "t1", "next: an unrelated page")
+	wantContains(t, h.must("inbox", "--dir", d), "an unrelated page", "context: 160K tokens, over the 100K lead limit", "Context budget")
+	wantContains(t, h.must("status"), "160K!")
+	if out := h.must("inbox", "--dir", d); out != "no new messages\n" {
+		t.Fatalf("warned with no new work: %q", out)
+	}
+
+	os.WriteFile(os.Getenv("ORCH_CONFIG"), []byte("lead_context_limit = 0\n"), 0o644)
+	if code, out := h.run("status"); code != 1 || !strings.Contains(out, "lead_context_limit") {
+		t.Fatalf("zero limit accepted: %d %q", code, out)
+	}
+}
+
+func TestCompact(t *testing.T) {
+	h := setup(t)
+	h.task("t1")
+	h.must("spawn", "t1")
+	d := h.dir("t1")
+	h.must("report", "--dir", d, "--key", "context", "needs-decision", "180K and the next work is unrelated: compact or fresh lead?")
+
+	if code, out := h.run("compact", "t1"); code != 1 || !strings.Contains(out, "is working") {
+		t.Fatalf("compact mid-turn = %d %q", code, out)
+	}
+	h.editFake(func(st *fakeState) { st.Agents["w1:p1"].Status = "idle" })
+	wantContains(t, h.must("compact", "t1", "keep", "the", "footer", "work"), "compacted lead-t1")
+	prompts := callsOf(h.fakeState(), "agent", "prompt", "w1:p1")
+	if len(prompts) != 3 {
+		t.Fatalf("prompts = %v", prompts)
+	}
+	if c := prompts[1]; c[3] != "/compact keep the footer work" || !slices.Contains(c, "--wait") {
+		t.Fatalf("compact prompt = %v", c)
+	}
+	wantContains(t, prompts[2][3], "your context was compacted", filepath.Join(d, "task.md"), filepath.Join(d, "handoff.md"))
+	if strings.Contains(h.must("status"), "[context]") {
+		t.Fatal("context decision still open after compact")
+	}
+
+	h.editFake(func(st *fakeState) { st.Agents["w1:p1"].Status = "idle" })
+	h.must("compact", "t1")
+	if c := callsOf(h.fakeState(), "agent", "prompt", "w1:p1"); c[3][3] != "/compact "+compactFocus {
+		t.Fatalf("default focus = %q", c[3][3])
+	}
+}
+
+func TestRespawn(t *testing.T) {
+	h := setup(t)
+	h.task("t1")
+	h.must("spawn", "t1")
+	d := h.dir("t1")
+	h.must("report", "--dir", d, "--key", "context", "needs-decision", "full; fresh lead?")
+	if code, out := h.run("respawn", "t1"); code != 1 || !strings.Contains(out, "no handoff.md") {
+		t.Fatalf("respawn without a handoff = %d %q", code, out)
+	}
+	os.WriteFile(filepath.Join(d, "handoff.md"), []byte("branch orch/t1; next: the settings page\n"), 0o644)
+
+	wantContains(t, h.must("respawn", "t1"), "spawned lead-t1")
+	if _, ok := h.fakeState().Panes["w1:p1"]; ok {
+		t.Fatal("old pane still open")
+	}
+	l := h.lead("t1")
+	if l.PaneID == "w1:p1" || l.ClosedAt != 0 {
+		t.Fatalf("new lead = %+v", l)
+	}
+	kept := filepath.Join(d, fmt.Sprintf("handoff-%d.md", h.now.Unix()))
+	if _, err := os.Stat(kept); err != nil {
+		t.Fatalf("handoff not kept: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(d, "handoff.md")); err == nil {
+		t.Fatal("handoff.md left in place for the next respawn")
+	}
+	launch := callsOf(h.fakeState(), "agent", "prompt", l.PaneID)
+	if len(launch) != 1 {
+		t.Fatalf("launch = %v", launch)
+	}
+	wantContains(t, launch[0][3], filepath.Join(d, "task.md"), "read its handoff at "+kept, "worktree and branch already exist")
+	status := h.must("status")
+	if strings.Contains(status, "[context]") {
+		t.Fatalf("context decision still open:\n%s", status)
+	}
+	wantContains(t, status, "leads open: 1/3")
+	code, out := h.run("respawn", "t1")
+	if code != 1 || !strings.Contains(out, "no handoff.md") {
+		t.Fatalf("second respawn reused the old handoff: %d %q", code, out)
+	}
+}
+
 func TestPeekReadsEnoughLines(t *testing.T) {
 	h := setup(t)
 	h.task("t1")
@@ -733,6 +888,7 @@ func TestRunRootFollowsHerdrConfig(t *testing.T) {
 	}
 }
 
+// Two repos with the same folder name never share run state or locks.
 func TestConfigRejectsUnknownKeys(t *testing.T) {
 	h := setup(t)
 	os.MkdirAll(filepath.Join(h.repo, ".agents"), 0o755)

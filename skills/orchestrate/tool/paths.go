@@ -34,6 +34,9 @@ type userConfig struct {
 	MaxLeads   int      `toml:"max_leads"`
 	ClaudeArgs []string `toml:"claude_args"`
 	CodexArgs  []string `toml:"codex_args"`
+	// LeadContextLimit is the context size, in tokens, past which a lead
+	// handed unrelated work asks for a compact or a fresh session.
+	LeadContextLimit int `toml:"lead_context_limit"`
 	// Dispatch rules say which harness and model suit which work. orch only
 	// prints them; the orchestrator matches them by judgment.
 	Dispatch []dispatchRule `toml:"dispatch"`
@@ -155,7 +158,7 @@ func userConfigPath() string {
 	return filepath.Join(envOr("XDG_CONFIG_HOME", expandHome("~/.config")), "orchestrate", "config.toml")
 }
 
-var userKeys = []string{"max_leads", "claude_args", "codex_args", "dispatch"}
+var userKeys = []string{"max_leads", "claude_args", "codex_args", "lead_context_limit", "dispatch"}
 
 // decodeStrict refuses keys v has no field for. A key that belongs in the
 // other file gets a pointer there instead of "unknown key".
@@ -206,11 +209,16 @@ func readRepoConfig(path string, rc *repoConfig) error {
 	return nil
 }
 
+// loadUserConfig reads the machine's settings over their defaults. Leads use
+// it alone; they have no repo checkout to read the rest from.
+func loadUserConfig() (userConfig, error) {
+	uc := userConfig{MaxLeads: 3, LeadContextLimit: 150_000}
+	err := decodeStrict(userConfigPath(), &uc, repoKeys, "<repo>/.agents/orchestrate.toml")
+	return uc, err
+}
+
 func loadConfig(repo string) (config, error) {
-	cfg := config{
-		repoConfig: repoConfig{LeadSkills: []string{"route-work"}, QuietMinutes: 30},
-		userConfig: userConfig{MaxLeads: 3},
-	}
+	cfg := config{repoConfig: repoConfig{LeadSkills: []string{"route-work"}, QuietMinutes: 30}}
 	path := filepath.Join(repo, ".agents", "orchestrate.toml")
 	user := userConfigPath()
 	if err := readRepoConfig(path, &cfg.repoConfig); err != nil {
@@ -219,9 +227,11 @@ func loadConfig(repo string) (config, error) {
 	if _, err := os.Stat(path); err == nil {
 		cfg.repoFile = path
 	}
-	if err := decodeStrict(user, &cfg.userConfig, repoKeys, "<repo>/.agents/orchestrate.toml"); err != nil {
+	uc, err := loadUserConfig()
+	if err != nil {
 		return cfg, err
 	}
+	cfg.userConfig = uc
 	for i, r := range cfg.Dispatch {
 		if strings.TrimSpace(r.When) == "" || len(r.Use) == 0 {
 			return cfg, fail("%s: dispatch rule %d needs `when` and at least one `use` profile", user, i+1)
@@ -232,8 +242,8 @@ func loadConfig(repo string) (config, error) {
 			}
 		}
 	}
-	if cfg.MaxLeads < 1 || cfg.QuietMinutes < 1 {
-		return cfg, fail("max_leads (%s) and quiet_minutes (%s) must be at least 1", user, path)
+	if cfg.MaxLeads < 1 || cfg.QuietMinutes < 1 || cfg.LeadContextLimit < 1 {
+		return cfg, fail("max_leads and lead_context_limit (%s) and quiet_minutes (%s) must be at least 1", user, path)
 	}
 	if cfg.BaseBranch == "" {
 		cfg.BaseBranch = "HEAD"

@@ -225,10 +225,15 @@ func cmdSpawn(a *app, args []string) error {
 	if err := exactArgs(args, 1, "spawn <id>"); err != nil {
 		return err
 	}
+	return a.spawn(args[0], "")
+}
+
+// spawn starts a lead on a checked task; brief is appended to its launch
+// prompt.
+func (a *app) spawn(id, brief string) error {
 	if os.Getenv("HERDR_ENV") != "1" || os.Getenv("HERDR_WORKSPACE_ID") == "" {
 		return fail("spawn must run inside a Herdr pane (HERDR_ENV=1)")
 	}
-	id := args[0]
 	s, err := a.site()
 	if err != nil {
 		return err
@@ -275,6 +280,9 @@ func cmdSpawn(a *app, args []string) error {
 		return nil
 	}
 	launch := fmt.Sprintf("You are orchestrate lead %q. Read %s and follow it exactly, starting with its Report-back section.", id, filepath.Join(dir, "task.md"))
+	if brief != "" {
+		launch += " " + brief
+	}
 	if _, err := herdrCmd(herdrTimeout, "agent", "prompt", paneID, launch); err != nil {
 		return err
 	}
@@ -481,6 +489,7 @@ type row struct {
 	LastAt    int64   `json:"last_at,omitempty"`
 	Pane      string  `json:"pane,omitempty"`
 	Owner     string  `json:"owner,omitempty"`
+	Context   int     `json:"context,omitempty"`
 	Decisions []entry `json:"decisions"`
 }
 
@@ -522,6 +531,7 @@ func leadRows(root string, includeClosed bool) []row {
 			r.Herdr, r.Pane = "gone", l.PaneID
 			if ag, ok := agents[l.PaneID]; ok {
 				r.Herdr = ag.Status
+				r.Context = contextTokens(ag.Agent, ag.Session.Value)
 			}
 		}
 		if r.State == "" {
@@ -651,10 +661,17 @@ func (a *app) board(s site, rows []row) string {
 	if len(rows) == 0 {
 		return strings.Join(append(out, "no tasks yet"), "\n")
 	}
-	out = append(out, fmt.Sprintf("%-20s %-5s %-16s %-8s %6s  %s", "ID", "KIND", "AGENT", "HERDR", "AGE", "LAST"))
+	out = append(out, fmt.Sprintf("%-20s %-5s %-16s %-8s %5s %6s  %s", "ID", "KIND", "AGENT", "HERDR", "CTX", "AGE", "LAST"))
 	var decisions []string
 	for _, r := range rows {
-		out = append(out, fmt.Sprintf("%-20s %-5s %-16s %-8s %6s  %s", r.ID, r.Kind, short(r.Agent, 16), r.Herdr, a.age(r.LastAt), short(r.Last, 70)))
+		ctx := "-"
+		if r.Context > 0 {
+			ctx = kTokens(r.Context)
+			if r.Context >= s.cfg.LeadContextLimit {
+				ctx += "!"
+			}
+		}
+		out = append(out, fmt.Sprintf("%-20s %-5s %-16s %-8s %5s %6s  %s", r.ID, r.Kind, short(r.Agent, 16), r.Herdr, ctx, a.age(r.LastAt), short(r.Last, 70)))
 		for _, d := range r.Decisions {
 			key := ""
 			if d.Key != "" {
@@ -943,6 +960,19 @@ func cmdClose(a *app, args []string) error {
 		}
 		return fail("%s last reported %s; close after done or failed, or pass --force once the user has agreed to drop its work", l.ID, state)
 	}
+	note := "closed by orchestrator"
+	if *force {
+		note += " (forced)"
+	}
+	if err := a.closeLead(dir, l, note); err != nil {
+		return err
+	}
+	fmt.Fprintln(a.out, "closed "+l.Name)
+	return nil
+}
+
+// closeLead closes the lead's pane, frees its locks and logs note.
+func (a *app) closeLead(dir string, l *lead, note string) error {
 	exists, err := paneExists(l.PaneID)
 	if err != nil {
 		return err
@@ -957,17 +987,99 @@ func cmdClose(a *app, args []string) error {
 	if err := saveLead(dir, l); err != nil {
 		return err
 	}
-	note := "closed by orchestrator"
-	if *force {
-		note += " (forced)"
-	}
 	if freed := releaseLocks(dir); len(freed) > 0 {
 		note += "; released " + strings.Join(freed, ", ")
 	}
-	if err := a.appendStatus(dir, "note", note, "", "orch"); err != nil {
+	return a.appendStatus(dir, "note", note, "", "orch")
+}
+
+// contextKey is the decision key a lead reports when its context is too full
+// for the next piece of work; compact and respawn both answer it.
+const contextKey = "context"
+
+const compactFocus = "Keep the task.md contract, decisions made with their reasons, the state of the work and the next steps. Drop file contents, tool output and anything unrelated to the next piece of work."
+
+// cmdCompact has a lead's harness compact its context, then points the lead
+// back at its contract.
+func cmdCompact(a *app, args []string) error {
+	if len(args) < 1 {
+		return &exitError{code: 2, msg: "usage: orch compact <id> [focus...]"}
+	}
+	dir, l, err := a.requireLead(args[0])
+	if err != nil {
 		return err
 	}
-	fmt.Fprintln(a.out, "closed "+l.Name)
+	agents, err := agentMap()
+	if err != nil {
+		return err
+	}
+	if st := agents[l.PaneID].Status; st != "idle" && st != "done" {
+		return fail("%s is %s; compact only between turns (wait for idle, or orch peek %s)", l.ID, st, l.ID)
+	}
+	focus := strings.Join(args[1:], " ")
+	if focus == "" {
+		focus = compactFocus
+	}
+	before := contextTokens(agents[l.PaneID].Agent, agents[l.PaneID].Session.Value)
+	if _, err := herdrCmd(16*time.Minute, "agent", "prompt", l.PaneID, "/compact "+focus, "--wait", "--timeout", "900000"); err != nil {
+		return err
+	}
+	resume := fmt.Sprintf("orch: your context was compacted. Re-read %s and %s if it exists, then go on with the work in your last inbox message.",
+		filepath.Join(dir, "task.md"), filepath.Join(dir, "handoff.md"))
+	if _, err := herdrCmd(herdrTimeout, "agent", "prompt", l.PaneID, resume); err != nil {
+		return err
+	}
+	if err := a.resolveContext(dir, "compacted"); err != nil {
+		return err
+	}
+	line := "compacted " + l.Name
+	if agents, err := agentMap(); err == nil && before > 0 {
+		ag := agents[l.PaneID]
+		line += fmt.Sprintf(" (%s -> %s)", kTokens(before), kTokens(contextTokens(ag.Agent, ag.Session.Value)))
+	}
+	fmt.Fprintln(a.out, line)
+	return nil
+}
+
+// cmdRespawn replaces a lead whose context is spent with a fresh session on
+// the same task, worktree and branch. It starts from the handoff.md the old
+// lead wrote, which it renames so a later respawn needs a new one.
+func cmdRespawn(a *app, args []string) error {
+	if err := exactArgs(args, 1, "respawn <id>"); err != nil {
+		return err
+	}
+	dir, l, err := a.requireLead(args[0])
+	if err != nil {
+		return err
+	}
+	handoff := filepath.Join(dir, "handoff.md")
+	if _, err := os.Stat(handoff); err != nil {
+		return fail("%s has no handoff.md; ask the lead to write one (Context budget in the lead protocol) first", l.ID)
+	}
+	kept := filepath.Join(dir, fmt.Sprintf("handoff-%d.md", a.now().Unix()))
+	if err := os.Rename(handoff, kept); err != nil {
+		return err
+	}
+	if err := a.closeLead(dir, l, "closed for respawn with a fresh context"); err != nil {
+		return err
+	}
+	if err := a.resolveContext(dir, "respawned with a fresh context"); err != nil {
+		return err
+	}
+	brief := fmt.Sprintf("You replace a lead whose context filled up: read its handoff at %s before anything else. Its worktree and branch already exist; continue in them, and retake any lock the handoff names.", kept)
+	if err := a.spawn(l.ID, brief); err != nil {
+		return fail("closed %s, but the new lead did not start: %v. The handoff is kept at %s", l.Name, err, kept)
+	}
+	return nil
+}
+
+// resolveContext closes an open context decision, if the lead raised one.
+func (a *app) resolveContext(dir, how string) error {
+	for _, d := range openDecisions(readStatus(dir)) {
+		if d.Key == contextKey {
+			return a.appendStatus(dir, "resolved", how, contextKey, "orch")
+		}
+	}
 	return nil
 }
 

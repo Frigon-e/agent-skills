@@ -106,6 +106,7 @@ your turn:
 |---|---|
 | `done` | Check the evidence before believing it. Ship: `git log -1 <sha>` on the named branch, plus the check result the report cites. Scout: read `report.md`, or have a scout summarise a long one. Tell the user in a line or two. Merging is a separate instruction (`orch send`) given once the user approves, using the repo's own merge flow. Then `orch close <id>`. |
 | `needs-decision [key]` | If the user's earlier answers settle it, `orch send <id> --resolve <key> "<answer>"`. Otherwise ask the user, batching open decisions, then send the answer. |
+| `needs-decision [context]` | The lead's context is past the limit and the next work is unrelated; it wrote `handoff.md` and stopped. Decide it yourself, without the user: `orch compact <id>` when the next work shares some of its context, `orch respawn <id>` (fresh session on the same task and worktree, started from the handoff) when it shares none. Both resolve the decision. |
 | `blocked` | Same as needs-decision; `orch peek <id>` if the line is unclear. |
 | `failed` | Read why. Fix the brief and send, or close and respawn on a stronger model with the failure in the brief. Two failures on the same brief mean the brief is wrong. |
 | `ui-blocked` | The pane waits at a prompt, often a permission. `orch peek <id>`. Tell the user and `orch focus <id>`; never answer permission prompts for them. |
@@ -149,9 +150,10 @@ other way.
   `references/repo-config.md` owns its keys, what a note may hold, when
   to change it (rarely, with evidence and the user's approval) and setup.
   Settings a repo must not control live in
-  `~/.config/orchestrate/config.toml`: `max_leads`, `claude_args` and
-  `codex_args` (extra CLI flags for leads) and `dispatch` rules. orch
-  refuses them in a repo file, so a commit can't change how leads launch.
+  `~/.config/orchestrate/config.toml`: `max_leads`, `lead_context_limit`,
+  `claude_args` and `codex_args` (extra CLI flags for leads) and `dispatch`
+  rules. orch refuses them in a repo file, so a commit can't change how
+  leads launch.
 - Run state lives next to the repo's Herdr worktrees:
   `<herdr worktrees dir>/<repo>/.orchestrate/<id>/`. It holds task.md,
   lead.json (with the owning orchestrator pane), status.log, inbox/ and
@@ -159,5 +161,9 @@ other way.
   the task folders. Ship worktrees sit beside
   it at `<herdr worktrees dir>/<repo>/<id>`. Disk is the truth; the board
   is a view of it.
+- The board's CTX column is each lead's context size, marked `!` past
+  `lead_context_limit` (user config, default 150000). Before you send a
+  lead new work that is unrelated to its task, check it: past the limit,
+  respawn or compact first instead of waiting for the lead to ask.
 - `orch status --json` gives the same board in machine-readable form.
   `orch peek <id> --lines N` tails a pane.
