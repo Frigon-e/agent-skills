@@ -9,7 +9,7 @@ The goal is to spend strong-model attention only on decisions and cheap-model to
 
 Roles (a **delegate** is any subagent doing the work; the **plan** is what you hand it):
 - **You (the main session):** judgment. Root causes, design decisions, plans, final verification.
-- **`context-explorer` (Haiku):** finding and sizing. Asked for it (step 1), it reports change sites with line estimates, tests, risk flags and open questions. It gathers evidence; it doesn't decide.
+- **`context-explorer` (Haiku):** finding and sizing. In `scope` mode (step 1) it reports change sites, blast radius, tests, risk flags, open questions and a size guess. It gathers evidence; it doesn't decide.
 - **`implementer` (Sonnet, medium effort by default):** executing a plan. Pass `model: "haiku"` for short, checkable plans (see step 3).
 - **`fable-planner` (Fable, read-only):** last-resort diagnosis and plan when you and the delegates are stuck. Rare and expensive; see step 4.
 - **`lens-reviewer` (Sonnet):** checks a change through one narrow lens (spec, callers, security, …), reporting only high-confidence issues of that class. Used for risky changes, not routine ones.
@@ -20,7 +20,7 @@ Roles (a **delegate** is any subagent doing the work; the **plan** is what you h
 Context costs twice. Every turn re-reads all of it, and recall and instruction-following get worse as it grows, most of all when it is unrelated to the current step. So before doing a step yourself, ask whether its raw output will matter to a later decision. If not, a subagent does it and you keep only its conclusion.
 
 - **Browser and UI: always a subagent.** Every browser call, screenshot and visual or E2E check goes to `ui-verifier`, whatever the size of the change or the session. Give it the URL, the steps, the checks and the viewports.
-- **Sizing goes to a scout.** Don't read code to estimate how big a change is: a `context-explorer` reports the change sites and an estimated line count (step 1). Open only the files the decision turns on or that you will edit.
+- **Sizing goes to a scout.** Don't read code to estimate how big a change is: a `context-explorer` in `scope` mode reports the change sites and a size guess (step 1). Open only the files the decision turns on or that you will edit.
 - **Single-use output goes to a subagent:** wide reads across a subsystem, log digging, searches whose hits you'll mostly discard.
 - **Long sessions tip the balance.** Past about 100K, delegate even small steps whose output you won't reuse. Work that builds on what you already hold (a fix in code you just read) stays with you; re-teaching it to a delegate costs more.
 
@@ -32,16 +32,13 @@ Skip it when the change site is already in your context, or the user named the f
 
 Triage when the request describes behavior rather than location ("exports sometimes drop rows"), spans areas you haven't seen, or you can't yet say which files change or how big the change is. The scout's size estimate, not your own reading, sets the route in step 3. For requests touching several independent areas, run one scout per area in parallel.
 
-Prompt the scout with the request in the user's words plus anything you already know, and spell out the report you need (the agent has no built-in scope format):
+Prompt the scout with the request in the user's words plus anything you already know:
 
 ```
+Mode: scope
 Goal: <the change request, verbatim where possible>
 Scope: <directory or files, if known>
 Known: <facts you already have, so it doesn't re-find them>
-Report: each change site as path:line with what changes there and an
-estimated line count; the total estimate; tests that cover it; risk flags
-(auth, persistence, concurrency, money, public API); open questions.
-No explanations beyond that.
 ```
 
 ## 2. Check the evidence, then judge

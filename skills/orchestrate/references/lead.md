@@ -40,7 +40,7 @@ crowds out what matters. Route by context as well as by model (`route-work`,
   run and visual check goes to `ui-verifier`; you get its verdict and
   defects.
 - **Let a scout size the work.** Have `context-explorer` report change
-  sites and line estimates instead of reading code to find out.
+  sites and a size guess (`Mode: scope`) instead of reading code to find out.
 - **Delegate single-use output:** wide reads, log digging, searches.
 
 **Full context and new work.** When `orch inbox` prints a `context:` line,
