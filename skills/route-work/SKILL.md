@@ -1,39 +1,52 @@
 ---
 name: route-work
-description: Decides how a coding task gets done and by which model. Triage unclear scope with a cheap Haiku scout, judge how much design work is still open, then either do it yourself or hand a concrete plan to a cheaper implementer agent, and verify the result. Use this for any request to implement, fix, change, refactor, or add something in a codebase (bug reports, feature requests, "make X do Y", tickets, multi-part changes), especially when the scope isn't clear yet or the work could be split up. Not needed for pure questions, explanations, or reviews where no code changes.
+description: Decides how a coding task gets done, by which model and in which context. Size scope with a cheap Haiku scout, keep single-use output (browser, wide reads, logs) out of the main context, judge how much design work is still open, then either do it yourself or hand a concrete plan to a cheaper implementer agent, and verify the result. Use this for any request to implement, fix, change, refactor, or add something in a codebase (bug reports, feature requests, "make X do Y", tickets, multi-part changes), especially when the scope isn't clear yet or the work could be split up. Not needed for pure questions, explanations, or reviews where no code changes.
 ---
 
 # Route work by what's still undecided
 
-The goal is to spend strong-model attention only on decisions and cheap-model tokens on finding and typing. What sets the right model isn't how big the task sounds. It's **how much judgment remains** once the code is understood. A large feature with a precise plan is mechanical; a two-line fix with an unclear root cause isn't.
+The goal is to spend strong-model attention only on decisions and cheap-model tokens on finding and typing. What sets the right model isn't how big the task sounds. It's **how much judgment remains** once the code is understood. A large feature with a precise plan is mechanical; a two-line fix with an unclear root cause isn't. What sets *where* work happens is context: what your session already holds, and whether a step's output will matter to a later decision.
 
 Roles (a **delegate** is any subagent doing the work; the **plan** is what you hand it):
 - **You (the main session):** judgment. Root causes, design decisions, plans, final verification.
-- **`context-explorer` (Haiku):** finding. In `scope` mode it reports change sites, blast radius, tests, risk flags and open questions. It gathers evidence; it doesn't decide.
+- **`context-explorer` (Haiku):** finding and sizing. Asked for it (step 1), it reports change sites with line estimates, tests, risk flags and open questions. It gathers evidence; it doesn't decide.
 - **`implementer` (Sonnet, medium effort by default):** executing a plan. Pass `model: "haiku"` for short, checkable plans (see step 3).
 - **`fable-planner` (Fable, read-only):** last-resort diagnosis and plan when you and the delegates are stuck. Rare and expensive; see step 4.
 - **`lens-reviewer` (Sonnet):** checks a change through one narrow lens (spec, callers, security, …), reporting only high-confidence issues of that class. Used for risky changes, not routine ones.
+- **`ui-verifier` (Sonnet):** drives the browser for every UI, visual or E2E check and returns a verdict with defects, never screenshots.
+
+## Context is a routing input
+
+Context costs twice. Every turn re-reads all of it, and recall and instruction-following get worse as it grows, most of all when it is unrelated to the current step. So before doing a step yourself, ask whether its raw output will matter to a later decision. If not, a subagent does it and you keep only its conclusion.
+
+- **Browser and UI: always a subagent.** Every browser call, screenshot and visual or E2E check goes to `ui-verifier`, whatever the size of the change or the session. Give it the URL, the steps, the checks and the viewports.
+- **Sizing goes to a scout.** Don't read code to estimate how big a change is: a `context-explorer` reports the change sites and an estimated line count (step 1). Open only the files the decision turns on or that you will edit.
+- **Single-use output goes to a subagent:** wide reads across a subsystem, log digging, searches whose hits you'll mostly discard.
+- **Long sessions tip the balance.** Past about 100K, delegate even small steps whose output you won't reuse. Work that builds on what you already hold (a fix in code you just read) stays with you; re-teaching it to a delegate costs more.
 
 Tell the user the route in one line when you pick it (for example "Scope is clear and small, so fixing directly" or "Triaging first; the request spans billing and export"), so they can redirect early.
 
 ## 1. Is triage needed?
 
-Skip it when you already know where the change goes: the user named the file or function, it's in context, or one quick search pins it down. A scout pass on a known small fix only adds latency.
+Skip it when the change site is already in your context, or the user named the file or function and the change is obviously small. A scout pass on a known small fix only adds latency.
 
-Triage when the request describes behavior rather than location ("exports sometimes drop rows"), spans areas you haven't seen, or you can't yet say which files change. For requests touching several independent areas, run one scout per area in parallel.
+Triage when the request describes behavior rather than location ("exports sometimes drop rows"), spans areas you haven't seen, or you can't yet say which files change or how big the change is. The scout's size estimate, not your own reading, sets the route in step 3. For requests touching several independent areas, run one scout per area in parallel.
 
-Prompt the scout with the request in the user's words plus anything you already know:
+Prompt the scout with the request in the user's words plus anything you already know, and spell out the report you need (the agent has no built-in scope format):
 
 ```
-Mode: scope
 Goal: <the change request, verbatim where possible>
 Scope: <directory or files, if known>
 Known: <facts you already have, so it doesn't re-find them>
+Report: each change site as path:line with what changes there and an
+estimated line count; the total estimate; tests that cover it; risk flags
+(auth, persistence, concurrency, money, public API); open questions.
+No explanations beyond that.
 ```
 
 ## 2. Check the evidence, then judge
 
-Treat the scout's report as a map: open the top 1–3 change sites yourself before deciding. That usually takes a few reads and tells you whether the "small" guess is real. Reading a report can't show what the scout missed, so when completeness matters (every caller, every config site), spot-check one area yourself or split it into narrower scouts whose coverage you can check.
+Treat the scout's report as a map: open the 1–3 change sites the decision turns on (usually ones you'll edit anyway) before deciding. That tells you whether the "small" guess is real without a wide read. Reading a report can't show what the scout missed, so when completeness matters (every caller, every config site), spot-check one area yourself or split it into narrower scouts whose coverage you can check.
 
 Then answer:
 - **Open decisions:** is the root cause known? Is the intended behavior unambiguous? Are there design choices left (data shape, algorithm, error semantics, API)?
@@ -80,7 +93,8 @@ You hold the verifier, so you make the escalation call, never the delegate. A fa
 
 ## 5. Verify
 
-- Implementers run tests and add a regression test. Check their report shows real test output, not just "done", then **rerun the tests yourself**. Your run is the verifier that decides whether to escalate.
+- Implementers run tests and add a regression test. Check their report shows real test output, not just "done", then **rerun the tests yourself**. Your run is the verifier that decides whether to escalate. Filter the output (`| tail`, the runner's quiet flag) so only the summary and failures enter your context.
+- UI changes: have `ui-verifier` check the result in the browser, with the checks from the plan's Behavior line.
 - **Read the final diff yourself.** It's cheap and catches drift from the plan, scope creep, and edits to tests that make them pass rather than check the behavior.
 - For routine changes, stop there. The implementer's tests plus your diff read already cover them, and a reviewer mostly adds cost.
 
@@ -94,8 +108,11 @@ Codex spawns its custom agents (`~/.codex/agents`) in place of the roles above; 
 - `implementer` → `plan_implementer`. It has one configured model, so the Haiku and Sonnet rows both route to it.
 - `lens-reviewer` → `full_reviewer` for risky changes, `fast_reviewer` to re-check a narrow fix; `silent_failure_hunter` and `test_coverage_analyst` as extra lenses.
 - `fable-planner` → none. In an orchestrate lead, report `needs-decision` with the evidence; otherwise ask the user.
+- `ui-verifier` → no custom agent yet. Spawn a default subagent with the browser, and give it the input and report format from `~/.claude/agents/ui-verifier.md`.
 
 ## Pitfalls
+- Driving the browser or taking screenshots in the main session.
+- Reading code to size a change that a scout could size.
 - Delegating a change smaller than its plan.
 - Triaging a location you already know.
 - Letting the scout's size guess make the decision without opening the code.
