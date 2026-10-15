@@ -12,6 +12,8 @@ A general "review this" pass mostly produces nitpicks. Narrow reviewers that eac
 | Code with docstrings, invariants, or a CLAUDE.md with rules | `contracts` |
 | New or changed tests are the main evidence it works | `tests` |
 | Risk flags from triage: auth/input, persistence, concurrency, money | `security`, `data`, `concurrency`, `money` (whichever match) |
+| New error handling, retries, fallbacks, or catch blocks | `errors` |
+| Large diff that adds helpers, abstractions, or parallel code paths | `simplify` |
 | None of the above, but you still want a second look | `bugs` |
 
 Two or three lenses are typical, and more than five usually means the change should have been split. Pass each one the lens, the requirement or plan, the diff command, and the scope report if there is one.
