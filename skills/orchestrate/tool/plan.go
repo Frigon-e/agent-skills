@@ -313,6 +313,18 @@ func ownsOverlap(a, b string) bool {
 	return pa == pb || (da && strings.HasPrefix(pb, pa+"/")) || (db && strings.HasPrefix(pa, pb+"/"))
 }
 
+// sameGitCommonDir reports whether two checkouts belong to one repository.
+func sameGitCommonDir(a, b string) bool {
+	ca, err1 := git(a, "rev-parse", "--path-format=absolute", "--git-common-dir")
+	cb, err2 := git(b, "rev-parse", "--path-format=absolute", "--git-common-dir")
+	if err1 != nil || err2 != nil || ca == "" || cb == "" {
+		return false
+	}
+	ra, err1 := filepath.EvalSymlinks(ca)
+	rb, err2 := filepath.EvalSymlinks(cb)
+	return err1 == nil && err2 == nil && ra == rb
+}
+
 func cmdPlan(a *app, args []string) error {
 	fs := a.flags("plan")
 	dry := fs.Bool("dry-run", false, "check the spec and show what would be created; write nothing")
@@ -335,11 +347,16 @@ func cmdPlan(a *app, args []string) error {
 	if err != nil {
 		return fail("spec %s: %v", pos[0], err)
 	}
-	repo, err := filepath.EvalSymlinks(s.repo)
-	if err != nil {
+	// The spec may live in a linked worktree of the repo (its base branch is
+	// checked out there), so its path is taken from that worktree's top-level.
+	top, err := git(filepath.Dir(real), "rev-parse", "--show-toplevel")
+	if err != nil || top == "" || !sameGitCommonDir(top, s.repo) {
+		return fail("spec %s is not inside the repo %s", pos[0], s.repo)
+	}
+	if top, err = filepath.EvalSymlinks(top); err != nil {
 		return err
 	}
-	rel, err := filepath.Rel(repo, real)
+	rel, err := filepath.Rel(top, real)
 	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 		return fail("spec %s is not inside the repo %s", pos[0], s.repo)
 	}
@@ -361,7 +378,7 @@ func cmdPlan(a *app, args []string) error {
 		sp.add("base %q does not resolve in %s", baseBranch, s.repo)
 	} else if _, err := git(s.repo, "cat-file", "-e", sha+":"+rel); err != nil {
 		sp.add("%s is not in %s: commit the spec to %s first; leads read it from their worktree", rel, baseBranch, baseBranch)
-	} else if _, err := git(s.repo, "diff", "--quiet", sha, "--", rel); err != nil {
+	} else if _, err := git(top, "diff", "--quiet", sha, "--", rel); err != nil {
 		sp.add("spec has changes not in %s: commit them first", baseBranch)
 	}
 

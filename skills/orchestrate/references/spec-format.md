@@ -7,7 +7,9 @@ writes specs; a person or a scout lead can write one too.
 
 The spec lives in the repo (where the repo keeps specs, for example
 `docs/<product>/specs/`). Commit it to the base branch before `orch plan`:
-leads read it from their own worktree.
+leads read it from their own worktree. `orch plan` also accepts a spec that
+sits in a linked worktree of the repo, when it is committed to that
+worktree's branch (the spec's `base:`).
 
 ## Format
 
