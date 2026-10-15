@@ -274,7 +274,7 @@ func (a *app) spawn(id, brief string) error {
 		return err
 	}
 	start := append([]string{"agent", "start", name, "--kind", fm["harness"], "--pane", paneID, "--timeout", "90000", "--"}, harnessArgs(fm, s.cfg)...)
-	if _, err := herdrCmd(120*time.Second, start...); err != nil {
+	if err := startAgent(start); err != nil {
 		_ = a.appendStatus(dir, "note", "agent did not report ready in pane "+paneID, "", "orch")
 		fmt.Fprintf(a.out, "opened pane %s for %s, but the agent is not ready (%v). Look with: orch peek %s; give up with: orch close %s --force\n", paneID, name, err, id, id)
 		return nil
@@ -301,6 +301,26 @@ func (a *app) spawn(id, brief string) error {
 		fmt.Fprintf(a.out, "no watcher running: start `%s watch` with the Monitor tool\n", selfPath())
 	}
 	return nil
+}
+
+// A new pane is not an available shell until its prompt is up; Herdr refuses
+// `agent start` at once with agent_pane_busy instead of waiting. Herdr 0.9.3
+// has no readiness signal to poll (pane get reports agent_status "unknown"),
+// so retry on that one error, bounded. Any other error returns unchanged.
+var (
+	agentStartBusyFor = 10 * time.Second
+	agentStartBackoff = 100 * time.Millisecond
+)
+
+func startAgent(args []string) error {
+	deadline := time.Now().Add(agentStartBusyFor)
+	for wait := agentStartBackoff; ; wait = min(wait*2, time.Second) {
+		_, err := herdrCmd(120*time.Second, args...)
+		if err == nil || !strings.Contains(err.Error(), "agent_pane_busy") || time.Now().Add(wait).After(deadline) {
+			return err
+		}
+		time.Sleep(wait)
+	}
 }
 
 func harnessArgs(fm map[string]string, cfg config) []string {
