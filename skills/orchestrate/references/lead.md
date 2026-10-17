@@ -71,7 +71,7 @@ One line per state change: `orch report [--key <slug>] <state> "<line>"`.
 | `working` | Starting, resuming after a message, or ending a turn while waiting on your own subagents (say on what). |
 | `needs-decision` | Something only the orchestrator or user can settle. Write a question card (`question-card` skill) to `questions/<key>.md` in your task directory in the format of `references/question-file.md`, report with that `--key` and the question as the line, then keep going on parts it doesn't block. |
 | `blocked` | You can't continue at all. Say what would unblock you. |
-| `paused` | You were told to stop, or you are waiting on another task. |
+| `paused` | You were told to stop, or you are waiting on another task. It does not wake the orchestrator; to hand off a full context or ask for anything, use `needs-decision`. |
 | `done` | Acceptance is met. Ship: branch, head sha, and the check command with its result. Scout: the report path and a one-line answer. |
 | `failed` | You can't meet Acceptance. Say what you tried and why it failed. |
 | `note` | Something the orchestrator should see in the log that needs no action. Start it with `config:` when every task in this repo would trip on it and the repo's docs don't say so (two leads fighting over one resource, a wrong check command): say what happened, not a fix. |

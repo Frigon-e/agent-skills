@@ -459,6 +459,18 @@ func TestWatchQuietSkipsWaitingLeads(t *testing.T) {
 	}
 }
 
+func TestReportContextKeyNeedsDecision(t *testing.T) {
+	h := setup(t)
+	h.task("t1")
+	h.must("spawn", "t1")
+	code, out := h.run("report", "--dir", h.dir("t1"), "--key", "context", "paused", "handoff written")
+	if code == 0 || !strings.Contains(out, "needs-decision") {
+		t.Fatalf("paused --key context: %d %q", code, out)
+	}
+	wantContains(t, h.must("report", "--dir", h.dir("t1"), "--key", "context", "needs-decision", "full"), "reported needs-decision")
+	wantContains(t, h.must("report", "--dir", h.dir("t1"), "paused", "waiting"), "not woken by paused")
+}
+
 func TestWatchCheckpointTimeout(t *testing.T) {
 	h := setup(t)
 	h.task("t1")
@@ -504,6 +516,13 @@ func TestTwoOrchestratorsOneRepo(t *testing.T) {
 	if strings.Contains(status, "a finished") {
 		t.Fatalf("board lists another orchestrator's lead:\n%s", status)
 	}
+	// A live owner pane has a watcher; a gone one leaves its leads unwatched.
+	h.editFake(func(st *fakeState) { st.Panes["w1:p0"] = "w1:t0" })
+	if out := h.must("status"); strings.Contains(out, "pane gone") {
+		t.Fatalf("live owner flagged:\n%s", out)
+	}
+	h.editFake(func(st *fakeState) { delete(st.Panes, "w1:p0") })
+	wantContains(t, h.must("status"), "other orchestrators: w1:p0 has 1 open (a1) - pane gone", "orch adopt")
 
 	t.Setenv("HERDR_PANE_ID", "w1:p0")
 	if out := h.must("watch", "--once"); out != "orch: a1 done: a finished\n" {
@@ -888,7 +907,41 @@ func TestRunRootFollowsHerdrConfig(t *testing.T) {
 	}
 }
 
-// Two repos with the same folder name never share run state or locks.
+// Two repos with the same folder name never share run state. Locks stay
+// machine-wide on purpose (see locks.go).
+func TestSameNameReposStayApart(t *testing.T) {
+	h := setup(t)
+	other := filepath.Join(h.tmp, "elsewhere", "repo")
+	for _, args := range [][]string{{"init", "-q", "-b", "main", other}, {"-C", other, "commit", "-q", "--allow-empty", "-m", "init"}} {
+		if out, err := exec.Command("git", args...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	os.WriteFile(os.Getenv("ORCH_CONFIG"), []byte("max_leads = 5\n"), 0o644)
+	h.task("t1")
+	h.must("spawn", "t1")
+	first := runRoot(h.repo)
+
+	h.a.cwd = other
+	if got := runRoot(other); got == first {
+		t.Fatalf("both repos use run root %s", got)
+	}
+	if out := h.must("status"); !strings.Contains(out, "no tasks yet") {
+		t.Fatalf("second repo sees the first repo's task:\n%s", out)
+	}
+	h.task("t1")
+	if got := runRoot(other); got != runRoot(other) || !strings.Contains(filepath.Base(filepath.Dir(got))+filepath.Base(got), "repo-") {
+		t.Fatalf("second repo's root is not a stable hashed name: %s", got)
+	}
+	if _, err := os.Stat(filepath.Join(runRoot(other), "t1", "task.md")); err != nil {
+		t.Fatalf("second repo's task not in its own root: %v", err)
+	}
+	if runRoot(h.repo) != first {
+		t.Fatal("first repo's run root moved")
+	}
+
+}
+
 func TestConfigRejectsUnknownKeys(t *testing.T) {
 	h := setup(t)
 	os.MkdirAll(filepath.Join(h.repo, ".agents"), 0o755)
@@ -1394,7 +1447,7 @@ func (h *harness) planRefused(want ...string) {
 		h.t.Fatalf("plan exited %d, want 1:\n%s", code, out)
 	}
 	wantContains(h.t, out, append([]string{"problems[", "nothing was created"}, want...)...)
-	if entries, _ := os.ReadDir(filepath.Join(h.tmp, "state", "repo")); len(entries) > 0 {
+	if entries := allTasks(runRoot(h.repo)); len(entries) > 0 {
 		h.t.Fatalf("refused plan created tasks: %v", entries)
 	}
 }

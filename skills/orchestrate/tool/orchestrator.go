@@ -102,6 +102,9 @@ func newTask(s site, o taskOpts) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	if err := claimRoot(s.root, s.repo); err != nil {
+		return "", err
+	}
 	if err := os.MkdirAll(filepath.Join(dir, "inbox", "handled"), 0o755); err != nil {
 		return "", err
 	}
@@ -666,7 +669,12 @@ func (a *app) board(s site, rows []row) string {
 		fmt.Sprintf("watcher: %s · leads open: %s", watcher, count),
 	}
 	for _, o := range owners {
-		out = append(out, fmt.Sprintf("other orchestrators: %s has %d open (%s)", o, len(others[o]), short(strings.Join(others[o], ", "), 80)))
+		line := fmt.Sprintf("other orchestrators: %s has %d open (%s)", o, len(others[o]), short(strings.Join(others[o], ", "), 80))
+		// No pane means no watcher: those leads report into a log nobody reads.
+		if exists, err := paneExists(o); err == nil && !exists {
+			line += " - pane gone, nobody watches them; take over with orch adopt <id>"
+		}
+		out = append(out, line)
 	}
 	if len(unowned) > 0 {
 		out = append(out, fmt.Sprintf("unowned: %s (spawned before per-orchestrator watchers, so every orchestrator sees them; claim with orch adopt <id>)", short(strings.Join(unowned, ", "), 80)))
@@ -729,7 +737,7 @@ func cmdWatch(a *app, args []string) error {
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(s.root, 0o755); err != nil {
+	if err := claimRoot(s.root, s.repo); err != nil {
 		return err
 	}
 	me := orchID()

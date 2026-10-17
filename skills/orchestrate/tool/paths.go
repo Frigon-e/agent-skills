@@ -1,6 +1,8 @@
 package main
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -80,7 +82,12 @@ func (a *app) site() (site, error) {
 	if err != nil {
 		return site{}, err
 	}
-	return site{repo: repo, root: runRoot(repo), cfg: cfg}, nil
+	root := runRoot(repo)
+	if _, err := os.Stat(root); err == nil {
+		// Existing state, possibly from before the marker: record whose it is.
+		_ = claimRoot(root, repo)
+	}
+	return site{repo: repo, root: root, cfg: cfg}, nil
 }
 
 func git(dir string, args ...string) (string, error) {
@@ -135,9 +142,21 @@ func herdrWorktreesDir() string {
 }
 
 // runRoot keeps a repo's run state next to its Herdr worktrees, so both live
-// under one directory per repo.
+// under one directory per repo. The directory is named after the repo folder
+// and records the repo path in a `.repo` file (see claimRoot); a different
+// repo with the same folder name gets a path hash added instead of sharing
+// the first one's state. It only reads, so a dry run still writes nothing.
 func runRoot(repo string) string {
 	name := filepath.Base(repo)
+	plain := runRootNamed(name)
+	if owner := rootOwner(plain); owner == "" || owner == repo {
+		return plain
+	}
+	sum := sha256.Sum256([]byte(repo))
+	return runRootNamed(name + "-" + hex.EncodeToString(sum[:4]))
+}
+
+func runRootNamed(name string) string {
 	if home := os.Getenv("ORCH_HOME"); home != "" {
 		return filepath.Join(expandHome(home), name)
 	}
@@ -145,6 +164,32 @@ func runRoot(repo string) string {
 		return filepath.Join(dir, name, ".orchestrate")
 	}
 	return filepath.Join(expandHome("~/.local/state/orchestrate"), name)
+}
+
+// rootOwner is the repo path recorded in root, or "" when nobody claimed it.
+func rootOwner(root string) string {
+	b, _ := os.ReadFile(filepath.Join(root, ".repo"))
+	return strings.TrimSpace(string(b))
+}
+
+// claimRoot records repo as the owner of root, creating root. Call it where
+// state is first written. A root from before the marker belongs to the first
+// repo that claims it. The marker is created exclusively, so of two repos that
+// race for one name the loser is told and must re-resolve with runRoot.
+func claimRoot(root, repo string) error {
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		return err
+	}
+	f, err := os.OpenFile(filepath.Join(root, ".repo"), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+	if err != nil {
+		if owner := rootOwner(root); owner != repo && owner != "" {
+			return fail("%s already belongs to %s; run orch again", root, owner)
+		}
+		return nil
+	}
+	defer f.Close()
+	_, err = f.WriteString(repo + "\n")
+	return err
 }
 
 func rolesDir() string {

@@ -35,7 +35,7 @@ func TestPlanFromLinkedWorktree(t *testing.T) {
 
 	out := h.must("plan", "spec.md", "--dry-run")
 	wantContains(t, out, "spec: spec.md", "packages: 3", "  store,ship,haiku,,would-create")
-	if entries, _ := os.ReadDir(filepath.Join(h.tmp, "state", "repo")); len(entries) > 0 {
+	if entries := allTasks(runRoot(h.repo)); len(entries) > 0 {
 		t.Fatalf("dry run created tasks: %v", entries)
 	}
 

@@ -50,10 +50,19 @@ func cmdReport(a *app, args []string) error {
 	if *key != "" && !keyRe.MatchString(*key) {
 		return fail("--key must be a short lowercase slug")
 	}
+	if *key == contextKey && state != "needs-decision" {
+		return fail("--key %s is the full-context handoff and must be reported as needs-decision (lead protocol, \"Context budget\")", contextKey)
+	}
 	if err := a.appendStatus(dir, state, text, *key, ""); err != nil {
 		return err
 	}
 	fmt.Fprintln(a.out, "reported "+state)
+	if state == "paused" || state == "note" {
+		// These are logged but never wake the orchestrator; say so, so a lead
+		// that needs an answer does not wait on one. working is routine and
+		// stays quiet.
+		fmt.Fprintln(a.out, "the orchestrator is not woken by "+state+"; use needs-decision, blocked, done or failed to reach it")
+	}
 	return nil
 }
 
