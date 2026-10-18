@@ -10,8 +10,19 @@ project's own words. Every decision you ask for uses this card.
 
 ## The card
 
-1. **Context** (2-3 sentences). What we are doing, and what caused this
-   question. The user may have been away; do not assume they saw the work.
+1. **Context** (a short block of 4-8 sentences, or a short list). The user
+   may have been away; do not assume they saw the work. Give these parts, in
+   this order, and skip a part only when it does not apply:
+   - **Goal:** what we are making, and why.
+   - **State:** what is done now, and what is true in the code or the data.
+     Name the files, commands or numbers you checked.
+   - **Cause:** what made this question come up. Say what you found, not
+     only that a choice exists.
+   - **Constraints:** what limits the options (a rule, a deadline, an
+     existing decision, a risk).
+   - **Unknown:** what you have not verified, so the user can weigh it.
+   Define each project term the first time you use it. Do not put the
+   options or the recommendation here.
 2. **Question** (1 sentence). Write it as a choice.
 3. **Recommendation.** Your pick and one reason.
 4. **Options** (2-3, recommendation first). For each: what it is, what you
@@ -70,8 +81,14 @@ same text. Write the card again with:
 
 ## Example
 
-> **Context:** Leads send questions to the orchestrator. Today the
-> orchestrator shows them to you as text in chat.
+> **Context:**
+> - **Goal:** Show lead questions to you on one page, not as chat text.
+> - **State:** Leads write a card file per question. Today the orchestrator
+>   reads each file and prints it in chat. 6 cards in one run is about 400
+>   lines of chat.
+> - **Cause:** Last run, you missed 2 questions in the chat scroll.
+> - **Constraints:** The page must work with no network.
+> - **Unknown:** I did not test the page on a phone.
 >
 > **Question:** Does a script make the question page, or does the
 > orchestrator write it?

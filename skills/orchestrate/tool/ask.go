@@ -246,7 +246,8 @@ func (r *renderer) body(text string) (template.HTML, error) {
 			out.WriteString("\n")
 			continue
 		}
-		chunk.WriteString(l + "\n")
+		chunk.WriteString(l)
+		chunk.WriteString("\n")
 	}
 	if err := flush(); err != nil {
 		return "", err

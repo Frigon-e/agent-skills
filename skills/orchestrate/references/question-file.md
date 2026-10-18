@@ -20,7 +20,9 @@ recommend: script
 change: easy
 ---
 ## Context
-Markdown, 2-3 sentences.
+Markdown, 4-8 sentences or a short list: goal, state (with the files or
+numbers you checked), cause, constraints, and what you have not verified.
+Do not repeat the options here.
 
 include: diagram.svg How a question moves from lead to you
 
