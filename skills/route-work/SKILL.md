@@ -98,15 +98,6 @@ You hold the verifier, so you make the escalation call, never the delegate. A fa
 ### Lens reviews (risky or delegated-and-large changes)
 For auth or security, persistence, concurrency, money, shared-code signature changes, or large delegated diffs, run two or three narrow `lens-reviewer` agents in parallel, one lens each, and verify each finding against the code yourself. Lens table, prompts and handling: `references/lens-reviews.md`. Skip this for routine changes.
 
-## On Codex
-
-Codex spawns its custom agents (`~/.codex/agents`) in place of the roles above; triage, plan format, escalation and verification stay the same:
-- `context-explorer` → `context_explorer` (read-only).
-- `implementer` → `plan_implementer`. It has one configured model, so the Haiku and Sonnet rows both route to it.
-- `lens-reviewer` → `full_reviewer` for risky changes, `fast_reviewer` to re-check a narrow fix; `silent_failure_hunter` and `test_coverage_analyst` as extra lenses.
-- `fable-planner` → none. In an orchestrate lead, report `needs-decision` with the evidence; otherwise ask the user.
-- `ui-verifier` → no custom agent yet. Spawn a default subagent with the browser, and give it the input and report format from `~/.claude/agents/ui-verifier.md`.
-
 ## Pitfalls
 - Driving the browser or taking screenshots in the main session.
 - Reading code to size a change that a scout could size.

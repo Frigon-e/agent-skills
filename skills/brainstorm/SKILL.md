@@ -46,8 +46,7 @@ Do not start stage 2 on a frame the user has not accepted.
 Make many ideas before you judge any. Pick each agent's model from how hard
 its job is; do not move cheap work up a tier.
 
-1. **Facts (cheap):** one `context-explorer` (Haiku; `context_explorer` on
-   Codex) collects what exists: related code, docs, earlier decisions,
+1. **Facts (cheap):** one `context-explorer` (Haiku) collects what exists: related code, docs, earlier decisions,
    parked ideas. Ask for a brief under 400 words, pointers not pasted
    code. Skip it when the topic does not touch existing code.
 2. **Lenses (mid tier):** three fresh agents in parallel, each with
@@ -87,8 +86,7 @@ list to the user.
 2. Run `orch ask --cards .brainstorm/<topic>/questions`. Read only its
    output lines, never the page. Fix any card it lists under `warnings`.
 3. Open the page with `lavish-axi <page>` and wait with
-   `lavish-axi poll <page>` (Monitor or a tracked background task on Claude
-   Code, the foreground on Codex). One yes-or-no question stays in chat.
+   `lavish-axi poll <page>` (Monitor or a tracked background task). One yes-or-no question stays in chat.
 4. Each answer arrives as "Answer for question <key>: ...". Move that card
    to `questions/answered/`, write the decision into `decisions.md` in the
    scratch folder, and rerun `orch ask --cards` when new cards are open.
@@ -114,9 +112,9 @@ For a spec:
    it still needs, and runnable acceptance.
 2. `## Open questions` must say `None.`; if not, go back to stage 4.
 3. Show the user the files, then ask before you commit them (never
-   push). After the commit, run `orch plan <spec> --dry-run` and fix every
-   problem it lists. Tell the user the waves and that orchestrate starts
-   the build with `orch plan <spec>`.
+   push). After the commit, run `orch gate <spec>` and `orch plan <spec>
+   --dry-run`, and fix every problem they list. Tell the user the waves and
+   that orchestrate starts the build with `orch plan <spec>`.
 
 Keep `.brainstorm/<topic>/` until the user says the topic is done, then
 delete it. End the Lavish session with `lavish-axi end <page>`.
