@@ -61,6 +61,7 @@ type askPage struct {
 // card is a parsed question-card file, before includes are rendered.
 type card struct {
 	question, recommend, change string
+	area                        string // optional: the topic the question belongs to (sweep routing)
 	context, next               string
 	extra                       []struct{ title, body string }
 	options                     []struct{ id, label, body string }
@@ -121,6 +122,8 @@ func parseCard(src string) (*card, error) {
 			c.recommend = v
 		case "change":
 			c.change = v
+		case "area":
+			c.area = v
 		}
 	}
 	if c.question == "" {

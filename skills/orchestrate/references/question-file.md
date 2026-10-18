@@ -43,6 +43,8 @@ Markdown.
 - Front matter is `key: value` lines between `---` lines. `question` is
   required. `recommend` is optional and must be an option id. `change` is
   optional: `easy` or `hard` (how costly it is to change the answer later).
+  `area` is optional: the topic of the question. `orch sweep` uses it to
+  route human-only areas; the page does not show it.
 - Sections are `## Context`, `## Options`, `## Next`. Any other `## `
   section renders after Context.
 - Under Options, each `### <id>: <label>` starts an option. The id is a

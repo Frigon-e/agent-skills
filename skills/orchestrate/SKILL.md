@@ -218,6 +218,11 @@ other way.
   task. Then take it over or write a spec; do not send Flash round again.
   Use the full path for anything with a design choice, a signature change or
   more than 3 files.
+- **Question sweeps.** To settle a pile of open questions, run answer passes
+  on different models and let `orch sweep <topic>` compare them: only
+  agreement backed by evidence that exists settles a question, and money,
+  tax and legal areas (`human_only`) go to the user. See
+  `references/sweep.md`.
 - **Audit.** `orch audit [<id>] [--system S] [--since 6h] [--problems]`
   prints, oldest first, when each system went right or wrong: gate runs,
   triage verdicts, quick jobs, verify results, stalls, escalations,

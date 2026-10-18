@@ -27,6 +27,9 @@ type repoConfig struct {
 	Notes []string `toml:"notes"`
 	// Locks maps a lock name to when a lead must hold it; every brief says so.
 	Locks map[string]string `toml:"locks"`
+	// HumanOnly lists question areas that only a person decides, whatever the
+	// agents answered (money, tax, legal). `orch sweep` routes them to the user.
+	HumanOnly []string `toml:"human_only"`
 }
 
 const maxNotes, maxNoteLen = 5, 160
@@ -259,7 +262,7 @@ func decodeStrict(path string, v any, otherKeys []string, otherFile string) erro
 	return nil
 }
 
-var repoKeys = []string{"base_branch", "lead_skills", "check", "quiet_minutes", "notes", "locks"}
+var repoKeys = []string{"base_branch", "lead_skills", "check", "quiet_minutes", "stall_minutes", "notes", "locks", "human_only"}
 
 // readRepoConfig decodes a repo file over the defaults already in rc.
 func readRepoConfig(path string, rc *repoConfig) error {

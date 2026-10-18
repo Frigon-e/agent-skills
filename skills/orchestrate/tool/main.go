@@ -30,6 +30,7 @@ Orchestrator:
   orch models
   orch triage <id>... [--force] | orch triage report
   orch doctor
+  orch sweep <topic-dir> [--roots name=dir] [--min-passes 2] [--final settle]
   orch audit [<id>] [--system S] [--since 6h] [--problems]
   orch hold [on <reason> | off]
   orch unfreeze <id>
@@ -88,6 +89,7 @@ var commands = map[string]func(*app, []string) error{
 	"triage":       cmdTriage,
 	"quick":        cmdQuick,
 	"audit":        cmdAudit,
+	"sweep":        cmdSweep,
 	"health":       cmdHealth,
 	"hold":         cmdHold,
 	"unfreeze":     cmdUnfreeze,
