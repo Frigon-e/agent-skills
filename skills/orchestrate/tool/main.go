@@ -21,9 +21,19 @@ import (
 const usage = `orch - orchestrators, one Herdr pane per lead
 
 Orchestrator:
-  orch new <id> --kind ship|scout --harness claude|codex --model M --effort E [--base B] [--depends a,b]
+  orch new <id> --kind ship|scout --harness claude|pi --model M --effort E [--base B] [--depends a,b]
   orch plan <spec> [--dry-run]
   orch check <id>
+  orch verify <id>
+  orch gate <spec>
+  orch quick <id> --owns <file>[,<file>] <request...>
+  orch models
+  orch triage <id>... [--force] | orch triage report
+  orch doctor
+  orch audit [<id>] [--system S] [--since 6h] [--problems]
+  orch hold [on <reason> | off]
+  orch unfreeze <id>
+  orch health [set claude|pi|pi-anthropic ok|limited [--for 3h] [--reason R]]
   orch spawn <id>
   orch send <id> [--resolve KEY] <text...|->
   orch status [--json] [--all]
@@ -34,7 +44,7 @@ Orchestrator:
   orch focus <id>
   orch close <id> [--force]
   orch compact <id> [focus...]
-  orch respawn <id>
+  orch respawn <id> [--harness claude|pi [--model M] [--effort E] [--degraded]]
   orch adopt <id>
   orch become [--off]
   orch config-check <file>
@@ -48,11 +58,12 @@ Hooks:
 `
 
 type app struct {
-	cwd   string
-	stdin io.Reader
-	out   io.Writer
-	errw  io.Writer
-	now   func() time.Time
+	overrideTier bool // spawn --override-tier: skip the triage refusal
+	cwd          string
+	stdin        io.Reader
+	out          io.Writer
+	errw         io.Writer
+	now          func() time.Time
 }
 
 // exitError carries a message for stderr and the process exit code.
@@ -71,6 +82,16 @@ var commands = map[string]func(*app, []string) error{
 	"new":          cmdNew,
 	"plan":         cmdPlan,
 	"check":        cmdCheck,
+	"verify":       cmdVerify,
+	"gate":         cmdGate,
+	"models":       cmdModels,
+	"triage":       cmdTriage,
+	"quick":        cmdQuick,
+	"audit":        cmdAudit,
+	"health":       cmdHealth,
+	"hold":         cmdHold,
+	"unfreeze":     cmdUnfreeze,
+	"doctor":       cmdDoctor,
 	"spawn":        cmdSpawn,
 	"send":         cmdSend,
 	"status":       cmdStatus,

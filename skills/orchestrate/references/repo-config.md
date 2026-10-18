@@ -16,6 +16,7 @@ launch belongs here (that is the user config).
 | `lead_skills` | `["route-work"]` | Skills every task here needs. A skill only some tasks need goes in those task.md files. |
 | `check` | none | The one command the repo's docs name for verifying a change. Leads run it before `done`. |
 | `quiet_minutes` | 30 | Idle minutes before the watcher says `quiet`. Raise it only when normal steps run silent for longer. |
+| `stall_minutes` | 15 | Minutes a working lead may report nothing and change nothing in its worktree before the watcher says `stalled`. Raise it when a normal step (a long test run) runs longer. |
 | `notes` | none | At most 5 one-line notes of 160 characters, printed on the board. orch refuses more. |
 | `locks` | none | At most 5 `name = "when to hold it"` pairs for resources one lead may use at a time (a test VM, a device, a fixed port). Every brief tells the lead to hold each lock for that span; orch makes others wait. |
 

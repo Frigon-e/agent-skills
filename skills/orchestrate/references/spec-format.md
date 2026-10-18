@@ -64,7 +64,7 @@ None.
 
 ## Rules
 
-- **Front matter** gives defaults for `harness` (claude or codex), `model`,
+- **Front matter** gives defaults for `harness` (claude or pi), `model`,
   `effort` and `base`. A package line overrides its default. `base`
   falls back to the repo config.
 - **`## Behaviour`, `## Design rules` and `## Authority`** are required.
@@ -90,10 +90,24 @@ None.
 - **`## Open questions`** must be empty or say `None.`. `orch plan` refuses
   a spec with open questions: ask them first.
 
+## What `orch gate` does
+
+`orch gate <spec>` runs before `orch plan` and records a verdict for the
+spec's exact text (a change to the spec voids it). It checks that every
+`path:line` pointer and every acceptance command exists, then runs four
+read-only passes on a cheap model (`ORCH_GATE_MODEL`, default DeepSeek
+Flash through pi): scope, open questions, and two adversaries. A model
+claim counts only when its evidence line exists in the repo, and only a
+question whose answer changes visible behaviour blocks. The verdict is
+`pass`, `fail` or `unverified` (a pass could not run, or pi is marked
+limited); only `pass` unlocks `orch plan`. The report, findings and
+question cards are in `<run root>/gate/<hash>/`.
+
 ## What `orch plan` does
 
-`orch plan <spec> [--dry-run]` checks the whole spec first and lists every
-problem; it makes no task until the spec is clean. It refuses a spec that
+`orch plan <spec> [--dry-run] [--skip-gate]` checks the whole spec first and
+lists every problem; it makes no task until the spec is clean. It refuses a
+spec the gate has not passed, a spec that
 is not committed to the base branch or has uncommitted changes, unknown or
 circular dependencies, overlapping ownership, and a task id already used
 by a task from somewhere else.

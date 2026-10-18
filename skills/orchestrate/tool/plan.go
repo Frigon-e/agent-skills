@@ -204,8 +204,10 @@ func (sp *spec) parsePackage(block []string) {
 	if p.kind != "ship" && p.kind != "scout" {
 		sp.add("package %s: kind must be ship or scout", name)
 	}
-	if p.harness != "claude" && p.harness != "codex" {
-		sp.add("package %s: harness must be claude or codex (set it on the package or in the front matter)", name)
+	if p.harness == "auto" && (p.model != "auto" || p.effort != "auto") {
+		sp.add("package %s: harness auto needs model auto and effort auto", name)
+	} else if p.harness != "claude" && p.harness != "pi" && p.harness != "auto" {
+		sp.add("package %s: harness must be claude or pi (set it on the package or in the front matter)", name)
 	}
 	if p.model == "" {
 		sp.add("package %s: no model (set it on the package or in the front matter)", name)
@@ -328,6 +330,8 @@ func sameGitCommonDir(a, b string) bool {
 func cmdPlan(a *app, args []string) error {
 	fs := a.flags("plan")
 	dry := fs.Bool("dry-run", false, "check the spec and show what would be created; write nothing")
+	degraded := fs.Bool("degraded", false, "allow degraded fallback profiles (ask the user first)")
+	skipGate := fs.Bool("skip-gate", false, "plan without a passed `orch gate` (only with the user's agreement)")
 	pos, err := parseArgs(fs, args)
 	if err != nil {
 		return err
@@ -367,6 +371,9 @@ func cmdPlan(a *app, args []string) error {
 	}
 	sp := parseSpec(string(src))
 	sp.validate()
+	if !*skipGate && !gatePassed(s.root, src) {
+		sp.add("the gate has not passed for this version of the spec: run `orch gate %s`, fix what it reports, and rerun (or pass --skip-gate with the user's agreement)", pos[0])
+	}
 
 	baseBranch := s.cfg.BaseBranch
 	if b := sp.defaults["base"]; b != "" {
@@ -400,6 +407,14 @@ func cmdPlan(a *app, args []string) error {
 		}
 	}
 
+	for _, p := range sp.packages {
+		if status[p.id] == "created" {
+			if err := harnessUsable(s.cfg, p.harness, p.model, *degraded, a.now()); err != nil {
+				sp.add("package %s: %v", p.id, err)
+			}
+		}
+	}
+
 	if n := len(sp.problems); n > 0 {
 		fmt.Fprintf(a.out, "problems[%d]:\n", n)
 		for _, p := range sp.problems {
@@ -420,7 +435,7 @@ func cmdPlan(a *app, args []string) error {
 			status[p.id] = "would-create"
 			continue
 		}
-		if _, err := newTask(s, sp.taskOpts(p, rel, baseBranch)); err != nil {
+		if _, err := newTask(s, withDegraded(sp.taskOpts(p, rel, baseBranch), *degraded)); err != nil {
 			return err
 		}
 	}
@@ -443,6 +458,11 @@ func cmdPlan(a *app, args []string) error {
 	return nil
 }
 
+func withDegraded(o taskOpts, degraded bool) taskOpts {
+	o.degraded = degraded
+	return o
+}
+
 func (sp *spec) taskOpts(p *specPackage, rel, base string) taskOpts {
 	in := strings.Join(p.owns, ", ")
 	if in == "" {
@@ -461,7 +481,7 @@ func (sp *spec) taskOpts(p *specPackage, rel, base string) taskOpts {
 	auth := sp.sections["Authority"]
 	return taskOpts{
 		id: p.id, kind: p.kind, harness: p.harness, model: p.model, effort: p.effort, base: base,
-		deps: p.deps, spec: rel + "#" + p.id,
+		deps: p.deps, spec: rel + "#" + p.id, owns: p.owns,
 		fill: map[string]string{
 			"Intent": fmt.Sprintf("%s: %s. The whole feature is in `%s`; read its Behaviour and Design rules first.", sp.title, p.title, rel),
 			"Scope":  "In: " + in + "\nOut: " + out,

@@ -20,16 +20,17 @@ const panesPerTab = 4
 func cmdNew(a *app, args []string) error {
 	fs := a.flags("new")
 	kind := fs.String("kind", "", "ship or scout")
-	harness := fs.String("harness", "", "claude or codex")
+	harness := fs.String("harness", "", "claude or pi")
 	model := fs.String("model", "", "model id or alias, or `default`")
 	effort := fs.String("effort", "", "effort level, or `default`")
 	base := fs.String("base", "", "base branch (default: repo config, else the current branch)")
 	deps := fs.String("depends", "", "comma-separated task ids that must be done first")
+	degraded := fs.Bool("degraded", false, "allow a degraded fallback profile (ask the user first)")
 	pos, err := parseArgs(fs, args)
 	if err != nil {
 		return err
 	}
-	if err := exactArgs(pos, 1, "new <id> --kind ship|scout --harness claude|codex --model M --effort E"); err != nil {
+	if err := exactArgs(pos, 1, "new <id> --kind ship|scout --harness claude|pi --model M --effort E"); err != nil {
 		return err
 	}
 	s, err := a.site()
@@ -42,7 +43,7 @@ func cmdNew(a *app, args []string) error {
 			depList = append(depList, d)
 		}
 	}
-	path, err := newTask(s, taskOpts{id: pos[0], kind: *kind, harness: *harness, model: *model, effort: *effort, base: *base, deps: depList})
+	path, err := newTask(s, taskOpts{id: pos[0], kind: *kind, harness: *harness, model: *model, effort: *effort, base: *base, deps: depList, degraded: *degraded})
 	if err != nil {
 		return err
 	}
@@ -57,6 +58,8 @@ type taskOpts struct {
 	deps                                   []string
 	fill                                   map[string]string
 	spec                                   string
+	owns                                   []string
+	degraded                               bool
 }
 
 // newTask scaffolds task.md for one task and returns its path.
@@ -64,10 +67,15 @@ func newTask(s site, o taskOpts) (string, error) {
 	switch {
 	case o.kind != "ship" && o.kind != "scout":
 		return "", fail("--kind must be ship or scout")
-	case o.harness != "claude" && o.harness != "codex":
-		return "", fail("--harness must be claude or codex")
+	case o.harness == "auto" && (o.model != "auto" || o.effort != "auto"):
+		return "", fail("--harness auto needs --model auto and --effort auto")
+	case o.harness != "claude" && o.harness != "pi" && o.harness != "auto":
+		return "", fail("--harness must be claude or pi (or auto, to let `orch spawn --auto` choose)")
 	case o.model == "" || o.effort == "":
 		return "", fail("--model and --effort are required (use `default` to inherit)")
+	}
+	if err := harnessUsable(s.cfg, o.harness, o.model, o.degraded, time.Now()); err != nil {
+		return "", err
 	}
 	id := o.id
 	dir, err := taskDir(s.root, id)
@@ -122,6 +130,12 @@ func newTask(s site, o taskOpts) (string, error) {
 	if o.spec != "" {
 		text = strings.Replace(text, "id: "+id+"\n", "id: "+id+"\nspec: "+o.spec+"\n", 1)
 	}
+	if degradedProfile(s.cfg, o.harness, o.model) {
+		text = strings.Replace(text, "\ndepends_on:", "\ndegraded: true\ndepends_on:", 1)
+	}
+	if len(o.owns) > 0 {
+		text = strings.Replace(text, "\ndepends_on:", "\nowns: "+strings.Join(o.owns, ", ")+"\ndepends_on:", 1)
+	}
 	for name, body := range o.fill {
 		text = fillSection(text, name, body)
 	}
@@ -168,7 +182,7 @@ func reportBack(dir, id, kind, repo, base, sha string, cfg config, skill string)
 	lines := []string{
 		fmt.Sprintf("You are lead `%s`. The orchestrator is your only contact: never address the user directly; anything for them goes up as needs-decision.", id),
 		fmt.Sprintf("Read the lead protocol before starting: `%s`.", filepath.Join(skill, "references", "lead.md")),
-		fmt.Sprintf("- Report: `%s report --dir %s <state> [--key <slug>] \"<one line>\"`. States: working, needs-decision, blocked, paused, done, failed, note.", me, dir),
+		fmt.Sprintf("- Report: `%s report --dir %s <state> [--key <slug>] \"<one line>\"`. States: working, needs-decision, question, escalate, blocked, paused, done, failed, note.", me, dir),
 		fmt.Sprintf("- Messages: when a line starting `orch:` says a message arrived, run `%s inbox --dir %s`.", me, dir),
 		"- Deliverable: " + deliverable + ".",
 		"- Skills to load for the work: " + skills + ".",
@@ -225,10 +239,26 @@ func cmdCheck(a *app, args []string) error {
 }
 
 func cmdSpawn(a *app, args []string) error {
-	if err := exactArgs(args, 1, "spawn <id>"); err != nil {
+	fs := a.flags("spawn")
+	override := fs.Bool("override-tier", false, "spawn even if triage says the task needs a stronger model (enforce mode)")
+	auto := fs.Bool("auto", false, "choose the profile from triage and the dispatch rules (a dry run unless --apply)")
+	apply := fs.Bool("apply", false, "with --auto: set the chosen profile and spawn")
+	degraded := fs.Bool("degraded", false, "with --auto: allow a degraded fallback profile (ask the user first)")
+	pos, err := parseArgs(fs, args)
+	if err != nil {
 		return err
 	}
-	return a.spawn(args[0], "")
+	if err := exactArgs(pos, 1, "spawn <id> [--override-tier] [--auto [--apply] [--degraded]]"); err != nil {
+		return err
+	}
+	if (*apply || *degraded) && !*auto {
+		return fail("--apply and --degraded go with --auto")
+	}
+	if *auto {
+		return a.spawnAuto(pos[0], *apply, *degraded)
+	}
+	a.overrideTier = *override
+	return a.spawn(pos[0], "")
 }
 
 // spawn starts a lead on a checked task; brief is appended to its launch
@@ -240,6 +270,9 @@ func (a *app) spawn(id, brief string) error {
 	s, err := a.site()
 	if err != nil {
 		return err
+	}
+	if why := spawnBlocked(s.root); why != "" {
+		return fail("%s", why)
 	}
 	problems, warnings, err := checkTask(s.root, id)
 	if err != nil {
@@ -265,6 +298,17 @@ func (a *app) spawn(id, brief string) error {
 	if err != nil {
 		return err
 	}
+	if err := harnessUsable(s.cfg, fm["harness"], fm["model"], fm["degraded"] == "true", a.now()); err != nil {
+		return err
+	}
+	if fm["private"] == "true" && fm["harness"] != "claude" {
+		return fail("%s is marked private, so it may only run on Claude, not %s", id, fm["harness"])
+	}
+	if fm["quick"] != "true" { // quick jobs were rated by `orch quick` itself
+		if err := a.triageGate(s, id, fm); err != nil {
+			return err
+		}
+	}
 	name := leadName(id)
 	env := []string{"ORCH_TASK_DIR=" + dir, "ORCH_TASK_ID=" + id, "ORCH_ROLE=lead"}
 	paneID, tabID, err := placePane(myLeads(leads, me), s.repo, env)
@@ -273,10 +317,13 @@ func (a *app) spawn(id, brief string) error {
 	}
 	_, _ = herdrCmd(herdrTimeout, "pane", "rename", paneID, name)
 	l := &lead{ID: id, Name: name, Harness: fm["harness"], Model: fm["model"], PaneID: paneID, TabID: tabID, SpawnedAt: a.now().Unix(), Owner: me}
+	if l.Harness == "pi" {
+		l.Session = newSessionID()
+	}
 	if err := saveLead(dir, l); err != nil {
 		return err
 	}
-	start := append([]string{"agent", "start", name, "--kind", fm["harness"], "--pane", paneID, "--timeout", "90000", "--"}, harnessArgs(fm, s.cfg)...)
+	start := append([]string{"agent", "start", name, "--kind", fm["harness"], "--pane", paneID, "--timeout", "90000", "--"}, harnessArgs(fm, s.cfg, l.Session)...)
 	if err := startAgent(start); err != nil {
 		_ = a.appendStatus(dir, "note", "agent did not report ready in pane "+paneID, "", "orch")
 		fmt.Fprintf(a.out, "opened pane %s for %s, but the agent is not ready (%v). Look with: orch peek %s; give up with: orch close %s --force\n", paneID, name, err, id, id)
@@ -326,7 +373,7 @@ func startAgent(args []string) error {
 	}
 }
 
-func harnessArgs(fm map[string]string, cfg config) []string {
+func harnessArgs(fm map[string]string, cfg config, session string) []string {
 	var out []string
 	model, effort := fm["model"], fm["effort"]
 	if fm["harness"] == "claude" {
@@ -339,12 +386,15 @@ func harnessArgs(fm map[string]string, cfg config) []string {
 		return append(out, cfg.ClaudeArgs...)
 	}
 	if model != "default" {
-		out = append(out, "-m", model)
+		out = append(out, "--model", model)
 	}
 	if effort != "default" {
-		out = append(out, "-c", fmt.Sprintf("model_reasoning_effort=%q", effort))
+		out = append(out, "--thinking", effort)
 	}
-	return append(out, cfg.CodexArgs...)
+	if session != "" {
+		out = append(out, "--session-id", session)
+	}
+	return append(out, cfg.PiArgs...)
 }
 
 // placePane fills `leads` tabs as 2x2 grids (left, right, bottom-left,
@@ -514,6 +564,7 @@ type row struct {
 	Owner     string  `json:"owner,omitempty"`
 	Context   int     `json:"context,omitempty"`
 	Decisions []entry `json:"decisions"`
+	Degraded  bool    `json:"degraded,omitempty"`
 }
 
 func leadRows(root string, includeClosed bool) []row {
@@ -534,6 +585,7 @@ func leadRows(root string, includeClosed bool) []row {
 			State:     lastState(mine),
 			Owner:     taskOwner(dir, l),
 			Decisions: openDecisions(entries),
+			Degraded:  fm["degraded"] == "true",
 		}
 		last := mine
 		if len(last) == 0 {
@@ -554,7 +606,7 @@ func leadRows(root string, includeClosed bool) []row {
 			r.Herdr, r.Pane = "gone", l.PaneID
 			if ag, ok := agents[l.PaneID]; ok {
 				r.Herdr = ag.Status
-				r.Context = contextTokens(ag.Agent, ag.Session.Value)
+				r.Context = contextTokens(ag.Agent, sessionOf(ag, l))
 			}
 		}
 		if r.State == "" {
@@ -606,6 +658,12 @@ func cmdDispatch(a *app, args []string) error {
 		fmt.Fprintf(a.out, "no dispatch rules in %s: choose by the skill's Model guidance\n", userConfigPath())
 		return nil
 	}
+	limited := loadHealth(a.now())
+	for _, h := range lanes {
+		if e, ok := limited[h]; ok {
+			fmt.Fprintf(a.out, "health: %s %s\n", h, e)
+		}
+	}
 	fmt.Fprintf(a.out, "dispatch rules (%s), first good fit wins; a list offers choices:\n", userConfigPath())
 	for _, r := range s.cfg.Dispatch {
 		use := make([]string, len(r.Use))
@@ -617,8 +675,43 @@ func cmdDispatch(a *app, args []string) error {
 			line += " (" + r.Why + ")"
 		}
 		fmt.Fprintln(a.out, line)
+		if note := dispatchNow(r, limited, func(p profile) bool { return s.cfg.modelAllowed(p.Harness, p.Model, a.now()) == nil }); note != "" {
+			fmt.Fprintln(a.out, "  "+note)
+		}
 	}
 	return nil
+}
+
+// dispatchNow says what to do with a rule while some harness is limited. It
+// is empty when every profile is usable, so healthy output stays unchanged.
+func dispatchNow(r dispatchRule, limited map[string]healthEntry, allowed func(profile) bool) string {
+	anyLimited, anyDegraded := false, false
+	var usable, degraded *profile
+	for i := range r.Use {
+		p := &r.Use[i]
+		_, lim := limited[lane(p.Harness, p.Model)]
+		anyLimited = anyLimited || lim
+		anyDegraded = anyDegraded || p.Degraded
+		switch {
+		case lim, !allowed(*p):
+		case p.Degraded:
+			if degraded == nil {
+				degraded = p
+			}
+		case usable == nil:
+			usable = p
+		}
+	}
+	if !anyLimited && !anyDegraded {
+		return ""
+	}
+	switch {
+	case usable != nil:
+		return "now: " + usable.String()
+	case degraded != nil:
+		return "now: parked (the primary is limited). Degraded option: " + degraded.String() + ", only with the user's approval (--degraded)"
+	}
+	return "now: parked (every profile's harness is limited)"
 }
 
 // splitRows keeps the rows orchestrator me owns and, per other owner, the
@@ -668,6 +761,34 @@ func (a *app) board(s site, rows []row) string {
 		"orchestrate: " + s.root,
 		fmt.Sprintf("watcher: %s · leads open: %s", watcher, count),
 	}
+	limited := loadHealth(a.now())
+	for _, h := range lanes {
+		if e, ok := limited[h]; ok {
+			out = append(out, fmt.Sprintf("health: %s %s; new tasks on it are refused (orch dispatch shows what to use)", h, e))
+		}
+	}
+	if frozen := frozenTasks(s.root); len(frozen) > 0 {
+		ids := make([]string, 0, len(frozen))
+		for id := range frozen {
+			ids = append(ids, id)
+		}
+		sort.Strings(ids)
+		for _, id := range ids {
+			out = append(out, fmt.Sprintf("FROZEN: %s - %s. Ask the user; orch unfreeze %s once they decide", id, frozen[id], id))
+		}
+	}
+	if b, err := os.ReadFile(holdPath(s.root)); err == nil {
+		out = append(out, "HOLD: "+strings.TrimSpace(string(b))+". New spawns are refused; lift with orch hold off")
+	}
+	var degradedIDs []string
+	for _, r := range rows {
+		if r.Degraded && r.Herdr != "closed" {
+			degradedIDs = append(degradedIDs, r.ID)
+		}
+	}
+	if len(degradedIDs) > 0 {
+		out = append(out, "degraded: "+short(strings.Join(degradedIDs, ", "), 80)+" run on a weaker fallback profile; check their work more closely")
+	}
 	for _, o := range owners {
 		line := fmt.Sprintf("other orchestrators: %s has %d open (%s)", o, len(others[o]), short(strings.Join(others[o], ", "), 80))
 		// No pane means no watcher: those leads report into a log nobody reads.
@@ -709,7 +830,15 @@ func (a *app) board(s site, rows []row) string {
 		}
 	}
 	if len(decisions) > 0 {
-		out = append(out, "open decisions:")
+		queued := 0
+		for _, r := range rows {
+			for _, d := range r.Decisions {
+				if d.State == "question" {
+					queued++
+				}
+			}
+		}
+		out = append(out, fmt.Sprintf("open decisions: %d (%d blocking, %d queued)", len(decisions), len(decisions)-queued, queued))
 		out = append(out, decisions...)
 	}
 	return strings.Join(out, "\n")
@@ -723,6 +852,13 @@ type watchSeen struct {
 	IdleSince    int64  `json:"idle_since,omitempty"`
 	LastReport   int64  `json:"last_report,omitempty"`
 	QuietAlerted bool   `json:"quiet_alerted,omitempty"`
+	Frozen       bool   `json:"frozen,omitempty"`
+	// Stall detection: see stall.go.
+	FP           string `json:"fp,omitempty"`
+	FPSince      int64  `json:"fp_since,omitempty"`
+	LastSample   int64  `json:"last_sample,omitempty"`
+	StallAlerted bool   `json:"stall_alerted,omitempty"`
+	LoopAlerted  string `json:"loop_alerted,omitempty"`
 }
 
 func cmdWatch(a *app, args []string) error {
@@ -746,7 +882,7 @@ func cmdWatch(a *app, args []string) error {
 		return fail("a watcher is already running for this orchestrator (pid %d)", pid)
 	}
 	myPid := strconv.Itoa(os.Getpid())
-	if err := os.WriteFile(pidFile, []byte(fmt.Sprintf("%s %d\n", myPid, a.now().Unix())), 0o644); err != nil {
+	if err := os.WriteFile(pidFile, fmt.Appendf(nil, "%s %d\n", myPid, a.now().Unix()), 0o644); err != nil {
 		return err
 	}
 	defer func() {
@@ -861,7 +997,10 @@ func (a *app) watchLead(ol openLead, st *watchSeen, agents map[string]herdrAgent
 				if !ok || e.By == "orch" {
 					continue
 				}
-				st.LastReport, st.QuietAlerted = now, false
+				st.LastReport, st.QuietAlerted, st.StallAlerted = now, false, false
+				if e.State == "done" && fmQuick(ol.dir) {
+					emit("done (quick): " + a.quickVerify(id))
+				}
 				if notifyStates[e.State] {
 					key := ""
 					if e.Key != "" {
@@ -873,6 +1012,12 @@ func (a *app) watchLead(ol openLead, st *watchSeen, agents map[string]herdrAgent
 			st.Offset += int64(len(complete))
 		}
 		f.Close()
+	}
+	if why := frozenReason(readStatus(ol.dir)); why != "" && !st.Frozen {
+		st.Frozen = true
+		emit("frozen: " + why + ". Stop automatic recovery and ask the user; orch unfreeze " + id + " once they decide")
+	} else if why == "" {
+		st.Frozen = false
 	}
 	if agents == nil {
 		return emitted
@@ -890,7 +1035,7 @@ func (a *app) watchLead(ol openLead, st *watchSeen, agents map[string]herdrAgent
 		return emitted
 	}
 	if ag.Status == "blocked" && st.Herdr != "blocked" {
-		emit("ui-blocked: waiting at a prompt in its pane; run orch peek " + id)
+		emit("ui-blocked: waiting at a prompt in its pane; run orch peek " + id + ". If it shows a usage or credit limit, run: orch health set " + ol.lead.Harness + " limited --for <duration>")
 	}
 	if ag.Status == "idle" || ag.Status == "done" {
 		if st.IdleSince == 0 {
@@ -904,6 +1049,9 @@ func (a *app) watchLead(ol openLead, st *watchSeen, agents map[string]herdrAgent
 		}
 	} else {
 		st.IdleSince = 0
+	}
+	if ag.Status == "working" {
+		a.stallCheck(ol, st, ag, cfg, now, emit)
 	}
 	st.Herdr = ag.Status
 	return emitted
@@ -1048,7 +1196,7 @@ func cmdCompact(a *app, args []string) error {
 	if focus == "" {
 		focus = compactFocus
 	}
-	before := contextTokens(agents[l.PaneID].Agent, agents[l.PaneID].Session.Value)
+	before := contextTokens(agents[l.PaneID].Agent, sessionOf(agents[l.PaneID], l))
 	if _, err := herdrCmd(16*time.Minute, "agent", "prompt", l.PaneID, "/compact "+focus, "--wait", "--timeout", "900000"); err != nil {
 		return err
 	}
@@ -1063,7 +1211,7 @@ func cmdCompact(a *app, args []string) error {
 	line := "compacted " + l.Name
 	if agents, err := agentMap(); err == nil && before > 0 {
 		ag := agents[l.PaneID]
-		line += fmt.Sprintf(" (%s -> %s)", kTokens(before), kTokens(contextTokens(ag.Agent, ag.Session.Value)))
+		line += fmt.Sprintf(" (%s -> %s)", kTokens(before), kTokens(contextTokens(ag.Agent, sessionOf(ag, l))))
 	}
 	fmt.Fprintln(a.out, line)
 	return nil
@@ -1073,30 +1221,93 @@ func cmdCompact(a *app, args []string) error {
 // the same task, worktree and branch. It starts from the handoff.md the old
 // lead wrote, which it renames so a later respawn needs a new one.
 func cmdRespawn(a *app, args []string) error {
-	if err := exactArgs(args, 1, "respawn <id>"); err != nil {
-		return err
-	}
-	dir, l, err := a.requireLead(args[0])
+	fs := a.flags("respawn")
+	harness := fs.String("harness", "", "restart on another harness (claude or pi), for example after a usage limit")
+	model := fs.String("model", "", "model for the new harness (default: keep the task's)")
+	effort := fs.String("effort", "", "effort for the new harness (default: keep the task's)")
+	degraded := fs.Bool("degraded", false, "allow a degraded fallback profile (ask the user first)")
+	pos, err := parseArgs(fs, args)
 	if err != nil {
 		return err
 	}
-	handoff := filepath.Join(dir, "handoff.md")
-	if _, err := os.Stat(handoff); err != nil {
-		return fail("%s has no handoff.md; ask the lead to write one (Context budget in the lead protocol) first", l.ID)
-	}
-	kept := filepath.Join(dir, fmt.Sprintf("handoff-%d.md", a.now().Unix()))
-	if err := os.Rename(handoff, kept); err != nil {
+	if err := exactArgs(pos, 1, "respawn <id> [--harness claude|pi [--model M] [--effort E] [--degraded]]"); err != nil {
 		return err
 	}
-	if err := a.closeLead(dir, l, "closed for respawn with a fresh context"); err != nil {
+	if *harness != "" && *harness != "claude" && *harness != "pi" {
+		return fail("--harness must be claude or pi")
+	}
+	dir, l, err := a.requireLead(pos[0])
+	if err != nil {
+		return err
+	}
+	if why := frozenReason(readStatus(dir)); why != "" {
+		return fail("%s is frozen (%s). Decide with the user, then run: orch unfreeze %s", l.ID, why, l.ID)
+	}
+	handoff := filepath.Join(dir, "handoff.md")
+	_, haveHandoff := os.Stat(handoff)
+	if haveHandoff != nil && *harness == "" {
+		return fail("%s has no handoff.md; ask the lead to write one (Context budget in the lead protocol) first", l.ID)
+	}
+	taskPath := filepath.Join(dir, "task.md")
+	if *harness != "" {
+		fm, _, err := readTask(taskPath)
+		if err != nil {
+			return err
+		}
+		m, e := fm["model"], fm["effort"]
+		if *model != "" {
+			m = *model
+		}
+		if *effort != "" {
+			e = *effort
+		}
+		if *harness != fm["harness"] && *model == "" {
+			return fail("moving %s from %s to %s needs --model: model names differ between harnesses", l.ID, fm["harness"], *harness)
+		}
+		s, err := a.site()
+		if err != nil {
+			return err
+		}
+		if err := harnessUsable(s.cfg, *harness, m, *degraded, a.now()); err != nil {
+			return err
+		}
+		for k, v := range map[string]string{"harness": *harness, "model": m, "effort": e} {
+			if err := setFrontMatter(taskPath, k, v); err != nil {
+				return err
+			}
+		}
+		if degradedProfile(s.cfg, *harness, m) {
+			if err := setFrontMatter(taskPath, "degraded", "true"); err != nil {
+				return err
+			}
+		}
+	}
+	brief := ""
+	if haveHandoff == nil {
+		kept := filepath.Join(dir, fmt.Sprintf("handoff-%d.md", a.now().Unix()))
+		if err := os.Rename(handoff, kept); err != nil {
+			return err
+		}
+		brief = fmt.Sprintf("You replace a lead whose context filled up: read its handoff at %s before anything else. Its worktree and branch already exist; continue in them, and retake any lock the handoff names.", kept)
+	} else {
+		brief = fmt.Sprintf("You replace a lead whose provider failed mid-task; it left no handoff. Recover from disk: read the status log at %s, then run `git status` and `git log` in the worktree %s and read the diff against the base. Commit any uncommitted work that belongs to the task first, then continue the task. Its branch already exists; retake any lock it held. If the state is unclear, report `escalate` before changing anything.",
+			filepath.Join(dir, "status.log"), worktreePath(dir, l.ID))
+	}
+	how := "closed for respawn with a fresh context"
+	if *harness != "" {
+		how = "closed for respawn on " + *harness
+	}
+	if err := a.closeLead(dir, l, how); err != nil {
 		return err
 	}
 	if err := a.resolveContext(dir, "respawned with a fresh context"); err != nil {
 		return err
 	}
-	brief := fmt.Sprintf("You replace a lead whose context filled up: read its handoff at %s before anything else. Its worktree and branch already exist; continue in them, and retake any lock the handoff names.", kept)
+	if *harness != "" {
+		_ = a.appendStatus(dir, "note", "respawned on "+*harness, "", "orch")
+	}
 	if err := a.spawn(l.ID, brief); err != nil {
-		return fail("closed %s, but the new lead did not start: %v. The handoff is kept at %s", l.Name, err, kept)
+		return fail("closed %s, but the new lead did not start: %v", l.Name, err)
 	}
 	return nil
 }
@@ -1157,12 +1368,12 @@ func cmdConfigCheck(a *app, args []string) error {
 	if _, err := os.Stat(path); err != nil {
 		return fail("%s: %v", path, err)
 	}
-	rc := repoConfig{QuietMinutes: 30}
+	rc := repoConfig{QuietMinutes: 30, StallMinutes: 15}
 	if err := readRepoConfig(path, &rc); err != nil {
 		return err
 	}
-	if rc.QuietMinutes < 1 {
-		return fail("%s: quiet_minutes must be at least 1", path)
+	if rc.QuietMinutes < 1 || rc.StallMinutes < 1 {
+		return fail("%s: quiet_minutes and stall_minutes must be at least 1", path)
 	}
 	fmt.Fprintf(a.out, "ok: %s (%d of %d notes, %d locks)\n", path, len(rc.Notes), maxNotes, len(rc.Locks))
 	return nil

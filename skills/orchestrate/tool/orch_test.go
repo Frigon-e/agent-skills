@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -137,6 +139,70 @@ type harness struct {
 	repo      string
 	fake      string
 	now       time.Time
+	dec       *decStub
+}
+
+// decStub stands in for the decisions API so no test reaches the network.
+type decStub struct {
+	mu     sync.Mutex
+	hits   int
+	status int
+	reply  string
+	last   map[string]any
+	auth   string
+}
+
+func newDecStub(t *testing.T) *decStub {
+	d := &decStub{status: 200, reply: decReply(settledAnswers)}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		d.mu.Lock()
+		defer d.mu.Unlock()
+		d.hits++
+		d.auth = r.Header.Get("Authorization")
+		d.last = nil
+		json.NewDecoder(r.Body).Decode(&d.last)
+		w.WriteHeader(d.status)
+		fmt.Fprint(w, d.reply)
+	}))
+	t.Cleanup(srv.Close)
+	t.Setenv("ORCH_TRIAGE_URL", srv.URL)
+	t.Setenv("ORCH_TRIAGE_KEY", "test-key")
+	return d
+}
+
+func (d *decStub) set(status int, reply string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.status, d.reply = status, reply
+}
+
+func (d *decStub) count() int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.hits
+}
+
+type decVals struct{ clear, guided, open, d0, d1, d2, d3, verifiable, cross, cause, conf float64 }
+
+var (
+	settledAnswers  = decVals{0.99, 0.01, 0, 0.9, 0.1, 0, 0, 0.95, 0.05, 0.95, 0.95}
+	standardAnswers = decVals{0.2, 0.7, 0.1, 0.1, 0.3, 0.5, 0.1, 0.8, 0.4, 0.9, 0.9}
+	planningAnswers = decVals{0.05, 0.15, 0.8, 0, 0.1, 0.4, 0.5, 0.2, 0.9, 0.1, 0.9}
+)
+
+func decReply(v decVals) string {
+	choice := "clear"
+	if v.open > v.clear && v.open > v.guided {
+		choice = "open_ended"
+	} else if v.guided > v.clear {
+		choice = "guided"
+	}
+	score := v.d1 + 2*v.d2 + 3*v.d3
+	return fmt.Sprintf(`{"model":"perplexity/pplx-decider-v1.2-test","answers":{
+"clarity":{"type":"choice","choice":%q,"confidence":%g,"probabilities":{"clear":%g,"guided":%g,"open_ended":%g}},
+"difficulty":{"type":"score","score":%g,"confidence":%g,"probabilities":{"0":%g,"1":%g,"2":%g,"3":%g}},
+"verifiable":{"type":"noul","noul":%g},"cross_cutting":{"type":"noul","noul":%g},"cause_known":{"type":"noul","noul":%g}}}`,
+		choice, v.conf, v.clear, v.guided, v.open, score, v.conf, v.d0, v.d1, v.d2, v.d3, v.verifiable, v.cross, v.cause)
 }
 
 func setup(t *testing.T) *harness {
@@ -158,7 +224,7 @@ func setup(t *testing.T) *harness {
 		"HERDR_ENV": "1", "HERDR_WORKSPACE_ID": "w1", "HERDR_PANE_ID": "w1:p0",
 		"ORCH_HERDR": os.Args[0], "ORCH_FAKE_HERDR": filepath.Join(tmp, "herdr.json"),
 		"ORCH_ROLE": "", "ORCH_TASK_DIR": "",
-		"CLAUDE_CONFIG_DIR": filepath.Join(tmp, "claude"), "CODEX_HOME": filepath.Join(tmp, "codex"),
+		"CLAUDE_CONFIG_DIR": filepath.Join(tmp, "claude"), "ORCH_PI_DIR": filepath.Join(tmp, "pi"), "ORCH_HEALTH": filepath.Join(tmp, "health.json"),
 	} {
 		t.Setenv(k, v)
 	}
@@ -170,6 +236,7 @@ func setup(t *testing.T) *harness {
 	}
 	h := &harness{t: t, stdin: &bytes.Buffer{}, out: &bytes.Buffer{}, errw: &bytes.Buffer{}, tmp: tmp, repo: repo,
 		fake: filepath.Join(tmp, "herdr.json"), now: time.Unix(1_800_000_000, 0)}
+	h.dec = newDecStub(t)
 	h.a = &app{cwd: repo, stdin: h.stdin, out: h.out, errw: h.errw, now: func() time.Time { return h.now }}
 	return h
 }
@@ -376,6 +443,910 @@ func TestCheckRefusals(t *testing.T) {
 	}
 }
 
+func TestSpawnPiLead(t *testing.T) {
+	h := setup(t)
+	h.task("t1", "--harness", "pi", "--model", "openrouter/deepseek/deepseek-chat-v3.1", "--effort", "high")
+	h.must("spawn", "t1")
+	start := callsOf(h.fakeState(), "agent", "start", "lead-t1")
+	if len(start) != 1 || flagValue(start[0], "--kind") != "pi" || len(start[0]) < 7 ||
+		!slices.Equal(start[0][len(start[0])-7:len(start[0])-2], []string{"--", "--model", "openrouter/deepseek/deepseek-chat-v3.1", "--thinking", "high"}) {
+		t.Fatalf("agent start = %v", start)
+	}
+	l, _ := loadLead(h.dir("t1"))
+	if l.Session == "" || flagValue(start[0], "--session-id") != l.Session {
+		t.Fatalf("pi session id %q not passed to the agent: %v", l.Session, start)
+	}
+	if code, out := h.run("new", "t2", "--kind", "ship", "--harness", "codex", "--model", "x", "--effort", "y"); code != 1 || !strings.Contains(out, "claude or pi") {
+		t.Fatalf("codex harness accepted: %d %s", code, out)
+	}
+}
+
+func TestHealthRefusesLimitedHarness(t *testing.T) {
+	h := setup(t)
+	h.task("t3") // made before any limit
+	wantContains(t, h.must("health", "set", "claude", "limited", "--for", "2h", "--reason", "weekly cap"), "claude: limited since", "(weekly cap)")
+	wantContains(t, h.must("health"), "claude: limited", "pi: ok")
+	wantContains(t, h.must("status"), "health: claude limited since")
+	code, out := h.run("new", "t1", "--kind", "ship", "--harness", "claude", "--model", "sonnet", "--effort", "high")
+	if code != 1 || !strings.Contains(out, "claude is limited") || !strings.Contains(out, "orch health set claude ok") {
+		t.Fatalf("limited harness accepted: %d %s", code, out)
+	}
+	if code, out := h.run("new", "t2", "--kind", "ship", "--harness", "pi", "--model", "m", "--effort", "high"); code != 0 {
+		t.Fatalf("healthy harness refused: %d %s", code, out)
+	}
+	// a task made before the limit cannot spawn into it
+	if code, out := h.run("spawn", "t3"); code != 1 || !strings.Contains(out, "claude is limited") {
+		t.Fatalf("spawn into a limited harness: %d %s", code, out)
+	}
+	h.must("health", "set", "claude", "ok")
+	wantContains(t, h.must("health"), "claude: ok")
+	// the limit clears itself after its duration
+	h.must("health", "set", "pi", "limited", "--for", "1h")
+	if got := loadHealth(h.now.Add(2 * time.Hour)); len(got) != 0 {
+		t.Fatalf("limit did not expire: %v", got)
+	}
+	if got := loadHealth(h.now.Add(30 * time.Minute)); len(got) != 1 {
+		t.Fatalf("limit expired early: %v", got)
+	}
+}
+
+func TestDegradedFallbackNeedsApproval(t *testing.T) {
+	h := setup(t)
+	os.WriteFile(os.Getenv("ORCH_CONFIG"), []byte(`[[dispatch]]
+when = "design work"
+use = [{ harness = "claude", model = "opus" }, { harness = "pi", model = "flash", degraded = true }]
+`), 0o644)
+	wantContains(t, h.must("dispatch"), "now: claude opus")
+	h.must("health", "set", "claude", "limited")
+	wantContains(t, h.must("dispatch"), "now: parked (the primary is limited). Degraded option: pi flash [degraded]")
+	code, out := h.run("new", "d1", "--kind", "ship", "--harness", "pi", "--model", "flash", "--effort", "high")
+	if code != 1 || !strings.Contains(out, "degraded fallback") {
+		t.Fatalf("degraded profile used without approval: %d %s", code, out)
+	}
+	h.must("new", "d1", "--kind", "ship", "--harness", "pi", "--model", "flash", "--effort", "high", "--degraded")
+	wantContains(t, string(mustRead(t, filepath.Join(h.dir("d1"), "task.md"))), "degraded: true")
+	wantContains(t, h.must("status"), "degraded: d1")
+	// a non-degraded use of the same harness is not caught
+	h.must("new", "d2", "--kind", "ship", "--harness", "pi", "--model", "other", "--effort", "high")
+}
+
+func TestRespawnOnAnotherHarness(t *testing.T) {
+	h := setup(t)
+	h.task("t1")
+	h.must("spawn", "t1")
+	if code, out := h.run("respawn", "t1"); code != 1 || !strings.Contains(out, "no handoff.md") {
+		t.Fatalf("respawn without a handoff or a harness: %d %s", code, out)
+	}
+	if code, out := h.run("respawn", "t1", "--harness", "pi"); code != 1 || !strings.Contains(out, "needs --model") {
+		t.Fatalf("a harness switch kept a model name from the old harness: %d %s", code, out)
+	}
+	h.must("health", "set", "pi", "limited")
+	if code, out := h.run("respawn", "t1", "--harness", "pi", "--model", "flash"); code != 1 || !strings.Contains(out, "pi is limited") {
+		t.Fatalf("respawn onto a limited harness: %d %s", code, out)
+	}
+	h.must("health", "set", "pi", "ok")
+	h.must("respawn", "t1", "--harness", "pi", "--model", "flash")
+	fm, _, _ := readTask(filepath.Join(h.dir("t1"), "task.md"))
+	if fm["harness"] != "pi" || fm["model"] != "flash" || fm["effort"] != "high" {
+		t.Fatalf("task front matter after respawn = %v", fm)
+	}
+	starts := callsOf(h.fakeState(), "agent", "start", "lead-t1")
+	if len(starts) != 2 || flagValue(starts[1], "--kind") != "pi" {
+		t.Fatalf("agent starts = %v", starts)
+	}
+	prompts := callsOf(h.fakeState(), "agent", "prompt", flagValue(starts[1], "--pane"))
+	last := prompts[len(prompts)-1][3]
+	if !strings.Contains(last, "left no handoff") || !strings.Contains(last, "status.log") {
+		t.Fatalf("recovery brief = %q", last)
+	}
+	wantContains(t, string(mustRead(t, filepath.Join(h.dir("t1"), "status.log"))), "respawned on pi")
+}
+
+func TestFrozenReason(t *testing.T) {
+	esc := entry{State: "escalate", Text: "x"}
+	resp := entry{State: "note", Text: "closed for respawn on pi", By: "orch"}
+	cases := []struct {
+		name    string
+		entries []entry
+		frozen  bool
+	}{
+		{"two escalations are allowed", []entry{esc, esc}, false},
+		{"the third escalation freezes", []entry{esc, esc, esc}, true},
+		{"two respawns are allowed", []entry{resp, resp}, false},
+		{"the third respawn freezes", []entry{resp, resp, resp}, true},
+		{"unfreeze resets the count", []entry{esc, esc, esc, {State: "note", Text: unfreezeNote, By: "orch"}, esc}, false},
+		{"two stalls are allowed", []entry{{State: "note", Text: "stalled: x", By: "orch"}, {State: "note", Text: "looping: y", By: "orch"}}, false},
+		{"the third stall freezes", []entry{{State: "note", Text: "stalled: x", By: "orch"}, {State: "note", Text: "looping: y", By: "orch"}, {State: "note", Text: "stalled: z", By: "orch"}}, true},
+		{"three identical reports freeze", []entry{{State: "working", Text: "retrying"}, {State: "working", Text: "retrying"}, {State: "working", Text: "retrying"}}, true},
+		{"progress between reports does not", []entry{{State: "working", Text: "a"}, {State: "working", Text: "b"}, {State: "working", Text: "a"}}, false},
+		{"orch notes are not the lead's loop", []entry{{State: "working", Text: "a"}, {State: "note", Text: "n", By: "orch"}, {State: "working", Text: "a"}}, false},
+	}
+	for _, c := range cases {
+		if got := frozenReason(c.entries) != ""; got != c.frozen {
+			t.Errorf("%s: frozen = %v, want %v", c.name, got, c.frozen)
+		}
+	}
+}
+
+func TestFreezeHoldAndDoctor(t *testing.T) {
+	h := setup(t)
+	wantContains(t, h.must("doctor"), "doctor: ok")
+	for _, id := range []string{"t1", "t2"} {
+		h.task(id)
+		h.must("spawn", id)
+		for range 3 {
+			h.must("report", "--dir", h.dir(id), "working", "retrying the migration")
+		}
+	}
+	wantContains(t, h.must("status"), "FROZEN: t1 - the same working report 3 times in a row", "FROZEN: t2")
+	if code, out := h.run("respawn", "t1", "--harness", "pi", "--model", "flash"); code != 1 || !strings.Contains(out, "t1 is frozen") {
+		t.Fatalf("respawn of a frozen task: %d %s", code, out)
+	}
+	h.task("t3")
+	if code, out := h.run("spawn", "t3"); code != 1 || !strings.Contains(out, "2 tasks are frozen") {
+		t.Fatalf("spawn with two frozen tasks: %d %s", code, out)
+	}
+	code, out := h.run("doctor")
+	if code != 1 {
+		t.Fatalf("doctor exit = %d, want 1\n%s", code, out)
+	}
+	wantContains(t, out, `error,t1,"frozen:`, "orch unfreeze t1", "error,watcher,2 lead(s) in flight and no watcher")
+	wantContains(t, h.must("unfreeze", "t1"), "unfroze t1")
+	if strings.Contains(h.must("status"), "FROZEN: t1") {
+		t.Fatal("unfreeze did not clear the freeze")
+	}
+	h.must("spawn", "t3") // only one frozen task left
+	h.must("close", "t3", "--force")
+	wantContains(t, h.must("hold", "on", "checking", "the", "database"), "hold: on (checking the database)")
+	wantContains(t, h.must("status"), "HOLD: checking the database")
+	h.task("t4")
+	if code, out := h.run("spawn", "t4"); code != 1 || !strings.Contains(out, "spawning is on hold") {
+		t.Fatalf("spawn during a hold: %d %s", code, out)
+	}
+	h.must("hold", "off")
+	h.must("spawn", "t4")
+}
+
+// fakePi installs a stand-in for pi that answers each gate pass from
+// <dir>/<pass>.json and records every call in <dir>/calls.log.
+func (h *harness) fakePi(passes map[string]string) string {
+	h.t.Helper()
+	dir := filepath.Join(h.tmp, "fakepi")
+	os.MkdirAll(dir, 0o755)
+	script := `#!/bin/sh
+echo "$*" >> "` + dir + `/calls.log"
+case "$*" in
+*GATE-SCOPE*) f=scope;; *GATE-QUESTIONS*) f=questions;; *GATE-ADVERSARY-A*) f=adv-a;; *GATE-ADVERSARY-B*) f=adv-b;; esac
+[ -f "` + dir + `/$f.fail" ] && { echo boom >&2; exit 1; }
+cat "` + dir + `/$f.json"
+`
+	bin := filepath.Join(dir, "pi")
+	os.WriteFile(bin, []byte(script), 0o755)
+	for _, f := range []string{"scope", "questions", "adv-a", "adv-b"} {
+		os.Remove(filepath.Join(dir, f+".json"))
+		os.Remove(filepath.Join(dir, f+".fail"))
+	}
+	os.Remove(filepath.Join(dir, "calls.log"))
+	for name, body := range passes {
+		if body == "FAIL" {
+			os.WriteFile(filepath.Join(dir, name+".fail"), nil, 0o644)
+		} else {
+			os.WriteFile(filepath.Join(dir, name+".json"), []byte(body), 0o644)
+		}
+	}
+	h.t.Setenv("ORCH_PI", bin)
+	return dir
+}
+
+var gateClean = map[string]string{
+	"scope":     `{"packages":[{"id":"api","will_change":["internal/api.go"],"claims":[{"claim":"store has Put","evidence":"internal/store.go:3"}]}]}`,
+	"questions": `{"questions":[{"package":"api","question":"Which table?","answered_by":"internal/store.go:3"}]}`,
+	"adv-a":     `{"findings":[]}`,
+	"adv-b":     `{"findings":[]}`,
+}
+
+func gatePasses(over map[string]string) map[string]string {
+	m := map[string]string{}
+	for k, v := range gateClean {
+		m[k] = v
+	}
+	for k, v := range over {
+		m[k] = v
+	}
+	return m
+}
+
+func TestGateEvidenceDecidesTheVerdict(t *testing.T) {
+	h := setup(t)
+	os.MkdirAll(filepath.Join(h.repo, "internal"), 0o755)
+	os.WriteFile(filepath.Join(h.repo, "internal", "store.go"), []byte("package internal\n\nfunc Put() {}\n"), 0o644)
+	h.commitSpec(threePkgSpec())
+
+	// Nothing has run the gate yet: plan refuses.
+	if code, out := h.run("plan", "spec.md"); code != 1 || !strings.Contains(out, "gate has not passed") {
+		t.Fatalf("plan without a gate: %d %s", code, out)
+	}
+
+	// A claim whose evidence is not in the repo is dropped, not counted.
+	h.fakePi(gatePasses(map[string]string{"adv-a": `{"findings":[{"severity":"blocker","where":"Design rules","claim":"x","evidence":"internal/nope.go:9"}]}`}))
+	out := h.must("gate", "spec.md")
+	wantContains(t, out, "gate: pass", "blockers: 0 verified", "concerns: 0 verified, 1 unverified", "dropped: 1 claim(s)")
+	h.must("plan", "spec.md") // the passed gate unlocks plan
+
+	// The same finding with evidence that exists is a verified blocker.
+	h.fakePi(gatePasses(map[string]string{"adv-b": `{"findings":[{"severity":"blocker","where":"Design rules","claim":"Put ignores errors","evidence":"internal/store.go:3","why":"w"}]}`}))
+	code, out := h.run("gate", "spec.md")
+	if code != 1 {
+		t.Fatalf("a verified blocker passed the gate: %d %s", code, out)
+	}
+	wantContains(t, out, "gate: fail", "blockers: 1 verified")
+	wantContains(t, string(mustRead(t, filepath.Join(filepath.Dir(h.dir("x")), "gate", specHash(mustRead(t, filepath.Join(h.repo, "spec.md"))), "report.md"))), "Put ignores errors")
+}
+
+func TestGateQuestionsScopeAndFailures(t *testing.T) {
+	h := setup(t)
+	os.MkdirAll(filepath.Join(h.repo, "internal"), 0o755)
+	os.WriteFile(filepath.Join(h.repo, "internal", "store.go"), []byte("package internal\n\nfunc Put() {}\n"), 0o644)
+	h.commitSpec(threePkgSpec())
+	hash := specHash(mustRead(t, filepath.Join(h.repo, "spec.md")))
+	gdir := filepath.Join(filepath.Dir(h.dir("x")), "gate", hash)
+
+	// An unanswered question fails the gate and becomes a card orch ask renders.
+	h.fakePi(gatePasses(map[string]string{"questions": `{"questions":[{"package":"api","question":"Soft or hard delete?","answered_by":"","changes_result":true}]}`}))
+	code, out := h.run("gate", "spec.md")
+	if code != 1 {
+		t.Fatalf("an open question passed the gate: %d %s", code, out)
+	}
+	wantContains(t, out, "gate: fail", "questions: 1 need a decision", "orch ask --cards")
+	wantContains(t, h.must("ask", "--cards", filepath.Join(gdir, "questions")), "questions: 1")
+
+	// A question whose answer changes nothing visible does not block.
+	h.fakePi(gatePasses(map[string]string{"questions": `{"questions":[{"package":"api","question":"Where does sub go?","answered_by":"","changes_result":false}]}`}))
+	wantContains(t, h.must("gate", "spec.md"), "gate: pass", "questions: 0 need a decision")
+
+	// An answer that cites a line the repo does not have is no answer.
+	h.fakePi(gatePasses(map[string]string{"questions": `{"questions":[{"package":"api","question":"Which table?","answered_by":"internal/store.go:99","changes_result":true}]}`}))
+	if code, out := h.run("gate", "spec.md"); code != 1 || !strings.Contains(out, "questions: 1 need a decision") {
+		t.Fatalf("a fake answer counted: %d %s", code, out)
+	}
+
+	// A package that must change a file another package owns is a blocker.
+	h.fakePi(gatePasses(map[string]string{"scope": `{"packages":[{"id":"api","will_change":["internal/store.go"],"claims":[]}]}`}))
+	if code, out := h.run("gate", "spec.md"); code != 1 || !strings.Contains(out, "blockers: 1 verified") {
+		t.Fatalf("ownership conflict passed: %d %s", code, out)
+	}
+
+	// A pass that fails to run leaves the gate unverified, never passed.
+	h.fakePi(gatePasses(map[string]string{"adv-a": "FAIL"}))
+	code, out = h.run("gate", "spec.md")
+	if code != 1 {
+		t.Fatalf("a failed pass passed the gate: %d %s", code, out)
+	}
+	wantContains(t, out, "gate: unverified", "pass_failed: adversary-a")
+	if code, _ := h.run("plan", "spec.md"); code != 1 {
+		t.Fatal("plan accepted an unverified gate")
+	}
+
+	// With pi limited no model pass runs at all.
+	dir := h.fakePi(gatePasses(nil))
+	h.must("health", "set", "pi", "limited")
+	code, out = h.run("gate", "spec.md")
+	if code != 1 || !strings.Contains(out, "gate: unverified") {
+		t.Fatalf("gate with pi limited: %d %s", code, out)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "calls.log")); err == nil {
+		t.Fatal("pi was called although it is marked limited")
+	}
+}
+
+func TestGateDeterministicChecks(t *testing.T) {
+	h := setup(t)
+	spec := strings.Replace(threePkgSpec(), "Tests for api pass.", "`scripts/missing-check go ./...` passes; see internal/ghost.go:12.", 1)
+	if spec == threePkgSpec() {
+		t.Fatal("test spec was not modified")
+	}
+	h.commitSpec(spec)
+	h.fakePi(gatePasses(nil))
+	code, out := h.run("gate", "spec.md")
+	if code != 1 {
+		t.Fatalf("a spec with a missing command and pointer passed: %d %s", code, out)
+	}
+	wantContains(t, out, "gate: fail", "deterministic: 3 issue(s)")
+	hash := specHash(mustRead(t, filepath.Join(h.repo, "spec.md")))
+	report := string(mustRead(t, filepath.Join(filepath.Dir(h.dir("x")), "gate", hash, "report.md")))
+	wantContains(t, report, `acceptance command "scripts/missing-check" is not in the repo`, "pointer internal/ghost.go:12 does not resolve")
+}
+
+func TestLoopingCall(t *testing.T) {
+	rep := func(sig string, n int) []string { return slices.Repeat([]string{sig}, n) }
+	cases := []struct {
+		name string
+		sigs []string
+		want bool
+	}{
+		{"nothing", nil, false},
+		{"four in a row is not enough", rep("bash\x00a", 4), false},
+		{"five in a row", rep("bash\x00a", 5), true},
+		{"varied calls", []string{"a\x001", "b\x002", "a\x003", "c\x004", "a\x005", "d\x006"}, false},
+		{"eight of twelve with others between", append(append(rep("bash\x00a", 4), "x\x00", "y\x00"), append(rep("bash\x00a", 4), "z\x00", "w\x00")...), true},
+		{"an old run outside the window", append(rep("bash\x00a", 9), []string{"b\x00", "c\x00", "d\x00", "e\x00", "f\x00", "g\x00", "h\x00", "i\x00", "j\x00", "k\x00", "l\x00", "m\x00"}...), false},
+	}
+	for _, c := range cases {
+		if name, _, ok := loopingCall(c.sigs); ok != c.want || (ok && name == "") {
+			t.Errorf("%s: ok = %v (name %q), want %v", c.name, ok, name, c.want)
+		}
+	}
+}
+
+func TestCallSignaturesAndFingerprint(t *testing.T) {
+	h := setup(t)
+	h.transcript("claude", "c1",
+		`{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"go test","description":"d"}}]}}`,
+		`{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"description":"d","command":"go test"}}]}}`,
+		`{"type":"assistant","isSidechain":true,"message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"sub"}}]}}`,
+		`{"type":"assistant","message":{"content":[{"type":"text","text":"tool_use in prose"}]}}`,
+	)
+	got := callSignatures("claude", "c1")
+	if len(got) != 2 || got[0] != got[1] || !strings.HasPrefix(got[0], "Bash\x00") {
+		t.Fatalf("claude signatures = %q (same call with keys reordered must match; a subagent's call must not count)", got)
+	}
+	h.transcript("pi", "p1", `{"type":"message","message":{"role":"assistant","content":[{"type":"toolCall","name":"read","arguments":{"path":"a.go"}}]}}`)
+	if got := callSignatures("pi", "p1"); len(got) != 1 || !strings.HasPrefix(got[0], "read\x00") {
+		t.Fatalf("pi signatures = %q", got)
+	}
+
+	wt := filepath.Join(h.tmp, "fpwt")
+	if out, err := exec.Command("git", "-C", h.repo, "worktree", "add", "-q", "-b", "fp", wt, "main").CombinedOutput(); err != nil {
+		t.Fatalf("worktree: %v\n%s", err, out)
+	}
+	base := worktreeFingerprint(wt)
+	if base == "" || base != worktreeFingerprint(wt) {
+		t.Fatalf("fingerprint must be stable for an unchanged worktree: %q", base)
+	}
+	os.WriteFile(filepath.Join(wt, "a.txt"), []byte("one\n"), 0o644)
+	withNew := worktreeFingerprint(wt)
+	if withNew == base {
+		t.Fatal("a new untracked file did not change the fingerprint")
+	}
+	h.gitIn(wt, "add", "a.txt")
+	h.gitIn(wt, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "a")
+	committed := worktreeFingerprint(wt)
+	os.WriteFile(filepath.Join(wt, "a.txt"), []byte("two\n"), 0o644)
+	if worktreeFingerprint(wt) == committed {
+		t.Fatal("an edit to a tracked file did not change the fingerprint")
+	}
+	if worktreeFingerprint(filepath.Join(h.tmp, "nope")) != "" {
+		t.Fatal("a missing worktree must fingerprint as empty")
+	}
+}
+
+func (h *harness) gitIn(dir string, args ...string) {
+	h.t.Helper()
+	if out, err := exec.Command("git", append([]string{"-C", dir}, args...)...).CombinedOutput(); err != nil {
+		h.t.Fatalf("git %v: %v\n%s", args, err, out)
+	}
+}
+
+func TestWatchStalled(t *testing.T) {
+	h := setup(t)
+	h.task("t1")
+	h.must("spawn", "t1")
+	wt := filepath.Join(filepath.Dir(h.dir("t1")), "worktrees", "t1")
+	h.gitIn(h.repo, "worktree", "add", "-q", "-b", "orch/t1", wt, "main")
+	if out := h.must("watch", "--once"); out != "" {
+		t.Fatalf("a fresh working lead alerted: %q", out)
+	}
+	h.now = h.now.Add(10 * time.Minute)
+	if out := h.must("watch", "--once"); out != "" {
+		t.Fatalf("alerted before stall_minutes: %q", out)
+	}
+	// Work in the tree counts as progress, so the clock restarts.
+	os.WriteFile(filepath.Join(wt, "x.go"), []byte("package x\n"), 0o644)
+	h.now = h.now.Add(10 * time.Minute)
+	if out := h.must("watch", "--once"); out != "" {
+		t.Fatalf("alerted although the worktree changed: %q", out)
+	}
+	h.now = h.now.Add(16 * time.Minute)
+	wantContains(t, h.must("watch", "--once"), "orch: t1 stalled: no report and no change to the worktree for 16m")
+	h.now = h.now.Add(time.Hour)
+	if out := h.must("watch", "--once"); out != "" {
+		t.Fatalf("stalled repeated: %q", out)
+	}
+	wantContains(t, string(mustRead(t, filepath.Join(h.dir("t1"), "status.log"))), "stalled: no report")
+	// A report restarts the clock and re-arms the alert.
+	h.must("report", "--dir", h.dir("t1"), "working", "back on it")
+	h.must("watch", "--once") // the watcher sees the report as it is written
+	h.now = h.now.Add(16 * time.Minute)
+	wantContains(t, h.must("watch", "--once"), "orch: t1 stalled")
+}
+
+func TestWatchLooping(t *testing.T) {
+	h := setup(t)
+	h.task("t1", "--harness", "pi", "--model", "m", "--effort", "low")
+	h.must("spawn", "t1")
+	l, _ := loadLead(h.dir("t1"))
+	call := `{"type":"message","message":{"role":"assistant","content":[{"type":"toolCall","name":"bash","arguments":{"command":"go test ./..."}}]}}`
+	h.transcript("pi", l.Session, slices.Repeat([]string{call}, 8)...)
+	if out := h.must("watch", "--once"); out != "" {
+		t.Fatalf("looping alerted before the worktree stood still: %q", out)
+	}
+	h.now = h.now.Add(3 * time.Minute)
+	wantContains(t, h.must("watch", "--once"), "orch: t1 looping: it called bash with the same arguments 8 times")
+	h.now = h.now.Add(3 * time.Minute)
+	if out := h.must("watch", "--once"); out != "" {
+		t.Fatalf("looping repeated for the same call: %q", out)
+	}
+}
+
+func TestTierFor(t *testing.T) {
+	mk := func(v decVals) triageAnswers {
+		var r struct {
+			Answers map[string]decAnswer `json:"answers"`
+		}
+		json.Unmarshal([]byte(decReply(v)), &r)
+		c, d := r.Answers["clarity"], r.Answers["difficulty"]
+		return triageAnswers{Clarity: c.Choice, ClarityP: c.Probabilities, ClarityConf: c.Confidence, Difficulty: d.Score,
+			DifficultyP: d.Probabilities, DiffConf: d.Confidence, Verifiable: r.Answers["verifiable"].Noul,
+			CrossCutting: r.Answers["cross_cutting"].Noul, CauseKnown: r.Answers["cause_known"].Noul}
+	}
+	with := func(v decVals, f func(*decVals)) decVals { f(&v); return v }
+	cases := []struct {
+		name string
+		v    decVals
+		want string
+	}{
+		{"clear, easy, verifiable", settledAnswers, "settled"},
+		{"guided and medium", standardAnswers, "standard"},
+		{"open-ended", planningAnswers, "planning"},
+		{"hard but otherwise clear", with(settledAnswers, func(v *decVals) { v.d0, v.d1, v.d3 = 0.4, 0.3, 0.3 }), "planning"},
+		{"unknown cause", with(settledAnswers, func(v *decVals) { v.cause = 0.1 }), "planning"},
+		{"no check that can fail", with(settledAnswers, func(v *decVals) { v.verifiable = 0.5 }), "standard"},
+		{"touches a shared interface", with(settledAnswers, func(v *decVals) { v.cross = 0.6 }), "standard"},
+		{"just under the clear threshold", with(settledAnswers, func(v *decVals) { v.clear, v.guided = 0.79, 0.21 }), "standard"},
+		{"low confidence moves settled up", with(settledAnswers, func(v *decVals) { v.conf = 0.5 }), "standard"},
+		{"low confidence moves standard up", with(standardAnswers, func(v *decVals) { v.conf = 0.5 }), "planning"},
+	}
+	for _, c := range cases {
+		if got, why := tierFor(mk(c.v)); got != c.want {
+			t.Errorf("%s: tier = %s (%s), want %s", c.name, got, why, c.want)
+		}
+	}
+}
+
+func TestTriageShadowRecordsAndNeverBlocks(t *testing.T) {
+	h := setup(t)
+	os.WriteFile(os.Getenv("ORCH_CONFIG"), []byte("weak_models = [\"flash\"]\n"), 0o644)
+	h.dec.set(200, decReply(standardAnswers))
+	h.task("t1", "--harness", "pi", "--model", "flash", "--effort", "low")
+	out := h.must("spawn", "t1")
+	wantContains(t, out, "warning: triage rates t1 as standard work", "shadow mode: not blocked", "spawned lead-t1")
+	if h.dec.count() != 1 || h.dec.auth != "Bearer test-key" {
+		t.Fatalf("decider hits %d, auth %q", h.dec.count(), h.dec.auth)
+	}
+	body, _ := json.Marshal(h.dec.last)
+	wantContains(t, string(body), "perplexity/pplx-decider-v1.2-20261016", `"acceptance"`, `"clarity"`, `"cause_known"`)
+	fm, _, _ := readTask(filepath.Join(h.dir("t1"), "task.md"))
+	if fm["tier"] != "standard" {
+		t.Fatalf("task.md tier = %q", fm["tier"])
+	}
+	recs := readTriage(filepath.Join(filepath.Dir(h.dir("t1"))))
+	if len(recs) != 1 || recs[0].Tier != "standard" || recs[0].Mode != "shadow" || recs[0].Actual != "pi flash" {
+		t.Fatalf("records = %+v", recs)
+	}
+	// Unchanged task text is not asked twice; --force asks again.
+	h.must("triage", "t1")
+	if h.dec.count() != 1 {
+		t.Fatalf("an unchanged task was asked again: %d hits", h.dec.count())
+	}
+	h.must("triage", "t1", "--force")
+	if h.dec.count() != 2 {
+		t.Fatalf("--force did not ask again: %d hits", h.dec.count())
+	}
+	// An unreachable decision model warns and still spawns in shadow mode.
+	h.task("t2")
+	h.dec.set(500, `{"error":"down"}`)
+	wantContains(t, h.must("spawn", "t2"), "warning: triage unavailable", "spawned lead-t2")
+}
+
+func TestTriageEnforce(t *testing.T) {
+	h := setup(t)
+	os.WriteFile(os.Getenv("ORCH_CONFIG"), []byte("max_leads = 8\ntriage_mode = \"enforce\"\nweak_models = [\"flash\"]\n"), 0o644)
+	h.task("t1", "--harness", "pi", "--model", "flash", "--effort", "low")
+	h.dec.set(200, decReply(standardAnswers))
+	if code, out := h.run("spawn", "t1"); code != 1 || !strings.Contains(out, "flash is for settled work only") {
+		t.Fatalf("a weak model took standard work: %d %s", code, out)
+	}
+	wantContains(t, h.must("spawn", "t1", "--override-tier"), "spawned lead-t1")
+	// A settled task may use the weak model.
+	h.task("t2", "--harness", "pi", "--model", "flash", "--effort", "low")
+	h.dec.set(200, decReply(settledAnswers))
+	h.must("spawn", "t2")
+	// A strong model is never blocked, whatever the tier.
+	h.task("t3")
+	h.dec.set(200, decReply(planningAnswers))
+	h.must("spawn", "t3")
+	// Enforce mode will not guess when the decision model is down.
+	h.task("t4", "--harness", "pi", "--model", "flash", "--effort", "low")
+	h.dec.set(500, `{"error":"down"}`)
+	if code, out := h.run("spawn", "t4"); code != 1 || !strings.Contains(out, "triage is unavailable") {
+		t.Fatalf("enforce spawned without a verdict: %d %s", code, out)
+	}
+	wantContains(t, h.must("spawn", "t4", "--override-tier"), "spawned lead-t4")
+}
+
+func TestTriageOffAndBadMode(t *testing.T) {
+	h := setup(t)
+	os.WriteFile(os.Getenv("ORCH_CONFIG"), []byte("triage_mode = \"off\"\n"), 0o644)
+	h.task("t1")
+	h.must("spawn", "t1")
+	if h.dec.count() != 0 {
+		t.Fatalf("triage ran although it is off: %d hits", h.dec.count())
+	}
+	os.WriteFile(os.Getenv("ORCH_CONFIG"), []byte("triage_mode = \"maybe\"\n"), 0o644)
+	if code, out := h.run("status"); code != 1 || !strings.Contains(out, "triage_mode must be shadow, enforce or off") {
+		t.Fatalf("bad mode accepted: %d %s", code, out)
+	}
+}
+
+func TestTriageReportJoinsOutcomes(t *testing.T) {
+	h := setup(t)
+	if out := h.must("triage", "report"); !strings.Contains(out, "no records yet") {
+		t.Fatalf("empty report = %q", out)
+	}
+	mk := func(id string, v decVals) {
+		h.task(id)
+		h.dec.set(200, decReply(v))
+		h.must("triage", id)
+	}
+	mk("a", settledAnswers)
+	mk("b", settledAnswers)
+	mk("c", planningAnswers)
+	mk("d", settledAnswers) // still open: no outcome
+	h.must("report", "--dir", h.dir("a"), "done", "ok")
+	h.must("report", "--dir", h.dir("b"), "failed", "could not")
+	h.must("report", "--dir", h.dir("c"), "done", "ok")
+	out := h.must("triage", "report")
+	wantContains(t, out,
+		"4 task(s) scored, 3 with an outcome, 1 still open",
+		"too few outcomes (3 of 20)",
+		"settled,2,1,1,50%",
+		"planning,1,0,1,0%",
+		"settled_but_hard[1]:", "b (failed; ran on claude sonnet)",
+		"cautious_but_clean: 1 task(s)")
+}
+
+func TestTriageOutcome(t *testing.T) {
+	orch := func(text string) entry { return entry{State: "note", Text: text, By: "orch"} }
+	cases := []struct {
+		name    string
+		entries []entry
+		want    string
+	}{
+		{"open", []entry{{State: "working", Text: "x"}}, ""},
+		{"clean", []entry{{State: "working", Text: "x"}, {State: "done", Text: "y"}}, "clean"},
+		{"done after an escalation is still hard", []entry{{State: "escalate", Text: "x"}, {State: "done", Text: "y"}}, "hard"},
+		{"verify failed", []entry{{State: "done", Text: "y"}, orch("verify fail: check exit 1")}, "hard"},
+		{"respawned", []entry{orch("closed for respawn on pi"), {State: "done", Text: "y"}}, "hard"},
+		{"stalled", []entry{orch("stalled: no report"), {State: "done", Text: "y"}}, "hard"},
+		{"failed", []entry{{State: "failed", Text: "z"}}, "hard"},
+	}
+	for _, c := range cases {
+		if got, _ := triageOutcome(c.entries); got != c.want {
+			t.Errorf("%s: outcome = %q, want %q", c.name, got, c.want)
+		}
+	}
+}
+
+const autoConfig = `max_leads = 8
+[allowed_models]
+claude = ["opus", "sonnet"]
+pi = ["flash", "pro"]
+
+[[dispatch]]
+when = "planning"
+tier = "planning"
+use = [{ harness = "claude", model = "opus" }, { harness = "pi", model = "pro", degraded = true }]
+
+[[dispatch]]
+when = "settled"
+tier = "settled"
+use = [{ harness = "pi", model = "flash" }, { harness = "claude", model = "sonnet" }]
+
+[[dispatch]]
+when = "standard"
+tier = "standard"
+use = [{ harness = "claude", model = "sonnet" }, { harness = "pi", model = "pro", degraded = true }]
+`
+
+func TestAllowedModels(t *testing.T) {
+	h := setup(t)
+	wantContains(t, h.must("models"), "allowed_models: not set")
+	h.must("new", "free", "--kind", "ship", "--harness", "claude", "--model", "anything-goes", "--effort", "high")
+
+	os.WriteFile(os.Getenv("ORCH_CONFIG"), []byte("[allowed_models]\nclaude = [\"opus\", \"sonnet\"]\npi = [\"flash\"]\n"), 0o644)
+	wantContains(t, h.must("models"), "claude (ok):", "  sonnet", "pi (ok):", "  flash")
+	for _, c := range [][]string{
+		{"claude", "haiku"}, {"claude", "default"}, {"pi", "pro"}, {"pi", "default"},
+	} {
+		code, out := h.run("new", "x", "--kind", "ship", "--harness", c[0], "--model", c[1], "--effort", "high")
+		if code != 1 || !strings.Contains(out, "is not on the allowed list") || !strings.Contains(out, "allowed_models") {
+			t.Errorf("%v accepted: %d %s", c, code, out)
+		}
+	}
+	h.must("new", "ok1", "--kind", "ship", "--harness", "pi", "--model", "flash", "--effort", "low")
+
+	// A recovery respawn cannot reach a model outside the list either.
+	h.task("t1")
+	h.must("spawn", "t1")
+	if code, out := h.run("respawn", "t1", "--harness", "pi", "--model", "pro"); code != 1 || !strings.Contains(out, "not on the allowed list") {
+		t.Fatalf("respawn onto a disallowed model: %d %s", code, out)
+	}
+	// So the gate model.
+	t.Setenv("ORCH_GATE_MODEL", "weird/model")
+	h.commitSpec(threePkgSpec())
+	if code, out := h.run("gate", "spec.md"); code != 1 || !strings.Contains(out, "the gate model") {
+		t.Fatalf("gate ran a disallowed model: %d %s", code, out)
+	}
+
+	// A dispatch profile outside the list is a config error, not a surprise later.
+	os.WriteFile(os.Getenv("ORCH_CONFIG"), []byte("[allowed_models]\nclaude = [\"sonnet\"]\n[[dispatch]]\nwhen = \"x\"\nuse = [{ harness = \"claude\", model = \"opus\" }]\n"), 0o644)
+	if code, out := h.run("status"); code != 1 || !strings.Contains(out, "dispatch rule 1") || !strings.Contains(out, "not on the allowed list") {
+		t.Fatalf("dispatch profile outside the list loaded: %d %s", code, out)
+	}
+	os.WriteFile(os.Getenv("ORCH_CONFIG"), []byte("[allowed_models]\ngemini = [\"x\"]\n"), 0o644)
+	if code, out := h.run("status"); code != 1 || !strings.Contains(out, "claude or pi") {
+		t.Fatalf("unknown harness in allowed_models: %d %s", code, out)
+	}
+}
+
+func TestSpawnAuto(t *testing.T) {
+	h := setup(t)
+	os.WriteFile(os.Getenv("ORCH_CONFIG"), []byte(autoConfig), 0o644)
+	auto := []string{"--harness", "auto", "--model", "auto", "--effort", "auto"}
+	if code, out := h.run("new", "bad", "--kind", "ship", "--harness", "auto", "--model", "sonnet", "--effort", "high"); code != 1 || !strings.Contains(out, "needs --model auto") {
+		t.Fatalf("half-auto task accepted: %d %s", code, out)
+	}
+
+	h.task("a", auto...)
+	if code, out := h.run("spawn", "a"); code != 1 || !strings.Contains(out, "run `orch spawn a --auto`") {
+		t.Fatalf("an unresolved auto task spawned: %d %s", code, out)
+	}
+	h.dec.set(200, decReply(settledAnswers))
+	out := h.must("spawn", "a", "--auto")
+	wantContains(t, out, "auto: a is settled work", "would use: pi flash (effort low)", "dry run: nothing changed")
+	fm, _, _ := readTask(filepath.Join(h.dir("a"), "task.md"))
+	if fm["harness"] != "auto" || len(callsOf(h.fakeState(), "agent", "start")) != 0 {
+		t.Fatalf("the dry run changed something: %v", fm)
+	}
+	wantContains(t, h.must("spawn", "a", "--auto", "--apply"), "using: pi flash (effort low)", "spawned lead-a (pi flash)")
+	fm, _, _ = readTask(filepath.Join(h.dir("a"), "task.md"))
+	if fm["harness"] != "pi" || fm["model"] != "flash" || fm["effort"] != "low" || fm["tier"] != "settled" {
+		t.Fatalf("task after auto = %v", fm)
+	}
+	wantContains(t, string(mustRead(t, filepath.Join(h.dir("a"), "status.log"))), "auto: settled -> pi flash")
+	recs := readTriage(filepath.Dir(h.dir("a")))
+	if got := recs[len(recs)-1].Actual; got != "pi flash" {
+		t.Fatalf("triage records %q as the actual profile", got)
+	}
+
+	// Planning work with Claude limited parks; a degraded stand-in needs approval.
+	h.task("b", auto...)
+	h.dec.set(200, decReply(planningAnswers))
+	h.must("health", "set", "claude", "limited")
+	code, out := h.run("spawn", "b", "--auto", "--apply")
+	if code != 1 {
+		t.Fatalf("planning work was not parked: %d %s", code, out)
+	}
+	wantContains(t, out, "b is planning work", "claude opus: claude is limited", "parked", "degraded option: pi pro [degraded]")
+	wantContains(t, h.must("spawn", "b", "--auto", "--apply", "--degraded"), "using: pi pro (effort high)")
+	fm, _, _ = readTask(filepath.Join(h.dir("b"), "task.md"))
+	if fm["degraded"] != "true" {
+		t.Fatalf("a degraded pick was not marked: %v", fm)
+	}
+	h.must("health", "set", "claude", "ok")
+
+	// Private work never leaves Claude, whatever the tier says.
+	h.task("c", auto...)
+	setFrontMatter(filepath.Join(h.dir("c"), "task.md"), "private", "true")
+	h.dec.set(200, decReply(settledAnswers))
+	out = h.must("spawn", "c", "--auto")
+	wantContains(t, out, "pi flash: the task is private, so Claude only", "would use: claude sonnet")
+	h.task("c2")
+	setFrontMatter(filepath.Join(h.dir("c2"), "task.md"), "private", "true")
+	setFrontMatter(filepath.Join(h.dir("c2"), "task.md"), "harness", "pi")
+	setFrontMatter(filepath.Join(h.dir("c2"), "task.md"), "model", "flash")
+	if code, out := h.run("spawn", "c2"); code != 1 || !strings.Contains(out, "marked private") {
+		t.Fatalf("a private task ran on pi: %d %s", code, out)
+	}
+
+	// A hand-chosen profile is left alone.
+	h.task("d")
+	if code, out := h.run("spawn", "d", "--auto"); code != 1 || !strings.Contains(out, "hand-chosen profile") {
+		t.Fatalf("auto overrode a hand-chosen profile: %d %s", code, out)
+	}
+	if code, out := h.run("spawn", "d", "--apply"); code != 1 || !strings.Contains(out, "go with --auto") {
+		t.Fatalf("--apply without --auto: %d %s", code, out)
+	}
+}
+
+const conditionalConfig = `max_leads = 8
+[allowed_models]
+claude = ["opus", "sonnet"]
+pi = ["flash"]
+
+[[allowed_when_limited]]
+harness = "pi"
+allow = { claude = ["haiku"] }
+
+[[dispatch]]
+when = "settled"
+tier = "settled"
+use = [{ harness = "pi", model = "flash" }, { harness = "claude", model = "haiku" }, { harness = "claude", model = "sonnet" }]
+`
+
+func TestHaikuComesInWhenPiIsDown(t *testing.T) {
+	h := setup(t)
+	os.WriteFile(os.Getenv("ORCH_CONFIG"), []byte(conditionalConfig), 0o644)
+	wantContains(t, h.must("models"), "haiku (only while pi is limited: not allowed now)")
+
+	// While pi is healthy Haiku is not an allowed lead model.
+	code, out := h.run("new", "x", "--kind", "ship", "--harness", "claude", "--model", "haiku", "--effort", "low")
+	if code != 1 || !strings.Contains(out, "allowed only while pi is limited, and it is not") {
+		t.Fatalf("haiku allowed while pi is healthy: %d %s", code, out)
+	}
+	// auto skips it, takes Flash, and for private work falls to Sonnet, never Haiku.
+	h.task("a", "--harness", "auto", "--model", "auto", "--effort", "auto")
+	h.dec.set(200, decReply(settledAnswers))
+	wantContains(t, h.must("spawn", "a", "--auto"), "would use: pi flash")
+	h.task("p", "--harness", "auto", "--model", "auto", "--effort", "auto")
+	setFrontMatter(filepath.Join(h.dir("p"), "task.md"), "private", "true")
+	out = h.must("spawn", "p", "--auto")
+	wantContains(t, out, "claude haiku: not allowed right now", "would use: claude sonnet")
+
+	// With pi down Haiku is allowed and becomes the cheap stand-in.
+	h.must("health", "set", "pi", "limited")
+	wantContains(t, h.must("models"), "haiku (only while pi is limited: allowed now)")
+	wantContains(t, h.must("dispatch"), "now: claude haiku")
+	wantContains(t, h.must("spawn", "a", "--auto"), "skipped pi flash: pi is limited", "would use: claude haiku (effort low)")
+	h.must("new", "y", "--kind", "ship", "--harness", "claude", "--model", "haiku", "--effort", "low")
+	// And it goes away again when pi recovers.
+	h.must("health", "set", "pi", "ok")
+	if code, _ := h.run("new", "z", "--kind", "ship", "--harness", "claude", "--model", "haiku", "--effort", "low"); code != 1 {
+		t.Fatal("haiku stayed allowed after pi recovered")
+	}
+
+	os.WriteFile(os.Getenv("ORCH_CONFIG"), []byte("[[allowed_when_limited]]\nharness = \"gemini\"\nallow = { claude = [\"haiku\"] }\n"), 0o644)
+	if code, out := h.run("status"); code != 1 || !strings.Contains(out, "allowed_when_limited entry 1") {
+		t.Fatalf("bad conditional entry accepted: %d %s", code, out)
+	}
+}
+
+func TestSpawnAutoNeedsATierRule(t *testing.T) {
+	h := setup(t)
+	os.WriteFile(os.Getenv("ORCH_CONFIG"), []byte("[[dispatch]]\nwhen = \"x\"\ntier = \"settled\"\nuse = [{ harness = \"claude\", model = \"sonnet\" }]\n"), 0o644)
+	h.task("a", "--harness", "auto", "--model", "auto", "--effort", "auto")
+	h.dec.set(200, decReply(planningAnswers))
+	if code, out := h.run("spawn", "a", "--auto"); code != 1 || !strings.Contains(out, "no dispatch rule has tier = \"planning\"") {
+		t.Fatalf("missing tier rule: %d %s", code, out)
+	}
+	os.WriteFile(os.Getenv("ORCH_CONFIG"), []byte("[[dispatch]]\nwhen = \"x\"\ntier = \"easy\"\nuse = [{ harness = \"claude\", model = \"sonnet\" }]\n"), 0o644)
+	if code, out := h.run("status"); code != 1 || !strings.Contains(out, "tier must be settled, standard or planning") {
+		t.Fatalf("bad tier accepted: %d %s", code, out)
+	}
+	os.WriteFile(os.Getenv("ORCH_CONFIG"), []byte("triage_mode = \"off\"\n"), 0o644)
+	if code, out := h.run("spawn", "a", "--auto"); code != 1 || !strings.Contains(out, "triage_mode is off") {
+		t.Fatalf("auto with triage off: %d %s", code, out)
+	}
+}
+
+func TestPlanPreflightsHealth(t *testing.T) {
+	h := setup(t)
+	h.commitSpec(threePkgSpec())
+	h.must("health", "set", "claude", "limited")
+	code, out := h.run("plan", "spec.md", "--skip-gate")
+	if code != 1 || !strings.Contains(out, "claude is limited") {
+		t.Fatalf("plan ignored a limited harness: %d %s", code, out)
+	}
+	if _, err := os.Stat(h.dir("store")); err == nil {
+		t.Fatal("plan created a task although it failed")
+	}
+}
+
+func TestEscalateNeedsEvidence(t *testing.T) {
+	h := setup(t)
+	h.task("t1")
+	h.must("spawn", "t1")
+	d := h.dir("t1")
+	if code, out := h.run("report", "--dir", d, "escalate", "stuck"); code != 1 || !strings.Contains(out, "needs --key") {
+		t.Fatalf("keyless escalate accepted: %d %s", code, out)
+	}
+	if code, out := h.run("report", "--dir", d, "--key", "stuck", "escalate", "stuck"); code != 1 || !strings.Contains(out, "## Tried") {
+		t.Fatalf("escalate without a card accepted: %d %s", code, out)
+	}
+	card := filepath.Join(d, "questions", "stuck.md")
+	os.MkdirAll(filepath.Dir(card), 0o755)
+	os.WriteFile(card, []byte("---\nquestion: Why does the migration deadlock?\n---\n## Context\nThe test hangs: `go test ./db` times out after 60s.\n\n## Blocked\nI cannot reproduce it outside the test.\n"), 0o644)
+	if code, out := h.run("report", "--dir", d, "--key", "stuck", "escalate", "stuck"); code != 1 || !strings.Contains(out, "## Tried") {
+		t.Fatalf("escalate card without Tried accepted: %d %s", code, out)
+	}
+	os.WriteFile(card, []byte("---\nquestion: Why does the migration deadlock?\n---\n## Context\nThe test hangs: `go test ./db` times out after 60s.\n\n## Tried\nRaised the timeout; ran it alone.\n\n## Blocked\nI cannot reproduce it outside the test.\n"), 0o644)
+	h.must("report", "--dir", d, "--key", "stuck", "escalate", "migration test deadlocks")
+	wantContains(t, h.must("status"), "open decisions: 1 (1 blocking, 0 queued)", "t1 [stuck] escalate: migration test deadlocks")
+	out := h.must("ask")
+	if strings.Contains(out, "warnings") {
+		t.Fatalf("escalate card did not render: %s", out)
+	}
+	wantContains(t, out, "questions: 1")
+}
+
+func TestVerifyRunsCheckAndScope(t *testing.T) {
+	h := setup(t)
+	h.task("t1")
+	d := h.dir("t1")
+	path := filepath.Join(d, "task.md")
+	b, _ := os.ReadFile(path)
+	os.WriteFile(path, bytes.Replace(b, []byte("\ndepends_on:"), []byte("\nowns: src/\ndepends_on:"), 1), 0o644)
+	wt := filepath.Join(filepath.Dir(d), "worktrees", "t1")
+	if out, err := exec.Command("git", "-C", h.repo, "worktree", "add", "-q", "-b", "orch/t1", wt, "main").CombinedOutput(); err != nil {
+		t.Fatalf("worktree: %v\n%s", err, out)
+	}
+	os.MkdirAll(filepath.Join(wt, "src"), 0o755)
+
+	if code, out := h.run("verify", "t1"); code != 1 || !strings.Contains(out, "verify: unverified") {
+		t.Fatalf("no check command must not pass: %d %s", code, out)
+	}
+	os.MkdirAll(filepath.Join(h.repo, ".agents"), 0o755)
+	os.WriteFile(filepath.Join(h.repo, ".agents", "orchestrate.toml"), []byte("check = \"test -f src/ok\"\n"), 0o644)
+
+	if code, out := h.run("verify", "t1"); code != 1 || !strings.Contains(out, "verify: fail") || !strings.Contains(out, "exit 1") {
+		t.Fatalf("failing check passed: %d %s", code, out)
+	}
+	os.WriteFile(filepath.Join(wt, "src", "ok"), []byte("x\n"), 0o644)
+	out := h.must("verify", "t1")
+	wantContains(t, out, "verify: pass", "scope: all files inside")
+
+	os.MkdirAll(filepath.Join(wt, "docs"), 0o755)
+	os.WriteFile(filepath.Join(wt, "docs", "x.md"), []byte("x\n"), 0o644)
+	if code, out := h.run("verify", "t1"); code != 1 || !strings.Contains(out, "verify: fail") || !strings.Contains(out, "outside_owns[1]:") || !strings.Contains(out, "docs/x.md") {
+		t.Fatalf("file outside owns passed: %d %s", code, out)
+	}
+	wantContains(t, string(mustRead(t, filepath.Join(d, "status.log"))), "verify fail: check exit 0")
+}
+
+func mustRead(t *testing.T, path string) []byte {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
+func TestQueuedQuestion(t *testing.T) {
+	h := setup(t)
+	h.task("t1")
+	h.must("spawn", "t1")
+	d := h.dir("t1")
+	if code, out := h.run("report", "--dir", d, "question", "no key?"); code != 1 || !strings.Contains(out, "needs --key") {
+		t.Fatalf("keyless question accepted: %d %s", code, out)
+	}
+	h.must("report", "--dir", d, "--key", "db", "needs-decision", "Postgres or MySQL?")
+	wantContains(t, h.must("report", "--dir", d, "--key", "naming", "question", "snake or camel?"), "queued")
+	wantContains(t, h.must("status"), "open decisions: 2 (1 blocking, 1 queued)", "t1 [naming] question: snake or camel?")
+	var st struct {
+		Leads []struct {
+			State string `json:"state"`
+		} `json:"leads"`
+	}
+	if err := json.Unmarshal([]byte(h.must("status", "--json")), &st); err != nil || len(st.Leads) != 1 || st.Leads[0].State != "needs-decision" {
+		t.Fatalf("a queued question replaced the lead's own state: %v %+v", err, st)
+	}
+	h.must("send", "t1", "--resolve", "naming", "snake")
+	if strings.Contains(h.must("status"), "[naming]") {
+		t.Fatal("resolve did not close the queued question")
+	}
+}
+
 func TestSendInboxAndDecisions(t *testing.T) {
 	h := setup(t)
 	h.task("t1")
@@ -566,7 +1537,7 @@ func TestLegacyWatcherCountsDuringUpgrade(t *testing.T) {
 	}
 	t.Cleanup(func() { old.Process.Kill(); old.Wait() })
 	time.Sleep(200 * time.Millisecond)
-	os.WriteFile(filepath.Join(h.tmp, "state", "repo", "watch.pid"), []byte(fmt.Sprintf("%d 0\n", old.Process.Pid)), 0o644)
+	os.WriteFile(filepath.Join(h.tmp, "state", "repo", "watch.pid"), fmt.Appendf(nil, "%d 0\n", old.Process.Pid), 0o644)
 	wantContains(t, h.must("status"), "watcher: running")
 	code, out := h.run("watch", "--once")
 	if code != 1 || !strings.Contains(out, "already running") {
@@ -599,8 +1570,8 @@ func TestCloseNeedsDoneOrForce(t *testing.T) {
 func (h *harness) transcript(harness, session string, lines ...string) {
 	h.t.Helper()
 	path := filepath.Join(h.tmp, "claude", "projects", "-repo", session+".jsonl")
-	if harness == "codex" {
-		path = filepath.Join(h.tmp, "codex", "sessions", "2026", "10", "14", "rollout-2026-10-14T10-00-00-"+session+".jsonl")
+	if harness == "pi" {
+		path = filepath.Join(h.tmp, "pi", "sessions", "--repo--", "2026-10-14T10-00-00-000Z_"+session+".jsonl")
 	}
 	os.MkdirAll(filepath.Dir(path), 0o755)
 	if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
@@ -630,13 +1601,13 @@ func TestContextTokens(t *testing.T) {
 	if got := contextTokens("claude", "s3"); got != 7379 {
 		t.Fatalf("context after compaction = %d, want 7379", got)
 	}
-	h.transcript("codex", "s2",
-		`{"type":"event_msg","payload":{"type":"token_count","info":null}}`,
-		`{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":900000},"last_token_usage":{"input_tokens":61000,"cached_input_tokens":60000}}}}`,
-		`{"type":"response_item","payload":{"type":"message"}}`,
+	h.transcript("pi", "p1",
+		`{"type":"message","message":{"role":"user","content":"hi"}}`,
+		`{"type":"message","message":{"role":"assistant","usage":{"input":100,"output":50,"cacheRead":17000,"cacheWrite":900,"totalTokens":18050}}}`,
+		`{"type":"message","message":{"role":"assistant","usage":{"input":120,"output":144,"cacheRead":20000,"cacheWrite":0,"totalTokens":20264}}}`,
 	)
-	if got := contextTokens("codex", "s2"); got != 61_000 {
-		t.Fatalf("codex context = %d, want 61000", got)
+	if got := contextTokens("pi", "p1"); got != 20_120 {
+		t.Fatalf("pi context = %d, want 20120 (input + cache, not output)", got)
 	}
 	for _, c := range [][2]string{{"claude", "missing"}, {"claude", ""}, {"claude", "*"}, {"other", "s1"}} {
 		if got := contextTokens(c[0], c[1]); got != 0 {
@@ -959,10 +1930,11 @@ func TestRepoConfigCannotSetUserKeys(t *testing.T) {
 	repoFile := filepath.Join(h.repo, ".agents", "orchestrate.toml")
 	for _, line := range []string{
 		`claude_args = ["--dangerously-skip-permissions"]`,
-		`codex_args = ["--dangerously-bypass-approvals-and-sandbox"]`,
+		`pi_args = ["--approve"]`,
+		`allowed_models = { claude = ["anything"] }`,
 		"max_leads = 50",
 		`CLAUDE_ARGS = ["--dangerously-skip-permissions"]`,
-		`Codex_Args = ["--dangerously-bypass-approvals-and-sandbox"]`,
+		`Pi_Args = ["--approve"]`,
 	} {
 		os.WriteFile(repoFile, []byte(line+"\n"), 0o644)
 		code, out := h.run("status")
@@ -1117,11 +2089,11 @@ why = "cheap and fast"
 
 [[dispatch]]
 when = "large or ambiguous multi-file work"
-use = [{ harness = "claude", model = "opus", effort = "high" }, { harness = "codex", model = "gpt-5.5", effort = "high" }]
+use = [{ harness = "claude", model = "opus", effort = "high" }, { harness = "pi", model = "openrouter/deepseek/deepseek-chat-v3.1", effort = "high" }]
 `), 0o644)
 	wantContains(t, h.must("dispatch"),
 		"- mechanical edits a test can verify -> claude haiku low (cheap and fast)",
-		"- large or ambiguous multi-file work -> claude opus high | codex gpt-5.5 high")
+		"- large or ambiguous multi-file work -> claude opus high | pi openrouter/deepseek/deepseek-chat-v3.1 high")
 	os.WriteFile(os.Getenv("ORCH_CONFIG"), []byte("[[dispatch]]\nwhen = \"x\"\nuse = [{ harness = \"gemini\", model = \"m\" }]\n"), 0o644)
 	if code, _ := h.run("dispatch"); code != 1 {
 		t.Fatal("unknown harness accepted")
@@ -1442,7 +2414,7 @@ func (h *harness) commitSpec(body string) {
 
 func (h *harness) planRefused(want ...string) {
 	h.t.Helper()
-	code, out := h.run("plan", "spec.md")
+	code, out := h.run("plan", "spec.md", "--skip-gate")
 	if code != 1 {
 		h.t.Fatalf("plan exited %d, want 1:\n%s", code, out)
 	}
@@ -1463,7 +2435,7 @@ func threePkgSpec() string {
 func TestPlan(t *testing.T) {
 	h := setup(t)
 	h.commitSpec(threePkgSpec())
-	out := h.must("plan", "spec.md")
+	out := h.must("plan", "spec.md", "--skip-gate")
 	wantContains(t, out, "spec: spec.md", "packages: 3", "tasks[3]{id,kind,model,depends,status}:",
 		"  store,ship,haiku,,created", "  api,ship,sonnet,store,created", "  docs,scout,sonnet,api store,created",
 		"waves[3]:", "  store\n  api\n  docs\n", "orch check <id>")
@@ -1475,7 +2447,7 @@ func TestPlan(t *testing.T) {
 	}
 	b, _ := os.ReadFile(filepath.Join(h.dir("api"), "task.md"))
 	text := string(b)
-	wantContains(t, text, "id: api\nspec: spec.md#api\n", "depends_on: [store]", "effort: medium",
+	wantContains(t, text, "id: api\nspec: spec.md#api\n", "owns: internal/api.go\n", "depends_on: [store]", "effort: medium",
 		"Transfer queue: Package api. The whole feature is in `spec.md`",
 		"In: internal/api.go\nOut: files owned by other packages of this spec: internal/store.go, migrations/\n",
 		"`spec.md` ### api - this package", "Build api.", "Tests for api pass.",
@@ -1508,14 +2480,14 @@ func (a *app) siteRoot(t *testing.T) string {
 func TestPlanRerunAndDryRun(t *testing.T) {
 	h := setup(t)
 	h.commitSpec(threePkgSpec())
-	dry := h.must("plan", "spec.md", "--dry-run")
+	dry := h.must("plan", "spec.md", "--dry-run", "--skip-gate")
 	wantContains(t, dry, "  store,ship,haiku,,would-create", "  docs,scout,sonnet,api store,would-create")
 	if _, err := os.Stat(filepath.Join(h.tmp, "state", "repo")); err == nil {
 		t.Fatal("dry run created the run directory")
 	}
-	h.must("plan", "spec.md")
+	h.must("plan", "spec.md", "--skip-gate")
 	before, _ := os.ReadFile(filepath.Join(h.dir("api"), "task.md"))
-	out := h.must("plan", "spec.md")
+	out := h.must("plan", "spec.md", "--skip-gate")
 	if strings.Contains(out, "created") || strings.Count(out, ",exists") != 3 {
 		t.Errorf("rerun should only report exists:\n%s", out)
 	}
@@ -1523,7 +2495,7 @@ func TestPlanRerunAndDryRun(t *testing.T) {
 		t.Error("rerun rewrote task.md")
 	}
 	h.commitSpec(strings.TrimSuffix(threePkgSpec(), planTail) + planPkg("extra", "kind: ship\nowns: internal/extra.go", "") + planTail)
-	out = h.must("plan", "spec.md")
+	out = h.must("plan", "spec.md", "--skip-gate")
 	wantContains(t, out, "packages: 4", "  extra,ship,sonnet,,created")
 	if strings.Count(out, ",exists") != 3 {
 		t.Errorf("want 3 existing:\n%s", out)
@@ -1567,7 +2539,7 @@ func TestPlanRefusals(t *testing.T) {
 		h := setup(t)
 		h.commitSpec(pkgs(a))
 		h.task("alpha")
-		code, out := h.run("plan", "spec.md")
+		code, out := h.run("plan", "spec.md", "--skip-gate")
 		if code != 1 {
 			t.Fatalf("exit %d:\n%s", code, out)
 		}
@@ -1576,4 +2548,42 @@ func TestPlanRefusals(t *testing.T) {
 			t.Error("existing task was rewritten")
 		}
 	})
+}
+
+// Anthropic credits through pi are their own lane: a Claude subscription limit
+// sends work there first, and an OpenRouter limit does not touch them.
+func TestAnthropicCreditsViaPiAreTheFirstFallback(t *testing.T) {
+	h := setup(t)
+	os.WriteFile(os.Getenv("ORCH_CONFIG"), []byte(`max_leads = 8
+[allowed_models]
+claude = ["sonnet"]
+pi = ["flash", "anthropic/claude-sonnet-5-5"]
+
+[[dispatch]]
+when = "standard"
+tier = "standard"
+use = [{ harness = "claude", model = "sonnet" }, { harness = "pi", model = "anthropic/claude-sonnet-5-5" }, { harness = "pi", model = "flash", degraded = true }]
+`), 0o644)
+	h.task("a", "--harness", "auto", "--model", "auto", "--effort", "auto")
+	h.dec.set(200, decReply(standardAnswers))
+
+	h.must("health", "set", "claude", "limited")
+	wantContains(t, h.must("dispatch"), "now: pi anthropic/claude-sonnet-5-5")
+	wantContains(t, h.must("spawn", "a", "--auto"), "skipped claude sonnet: claude is limited", "would use: pi anthropic/claude-sonnet-5-5")
+	h.must("new", "b", "--kind", "ship", "--harness", "pi", "--model", "anthropic/claude-sonnet-5-5", "--effort", "high")
+
+	// Out of Anthropic credits as well: the weaker model is only offered, never taken.
+	h.must("health", "set", "pi-anthropic", "limited")
+	code, out := h.run("spawn", "a", "--auto")
+	if code != 1 {
+		t.Fatalf("parked spawn should exit 1: %d", code)
+	}
+	wantContains(t, out, "skipped pi anthropic/claude-sonnet-5-5: pi-anthropic is limited", "degraded option: pi flash")
+	if code, out = h.run("new", "c", "--kind", "ship", "--harness", "pi", "--model", "anthropic/claude-sonnet-5-5", "--effort", "high"); code != 1 || !strings.Contains(out, "pi-anthropic is limited") {
+		t.Fatalf("anthropic lane used while limited: %d %s", code, out)
+	}
+	// OpenRouter being down does not block the Anthropic lane.
+	h.must("health", "set", "pi-anthropic", "ok")
+	h.must("health", "set", "pi", "limited")
+	h.must("new", "d", "--kind", "ship", "--harness", "pi", "--model", "anthropic/claude-sonnet-5-5", "--effort", "high")
 }

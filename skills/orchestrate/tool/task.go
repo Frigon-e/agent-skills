@@ -118,8 +118,10 @@ func checkTask(root, id string) (problems, warnings []string, err error) {
 	if k := fm["kind"]; k != "ship" && k != "scout" {
 		add("frontmatter: kind must be ship or scout")
 	}
-	if h := fm["harness"]; h != "claude" && h != "codex" {
-		add("frontmatter: harness must be claude or codex")
+	if h := fm["harness"]; h == "auto" {
+		add("frontmatter: harness is auto; run `orch spawn %s --auto` to choose a profile", id)
+	} else if h != "claude" && h != "pi" {
+		add("frontmatter: harness must be claude or pi")
 	}
 	for _, key := range []string{"model", "effort", "base"} {
 		if v, ok := fm[key]; ok && v == "" {
@@ -170,4 +172,29 @@ func checkTask(root, id string) (problems, warnings []string, err error) {
 		warnings = append(warnings, fmt.Sprintf("task.md is %d words; leads re-read it, so keep it under %d", words, briefWordLimit))
 	}
 	return problems, warnings, nil
+}
+
+// setFrontMatter sets key in task.md's front matter, adding it before the
+// closing line when it is absent.
+func setFrontMatter(path, key, value string) error {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	text := string(b)
+	end := strings.Index(text, "\n---\n")
+	if !strings.HasPrefix(text, "---\n") || end < 0 {
+		return fail("%s has no front matter", path)
+	}
+	lines := strings.Split(text[4:end], "\n")
+	set := false
+	for i, l := range lines {
+		if k, _, ok := strings.Cut(l, ":"); ok && strings.TrimSpace(k) == key {
+			lines[i], set = key+": "+value, true
+		}
+	}
+	if !set {
+		lines = append(lines, key+": "+value)
+	}
+	return os.WriteFile(path, []byte("---\n"+strings.Join(lines, "\n")+text[end:]), 0o644)
 }

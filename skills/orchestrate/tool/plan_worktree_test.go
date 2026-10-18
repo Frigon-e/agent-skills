@@ -33,13 +33,13 @@ func TestPlanFromLinkedWorktree(t *testing.T) {
 	wt := worktreeWithSpec(t, h)
 	h.a.cwd = wt
 
-	out := h.must("plan", "spec.md", "--dry-run")
+	out := h.must("plan", "spec.md", "--dry-run", "--skip-gate")
 	wantContains(t, out, "spec: spec.md", "packages: 3", "  store,ship,haiku,,would-create")
 	if entries := allTasks(runRoot(h.repo)); len(entries) > 0 {
 		t.Fatalf("dry run created tasks: %v", entries)
 	}
 
-	out = h.must("plan", "spec.md")
+	out = h.must("plan", "spec.md", "--skip-gate")
 	wantContains(t, out, "  store,ship,haiku,,created", "  api,ship,sonnet,store,created")
 	fm, _, err := readTask(filepath.Join(h.dir("store"), "task.md"))
 	if err != nil || fm["spec"] != "spec.md#store" || !strings.HasPrefix(fm["base"], "feat@") {
@@ -47,7 +47,7 @@ func TestPlanFromLinkedWorktree(t *testing.T) {
 	}
 
 	h.a.cwd = h.repo
-	out = h.must("plan", filepath.Join(wt, "spec.md"))
+	out = h.must("plan", filepath.Join(wt, "spec.md"), "--skip-gate")
 	wantContains(t, out, "  store,ship,haiku,,exists", "  api,ship,sonnet,store,exists")
 }
 
@@ -60,7 +60,7 @@ func TestPlanLinkedWorktreeUncommittedEdits(t *testing.T) {
 	}
 	writeFiles(t, wt, map[string]string{"spec.md": string(b) + "more\n"})
 	h.a.cwd = wt
-	code, out := h.run("plan", "spec.md")
+	code, out := h.run("plan", "spec.md", "--skip-gate")
 	if code != 1 {
 		t.Fatalf("exit %d, want 1:\n%s", code, out)
 	}
@@ -74,7 +74,7 @@ func TestPlanSpecInUnrelatedRepo(t *testing.T) {
 		t.Fatalf("%v\n%s", err, out)
 	}
 	writeFiles(t, other, map[string]string{"spec.md": threePkgSpec()})
-	code, out := h.run("plan", filepath.Join(other, "spec.md"))
+	code, out := h.run("plan", filepath.Join(other, "spec.md"), "--skip-gate")
 	if code == 0 || !strings.Contains(out, "is not inside the repo") {
 		t.Fatalf("exit %d:\n%s", code, out)
 	}

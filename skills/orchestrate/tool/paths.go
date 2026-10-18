@@ -20,6 +20,9 @@ type repoConfig struct {
 	LeadSkills   []string `toml:"lead_skills"`
 	Check        string   `toml:"check"`
 	QuietMinutes int      `toml:"quiet_minutes"`
+	// StallMinutes is how long a working lead may report nothing and change
+	// nothing in its worktree before the watcher says it stalled.
+	StallMinutes int `toml:"stall_minutes"`
 	// Notes reach the orchestrator on every board, so loadConfig caps them.
 	Notes []string `toml:"notes"`
 	// Locks maps a lock name to when a lead must hold it; every brief says so.
@@ -35,29 +38,60 @@ const maxNotes, maxNoteLen = 5, 160
 type userConfig struct {
 	MaxLeads   int      `toml:"max_leads"`
 	ClaudeArgs []string `toml:"claude_args"`
-	CodexArgs  []string `toml:"codex_args"`
+	PiArgs     []string `toml:"pi_args"`
 	// LeadContextLimit is the context size, in tokens, past which a lead
 	// handed unrelated work asks for a compact or a fresh session.
 	LeadContextLimit int `toml:"lead_context_limit"`
 	// Dispatch rules say which harness and model suit which work. orch only
 	// prints them; the orchestrator matches them by judgment.
 	Dispatch []dispatchRule `toml:"dispatch"`
+	// Triage: a decision model rates each task at spawn (see triage.go).
+	// TriageMode is shadow (record only, the default), enforce or off.
+	// WeakModels may only run tasks triage rates settled, in enforce mode.
+	TriageModel string   `toml:"triage_model"`
+	TriageMode  string   `toml:"triage_mode"`
+	WeakModels  []string `toml:"weak_models"`
+	// QuickMode is shadow (the default: a triage verdict against a quick job
+	// only warns), enforce (it refuses) or off (no `orch quick`).
+	QuickMode string `toml:"quick_mode"`
+	// AllowedModels is the whole list of models orch will start, per harness.
+	// Empty means no restriction. A repository cannot set it.
+	AllowedModels map[string][]string `toml:"allowed_models"`
+	// AllowedWhenLimited adds models to the list only while a harness is
+	// limited, for example Haiku while pi is down.
+	AllowedWhenLimited []limitedAllow `toml:"allowed_when_limited"`
+}
+
+// limitedAllow allows the models in Allow (by harness) while Harness is limited.
+type limitedAllow struct {
+	Harness string              `toml:"harness"`
+	Allow   map[string][]string `toml:"allow"`
 }
 
 type dispatchRule struct {
 	When string    `toml:"when"`
 	Use  []profile `toml:"use"`
 	Why  string    `toml:"why"`
+	// Tier ties the rule to a triage tier (settled, standard or planning),
+	// so `orch spawn --auto` can pick its profile.
+	Tier string `toml:"tier"`
 }
 
 type profile struct {
 	Harness string `toml:"harness"`
 	Model   string `toml:"model"`
 	Effort  string `toml:"effort"`
+	// Degraded marks a weaker stand-in, used only when the primary profile's
+	// harness is limited, and only with the user's approval.
+	Degraded bool `toml:"degraded"`
 }
 
 func (p profile) String() string {
-	return strings.TrimSpace(p.Harness + " " + p.Model + " " + p.Effort)
+	s := strings.TrimSpace(p.Harness + " " + p.Model + " " + p.Effort)
+	if p.Degraded {
+		s += " [degraded]"
+	}
+	return s
 }
 
 type config struct {
@@ -203,7 +237,7 @@ func userConfigPath() string {
 	return filepath.Join(envOr("XDG_CONFIG_HOME", expandHome("~/.config")), "orchestrate", "config.toml")
 }
 
-var userKeys = []string{"max_leads", "claude_args", "codex_args", "lead_context_limit", "dispatch"}
+var userKeys = []string{"max_leads", "claude_args", "pi_args", "lead_context_limit", "dispatch", "triage_model", "triage_mode", "quick_mode", "weak_models", "allowed_models", "allowed_when_limited"}
 
 // decodeStrict refuses keys v has no field for. A key that belongs in the
 // other file gets a pointer there instead of "unknown key".
@@ -257,13 +291,13 @@ func readRepoConfig(path string, rc *repoConfig) error {
 // loadUserConfig reads the machine's settings over their defaults. Leads use
 // it alone; they have no repo checkout to read the rest from.
 func loadUserConfig() (userConfig, error) {
-	uc := userConfig{MaxLeads: 3, LeadContextLimit: 150_000}
+	uc := userConfig{MaxLeads: 3, LeadContextLimit: 150_000, TriageModel: triageModelDefault, TriageMode: "shadow", QuickMode: "shadow"}
 	err := decodeStrict(userConfigPath(), &uc, repoKeys, "<repo>/.agents/orchestrate.toml")
 	return uc, err
 }
 
 func loadConfig(repo string) (config, error) {
-	cfg := config{repoConfig: repoConfig{LeadSkills: []string{"route-work"}, QuietMinutes: 30}}
+	cfg := config{repoConfig: repoConfig{LeadSkills: []string{"route-work"}, QuietMinutes: 30, StallMinutes: 15}}
 	path := filepath.Join(repo, ".agents", "orchestrate.toml")
 	user := userConfigPath()
 	if err := readRepoConfig(path, &cfg.repoConfig); err != nil {
@@ -281,14 +315,41 @@ func loadConfig(repo string) (config, error) {
 		if strings.TrimSpace(r.When) == "" || len(r.Use) == 0 {
 			return cfg, fail("%s: dispatch rule %d needs `when` and at least one `use` profile", user, i+1)
 		}
+		if t := r.Tier; t != "" && t != "settled" && t != "standard" && t != "planning" {
+			return cfg, fail("%s: dispatch rule %d: tier must be settled, standard or planning, not %q", user, i+1, t)
+		}
 		for _, p := range r.Use {
-			if (p.Harness != "claude" && p.Harness != "codex") || p.Model == "" {
-				return cfg, fail("%s: dispatch rule %d: each profile needs harness claude or codex and a model", user, i+1)
+			if (p.Harness != "claude" && p.Harness != "pi") || p.Model == "" {
+				return cfg, fail("%s: dispatch rule %d: each profile needs harness claude or pi and a model", user, i+1)
+			}
+			if err := cfg.modelListed(p.Harness, p.Model); err != nil {
+				return cfg, fail("%s: dispatch rule %d: %v", user, i+1, err)
 			}
 		}
 	}
-	if cfg.MaxLeads < 1 || cfg.QuietMinutes < 1 || cfg.LeadContextLimit < 1 {
-		return cfg, fail("max_leads and lead_context_limit (%s) and quiet_minutes (%s) must be at least 1", user, path)
+	for h := range cfg.AllowedModels {
+		if h != "claude" && h != "pi" {
+			return cfg, fail("%s: allowed_models has harness %q; use claude or pi", user, h)
+		}
+	}
+	for i, w := range cfg.AllowedWhenLimited {
+		if w.Harness != "claude" && w.Harness != "pi" {
+			return cfg, fail("%s: allowed_when_limited entry %d: harness must be claude or pi", user, i+1)
+		}
+		for h := range w.Allow {
+			if h != "claude" && h != "pi" {
+				return cfg, fail("%s: allowed_when_limited entry %d allows harness %q; use claude or pi", user, i+1, h)
+			}
+		}
+	}
+	if m := cfg.QuickMode; m != "shadow" && m != "enforce" && m != "off" {
+		return cfg, fail("%s: quick_mode must be shadow, enforce or off, not %q", user, m)
+	}
+	if m := cfg.TriageMode; m != "shadow" && m != "enforce" && m != "off" {
+		return cfg, fail("%s: triage_mode must be shadow, enforce or off, not %q", user, m)
+	}
+	if cfg.MaxLeads < 1 || cfg.QuietMinutes < 1 || cfg.StallMinutes < 1 || cfg.LeadContextLimit < 1 {
+		return cfg, fail("max_leads and lead_context_limit (%s) and quiet_minutes and stall_minutes (%s) must be at least 1", user, path)
 	}
 	if cfg.BaseBranch == "" {
 		cfg.BaseBranch = "HEAD"

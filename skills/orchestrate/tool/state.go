@@ -22,9 +22,9 @@ import (
 // Leads write their states; the orchestrator writes `resolved` and notes,
 // tagged by=orch so they never count as the lead's own state.
 var (
-	leadStates    = []string{"working", "needs-decision", "blocked", "paused", "done", "failed", "note"}
-	notifyStates  = map[string]bool{"done": true, "needs-decision": true, "blocked": true, "failed": true}
-	waitingOnOrch = map[string]bool{"done": true, "failed": true, "needs-decision": true, "blocked": true, "paused": true}
+	leadStates    = []string{"working", "needs-decision", "blocked", "question", "escalate", "paused", "done", "failed", "note"}
+	notifyStates  = map[string]bool{"done": true, "needs-decision": true, "blocked": true, "escalate": true, "failed": true}
+	waitingOnOrch = map[string]bool{"done": true, "failed": true, "needs-decision": true, "blocked": true, "escalate": true, "paused": true}
 	lineRe        = regexp.MustCompile(`^([a-z-]+)((?: \[[a-z]+=[^\]]*\])*): ?(.*)$`)
 	tagRe         = regexp.MustCompile(`\[([a-z]+)=([^\]]*)\]`)
 	keyRe         = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,40}$`)
@@ -104,14 +104,14 @@ func leadEntries(entries []entry) []entry {
 
 func lastState(entries []entry) string {
 	for i := len(entries) - 1; i >= 0; i-- {
-		if s := entries[i].State; s != "note" && slices.Contains(leadStates, s) {
+		if s := entries[i].State; s != "note" && s != "question" && slices.Contains(leadStates, s) {
 			return s
 		}
 	}
 	return ""
 }
 
-// openDecisions lists needs-decision and blocked lines still open: a keyed one
+// openDecisions lists needs-decision, blocked, escalate and question lines still open: a keyed one
 // until `resolved [key=k]`, a keyless one until any keyless resolved line or
 // until the lead reports working, done or failed.
 func openDecisions(entries []entry) []entry {
@@ -120,7 +120,7 @@ func openDecisions(entries []entry) []entry {
 	var keyless []entry
 	for _, e := range entries {
 		switch {
-		case e.State == "needs-decision" || e.State == "blocked":
+		case e.State == "needs-decision" || e.State == "blocked" || e.State == "question" || e.State == "escalate":
 			if e.Key == "" {
 				keyless = append(keyless, e)
 			} else {
@@ -157,6 +157,9 @@ type lead struct {
 	TabID     string `json:"tab_id"`
 	SpawnedAt int64  `json:"spawned_at"`
 	ClosedAt  int64  `json:"closed_at,omitempty"`
+	// Session is the harness session id orch chose at spawn, for harnesses
+	// Herdr reports no session for (pi). Empty for the others.
+	Session string `json:"session,omitempty"`
 	// Owner is the Herdr pane of the orchestrator that watches this lead.
 	// Empty on leads spawned before owners existed: every orchestrator sees those.
 	Owner string `json:"owner,omitempty"`

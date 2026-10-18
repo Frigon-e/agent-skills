@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -53,15 +54,52 @@ func cmdReport(a *app, args []string) error {
 	if *key == contextKey && state != "needs-decision" {
 		return fail("--key %s is the full-context handoff and must be reported as needs-decision (lead protocol, \"Context budget\")", contextKey)
 	}
+	if (state == "question" || state == "escalate") && *key == "" {
+		return fail("%s needs --key <slug>, the name of its card at questions/<key>.md", state)
+	}
+	if state == "escalate" {
+		if err := checkEscalateCard(dir, *key); err != nil {
+			return err
+		}
+	}
 	if err := a.appendStatus(dir, state, text, *key, ""); err != nil {
 		return err
 	}
 	fmt.Fprintln(a.out, "reported "+state)
+	if state == "question" {
+		fmt.Fprintln(a.out, "queued: the orchestrator is not woken. Keep working; the user answers when they read the queue. If this stops all your work, report blocked instead")
+	}
 	if state == "paused" || state == "note" {
 		// These are logged but never wake the orchestrator; say so, so a lead
 		// that needs an answer does not wait on one. working is routine and
 		// stays quiet.
 		fmt.Fprintln(a.out, "the orchestrator is not woken by "+state+"; use needs-decision, blocked, done or failed to reach it")
+	}
+	return nil
+}
+
+// checkEscalateCard refuses an escalation whose card does not carry the
+// evidence a stronger model needs: what the lead saw, what it tried, and
+// what it cannot do without help. The card asks a question and never
+// proposes a fix.
+func checkEscalateCard(dir, key string) error {
+	path := filepath.Join(dir, "questions", key+".md")
+	src, err := os.ReadFile(path)
+	if err != nil {
+		return fail("escalate needs a card at %s with a `question:` front matter line and the sections `## Context` (what you observed, with command output), `## Tried` and `## Blocked`. Do not propose a solution", path)
+	}
+	c, err := parseCard(string(src))
+	if err != nil {
+		return fail("escalate card %s: %v", path, err)
+	}
+	have := map[string]string{"Context": c.context}
+	for _, x := range c.extra {
+		have[x.title] = x.body
+	}
+	for _, name := range []string{"Context", "Tried", "Blocked"} {
+		if strings.TrimSpace(have[name]) == "" {
+			return fail("escalate card %s needs a non-empty `## %s` section", path, name)
+		}
 	}
 	return nil
 }
@@ -101,7 +139,7 @@ func cmdInbox(a *app, args []string) error {
 		if agents, err := agentMap(); err == nil {
 			ag := agents[l.PaneID]
 			uc, _ := loadUserConfig()
-			if n := contextTokens(ag.Agent, ag.Session.Value); n >= uc.LeadContextLimit {
+			if n := contextTokens(ag.Agent, sessionOf(ag, l)); n >= uc.LeadContextLimit {
 				fmt.Fprintf(a.out, "context: %s tokens, over the %s lead limit. If these messages start work unrelated to what you hold, follow \"Context budget\" in the lead protocol before starting it.\n", kTokens(n), kTokens(uc.LeadContextLimit))
 			}
 		}
@@ -109,26 +147,52 @@ func cmdInbox(a *app, args []string) error {
 	return nil
 }
 
-// contextTokens is how many tokens an agent session held at its latest turn,
-// read from the tail of its harness transcript; 0 when that can't be found.
-func contextTokens(harness, session string) int {
+// sessionOf is the harness session of a lead's agent: the one Herdr reports,
+// else the one orch chose at spawn.
+func sessionOf(ag herdrAgent, l *lead) string {
+	if ag.Session.Value != "" || l == nil {
+		return ag.Session.Value
+	}
+	return l.Session
+}
+
+// newSessionID returns a random UUID for harnesses that take a session id.
+func newSessionID() string {
+	var b [16]byte
+	_, _ = rand.Read(b[:])
+	b[6], b[8] = b[6]&0x0f|0x40, b[8]&0x3f|0x80
+	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:])
+}
+
+// sessionPath finds a harness session's transcript file; "" when there is none.
+func sessionPath(harness, session string) string {
 	if session == "" || strings.ContainsAny(session, `/\*?[`) {
-		return 0
+		return ""
 	}
 	var pattern string
 	switch harness {
 	case "claude":
 		pattern = filepath.Join(envOr("CLAUDE_CONFIG_DIR", expandHome("~/.claude")), "projects", "*", session+".jsonl")
-	case "codex":
-		pattern = filepath.Join(envOr("CODEX_HOME", expandHome("~/.codex")), "sessions", "*", "*", "*", "*-"+session+".jsonl")
+	case "pi":
+		pattern = filepath.Join(envOr("ORCH_PI_DIR", expandHome("~/.pi/agent")), "sessions", "*", "*_"+session+".jsonl")
 	default:
-		return 0
+		return ""
 	}
 	paths, _ := filepath.Glob(pattern)
 	if len(paths) == 0 {
+		return ""
+	}
+	return paths[0]
+}
+
+// contextTokens is how many tokens an agent session held at its latest turn,
+// read from the tail of its harness transcript; 0 when that can't be found.
+func contextTokens(harness, session string) int {
+	path := sessionPath(harness, session)
+	if path == "" {
 		return 0
 	}
-	lines := bytes.Split(readTail(paths[0], 4<<20), []byte("\n"))
+	lines := bytes.Split(readTail(path, 4<<20), []byte("\n"))
 	for i := len(lines) - 1; i >= 0; i-- {
 		if n := turnTokens(lines[i]); n > 0 {
 			return n
@@ -138,10 +202,10 @@ func contextTokens(harness, session string) int {
 }
 
 // turnTokens reads the context size from one transcript line: a Claude
-// assistant message's usage or compaction marker, or a Codex token_count
-// event.
+// assistant message's usage or compaction marker, or a pi assistant
+// message's usage.
 func turnTokens(line []byte) int {
-	if !bytes.Contains(line, []byte(`"usage"`)) && !bytes.Contains(line, []byte(`"token_count"`)) && !bytes.Contains(line, []byte(`"compact_boundary"`)) {
+	if !bytes.Contains(line, []byte(`"usage"`)) && !bytes.Contains(line, []byte(`"compact_boundary"`)) {
 		return 0
 	}
 	var e struct {
@@ -155,28 +219,21 @@ func turnTokens(line []byte) int {
 				Input       int `json:"input_tokens"`
 				CacheRead   int `json:"cache_read_input_tokens"`
 				CacheCreate int `json:"cache_creation_input_tokens"`
+				// pi names its usage fields without the _tokens suffix.
+				PiInput int `json:"input"`
+				PiRead  int `json:"cacheRead"`
+				PiWrite int `json:"cacheWrite"`
 			} `json:"usage"`
 		} `json:"message"`
-		Payload struct {
-			Type string `json:"type"`
-			Info struct {
-				Last struct {
-					Input int `json:"input_tokens"`
-				} `json:"last_token_usage"`
-			} `json:"info"`
-		} `json:"payload"`
 	}
 	if json.Unmarshal(line, &e) != nil || e.IsSidechain {
 		return 0
-	}
-	if e.Payload.Type == "token_count" {
-		return e.Payload.Info.Last.Input
 	}
 	if e.Subtype == "compact_boundary" {
 		return e.Compact.Post
 	}
 	u := e.Message.Usage
-	return u.Input + u.CacheRead + u.CacheCreate
+	return u.Input + u.CacheRead + u.CacheCreate + u.PiInput + u.PiRead + u.PiWrite
 }
 
 // readTail returns up to the last n bytes of a file.

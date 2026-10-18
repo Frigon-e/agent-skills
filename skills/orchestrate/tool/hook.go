@@ -110,8 +110,8 @@ func (a *app) orchestratorHook(event string, p hookPayload) (string, error) {
 			return "", nil
 		}
 		return fmt.Sprintf("%d lead(s) in flight and no watcher is running, so nothing will wake you. "+
-			"Start `%s watch` with the Monitor tool (Codex: run `%s watch --timeout 180` in the foreground and loop).",
-			len(leads), selfPath(), selfPath()), nil
+			"Start `%s watch` with the Monitor tool.",
+			len(leads), selfPath()), nil
 	case "session-start":
 		fmt.Fprintln(a.out, "You are the orchestrator for this repo: load the `orchestrate` skill before acting.")
 		fmt.Fprintln(a.out, a.board(s, leadRows(s.root, false)))
