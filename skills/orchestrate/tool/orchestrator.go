@@ -304,7 +304,7 @@ func (a *app) spawn(id, brief string) error {
 	if fm["private"] == "true" && fm["harness"] != "claude" {
 		return fail("%s is marked private, so it may only run on Claude, not %s", id, fm["harness"])
 	}
-	if fm["quick"] != "true" { // quick jobs were rated by `orch quick` itself
+	if fm["quick"] != "true" && fm["private"] != "true" { // quick jobs were rated by `orch quick` itself; private text never leaves the machine for triage
 		if err := a.triageGate(s, id, fm); err != nil {
 			return err
 		}

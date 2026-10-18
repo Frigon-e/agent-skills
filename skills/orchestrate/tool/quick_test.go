@@ -261,3 +261,32 @@ func TestAuditTimeline(t *testing.T) {
 		t.Fatalf("bad --since accepted: %d %s", code, out)
 	}
 }
+
+// Private text stays off third-party models: triage, spawn and --auto all
+// refuse to send it, and verify never hands a lead-written base to git.
+func TestPrivateAndTamperedTasks(t *testing.T) {
+	h := setup(t)
+	quickRepo(t, h, "true")
+	h.task("p", "--harness", "pi", "--model", "flash", "--effort", "low")
+	h.task("p2", "--harness", "claude", "--model", "sonnet", "--effort", "high")
+	setFrontMatter(filepath.Join(h.dir("p2"), "task.md"), "private", "true")
+	hits := h.dec.count()
+	if code, out := h.run("triage", "p2"); code != 1 || !strings.Contains(out, "p2 is private") {
+		t.Fatalf("triage rated a private task: %d %s", code, out)
+	}
+	if out := h.must("spawn", "p2"); strings.Contains(out, "triage") {
+		t.Fatalf("spawning a private task mentioned triage: %s", out)
+	}
+	if h.dec.count() != hits {
+		t.Fatal("a private task's text reached the triage model at spawn")
+	}
+
+	wt := filepath.Join(filepath.Dir(h.dir("p")), "worktrees", "p")
+	h.gitIn(h.repo, "worktree", "add", "-q", "-b", "orch/p", wt, "main")
+	for _, bad := range []string{"main@--output=/tmp/x", "main@HEAD", "main@zzzzzzz"} {
+		setFrontMatter(filepath.Join(h.dir("p"), "task.md"), "base", bad)
+		if code, out := h.run("verify", "p"); code != 1 || !strings.Contains(out, "is not a commit sha") {
+			t.Fatalf("verify accepted base %q: %d %s", bad, code, out)
+		}
+	}
+}

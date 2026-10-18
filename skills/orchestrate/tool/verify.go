@@ -7,11 +7,16 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 )
 
 const verifyTimeout = 15 * time.Minute
+
+// baseSHARe is the only form of base that reaches git: a hex commit id, so a
+// value in a lead-writable task.md cannot become a git option.
+var baseSHARe = regexp.MustCompile(`^[0-9a-f]{7,40}$`)
 
 // cmdVerify checks a ship lead's work without trusting its `done` line: it
 // runs the repo check command in the lead's worktree and lists the files the
@@ -46,8 +51,8 @@ func cmdVerify(a *app, args []string) error {
 	if _, sha, ok := strings.Cut(base, "@"); ok {
 		base = sha
 	}
-	if base == "" {
-		return fail("task.md has no base commit")
+	if !baseSHARe.MatchString(base) {
+		return fail("task.md base %q is not a commit sha; verify will not pass it to git", fm["base"])
 	}
 
 	files, err := changedFiles(wt, base)
@@ -103,7 +108,7 @@ func cmdVerify(a *app, args []string) error {
 // changedFiles lists every path that differs from base in the worktree:
 // committed, staged, modified and untracked.
 func changedFiles(wt, base string) ([]string, error) {
-	diff, err := git(wt, "diff", "--name-only", base)
+	diff, err := git(wt, "diff", "--name-only", base, "--")
 	if err != nil {
 		return nil, fail("git diff in %s failed: is %s a commit in that worktree?", wt, base)
 	}
@@ -121,7 +126,7 @@ func changedFiles(wt, base string) ([]string, error) {
 
 // changedLines counts added plus removed lines against base, tracked files only.
 func changedLines(wt, base string) int {
-	out, err := git(wt, "diff", "--numstat", base)
+	out, err := git(wt, "diff", "--numstat", base, "--")
 	if err != nil {
 		return 0
 	}

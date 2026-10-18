@@ -239,6 +239,11 @@ func (a *app) triageTask(s site, id string, force bool) (*triageRecord, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Triage sends the task's own words to a third-party model. A private
+	// task is kept on Claude so that its text stays off other providers.
+	if fm, _, err := readTask(filepath.Join(dir, "task.md")); err == nil && fm["private"] == "true" {
+		return nil, fail("%s is private: its text is not sent to the triage model. Choose its profile by hand", id)
+	}
 	state, hash, err := triageState(dir, s.cfg)
 	if err != nil {
 		return nil, fail("no task %s", id)

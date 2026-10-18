@@ -189,7 +189,7 @@ other way.
   is a dry run that prints the pick; `--apply` sets the profile and spawns;
   `--degraded` allows a stand-in the user agreed to. It parks when nothing is
   usable. A task with a hand-chosen profile is never changed. Mark a task
-  `private: true` in its front matter to keep it on Claude. Use the dry run
+  `private: true` in its front matter to keep it on Claude; its text is never sent to the triage model, so `--auto` and `orch triage` refuse it and you choose its profile by hand. Use the dry run
   until `orch triage report` has 20 outcomes and looks sound; the tiers come
   from untuned thresholds.
 - **Provider limits.** When a Claude or Pi (OpenRouter) limit stops work,

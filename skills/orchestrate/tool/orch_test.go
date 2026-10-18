@@ -1145,12 +1145,17 @@ func TestSpawnAuto(t *testing.T) {
 	}
 	h.must("health", "set", "claude", "ok")
 
-	// Private work never leaves Claude, whatever the tier says.
+	// Private work is never sent to the triage model, so --auto cannot rate it.
 	h.task("c", auto...)
 	setFrontMatter(filepath.Join(h.dir("c"), "task.md"), "private", "true")
 	h.dec.set(200, decReply(settledAnswers))
-	out = h.must("spawn", "c", "--auto")
-	wantContains(t, out, "pi flash: the task is private, so Claude only", "would use: claude sonnet")
+	hits := h.dec.count()
+	if code, out := h.run("spawn", "c", "--auto"); code != 1 || !strings.Contains(out, "c is private") {
+		t.Fatalf("a private task was auto-routed: %d %s", code, out)
+	}
+	if h.dec.count() != hits {
+		t.Fatal("a private task's text reached the triage model")
+	}
 	h.task("c2")
 	setFrontMatter(filepath.Join(h.dir("c2"), "task.md"), "private", "true")
 	setFrontMatter(filepath.Join(h.dir("c2"), "task.md"), "harness", "pi")
@@ -1200,8 +1205,9 @@ func TestHaikuComesInWhenPiIsDown(t *testing.T) {
 	wantContains(t, h.must("spawn", "a", "--auto"), "would use: pi flash")
 	h.task("p", "--harness", "auto", "--model", "auto", "--effort", "auto")
 	setFrontMatter(filepath.Join(h.dir("p"), "task.md"), "private", "true")
-	out = h.must("spawn", "p", "--auto")
-	wantContains(t, out, "claude haiku: not allowed right now", "would use: claude sonnet")
+	if code, out := h.run("spawn", "p", "--auto"); code != 1 || !strings.Contains(out, "p is private") {
+		t.Fatalf("a private task was auto-routed: %d %s", code, out)
+	}
 
 	// With pi down Haiku is allowed and becomes the cheap stand-in.
 	h.must("health", "set", "pi", "limited")
