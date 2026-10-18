@@ -160,7 +160,7 @@ func cmdSweep(a *app, args []string) error {
 			fmt.Fprintf(a.out, "  %s\n", toonValue(line))
 		}
 	}
-	for _, issue := range checkDropped(topic, cards, s.repo, roots) {
+	for _, issue := range checkDropped(topic, cards, s.repo, roots, *acceptURLs) {
 		fmt.Fprintf(a.out, "dropped: %s\n", issue)
 	}
 	if n := len(groups["user"]); n > 0 {
@@ -260,6 +260,13 @@ func (a *app) judgeQuestion(r *sweepResult, repo string, roots map[string]string
 	return *r
 }
 
+// oneLine makes model output safe to put in a card: one line, no backticks,
+// so it can never start a heading or an include, or close a code span.
+func oneLine(s string, max int) string {
+	s = strings.Join(strings.Fields(strings.ReplaceAll(s, "`", "'")), " ")
+	return short(s, max)
+}
+
 // writeUserCard copies a card for `orch ask` and adds what each pass said, so
 // the user sees the evidence and any disagreement next to the question.
 func writeUserCard(dir string, r sweepResult, cardPaths []string) error {
@@ -272,11 +279,15 @@ func writeUserCard(dir string, r sweepResult, cardPaths []string) error {
 	var b strings.Builder
 	b.Write(src)
 	b.WriteString("\n\n## Passes\n\n")
-	fmt.Fprintf(&b, "Why this is yours: %s.\n\n", r.why)
+	fmt.Fprintf(&b, "Why this is yours: %s.\n\n", oneLine(r.why, 300))
 	for _, p := range r.passes {
-		fmt.Fprintf(&b, "- **%s** chose `%s` (confidence %.2f): %s\n", p.name, p.ans.Choice, p.ans.Confidence, strings.TrimSpace(p.ans.Reason))
+		fmt.Fprintf(&b, "- **%s** chose `%s` (confidence %.2f): %s\n", oneLine(p.name, 40), oneLine(p.ans.Choice, 40), p.ans.Confidence, oneLine(p.ans.Reason, 600))
 		if len(p.ans.Evidence) > 0 {
-			fmt.Fprintf(&b, "  Evidence: %s\n", strings.Join(p.ans.Evidence, ", "))
+			ev := make([]string, len(p.ans.Evidence))
+			for i, e := range p.ans.Evidence {
+				ev[i] = oneLine(e, 120)
+			}
+			fmt.Fprintf(&b, "  Evidence: %s\n", strings.Join(ev, ", "))
 		}
 	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -287,7 +298,7 @@ func writeUserCard(dir string, r sweepResult, cardPaths []string) error {
 
 // checkDropped holds the collect step to account: a dropped question must
 // name the card it duplicates, or the evidence that already answers it.
-func checkDropped(topic string, cardPaths []string, repo string, roots map[string]string) []string {
+func checkDropped(topic string, cardPaths []string, repo string, roots map[string]string, acceptURLs bool) []string {
 	b, err := os.ReadFile(filepath.Join(topic, "dropped.json"))
 	if err != nil {
 		return nil
@@ -308,7 +319,7 @@ func checkDropped(topic string, cardPaths []string, repo string, roots map[strin
 		case d.DuplicateOf == "" && d.AnsweredBy == "":
 			out = append(out, fmt.Sprintf("%q was dropped with no duplicate_of or answered_by", short(d.Question, 50)))
 		case d.AnsweredBy != "":
-			if ok, urls, _ := sweepEvidence(repo, roots, []string{d.AnsweredBy}); ok == 0 && urls == 0 {
+			if ok, urls, _ := sweepEvidence(repo, roots, []string{d.AnsweredBy}); ok == 0 && !(acceptURLs && urls > 0) {
 				out = append(out, fmt.Sprintf("%q says %s answers it, but that does not resolve", short(d.Question, 50), d.AnsweredBy))
 			}
 		}
