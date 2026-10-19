@@ -1,14 +1,10 @@
 package main
 
 import (
-	"bytes"
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -65,6 +61,43 @@ type triageRecord struct {
 	Answers  triageAnswers `json:"answers"`
 	Tier     string        `json:"tier"`
 	Reason   string        `json:"reason"`
+	Skipped  string        `json:"skipped,omitempty"`
+}
+
+type triageOff struct{ reason, id string }
+
+func (e *triageOff) Error() string {
+	return fmt.Sprintf("triage is off (%s): choose a profile by hand (orch spawn %s --harness H --model M) or pass --tier settled|standard|planning to skip triage", e.reason, e.id)
+}
+
+func (s site) deciderOff(now time.Time) string {
+	if s.cfg.TriageMode == "off" {
+		return "triage_mode off, pi:openrouter"
+	}
+	r, _ := s.newRoleRun("decider", modelOptions{})
+	r.now = func() time.Time { return now }
+	if choices, _ := r.available(); len(choices) > 0 {
+		return ""
+	}
+	reason := r.unavailable().Error()
+	if !strings.Contains(reason, "pi:") {
+		connector := "pi:openrouter"
+		if len(r.choices) > 0 {
+			connector = r.choices[0].lane()
+		}
+		reason += ", " + connector
+	}
+	return reason
+}
+
+func (a *app) recordTriageSkip(s site, id, reason string) {
+	dir, err := taskDir(s.root, id)
+	if err != nil {
+		return
+	}
+	_, hash, _ := triageState(dir, s.cfg)
+	fm, _, _ := readTask(filepath.Join(dir, "task.md"))
+	_ = appendTriage(s.root, triageRecord{ID: id, At: a.now().Unix(), Mode: s.cfg.TriageMode, TaskHash: hash, Actual: fm["harness"] + " " + fm["model"], Reason: reason, Skipped: "decider off"})
 }
 
 func triageQuestions() map[string]any {
@@ -125,47 +158,24 @@ type decAnswer struct {
 
 // triageKey finds an OpenRouter credential: an explicit variable, then the
 // token pi already holds for the provider.
-func triageKey() (string, error) {
-	for _, v := range []string{"ORCH_TRIAGE_KEY", "OPENROUTER_API_KEY"} {
-		if k := os.Getenv(v); k != "" {
-			return k, nil
-		}
-	}
-	out, err := exec.Command(envOr("ORCH_PI", "pi"), "auth", "print-bearer-token", "--provider", "openrouter").Output()
-	if k := strings.TrimSpace(string(out)); err == nil && k != "" {
-		return k, nil
-	}
-	return "", fmt.Errorf("no OpenRouter credential: set OPENROUTER_API_KEY or log pi in to OpenRouter")
-}
+func triageKey() (string, error) { return providerKey("openrouter") }
 
 // callDecider posts one decisions request and returns the answers and the
 // model version that served it.
 func callDecider(model string, state map[string]any) (triageAnswers, string, error) {
+	return callDeciderWith(profile{Harness: "api", Provider: "openrouter", Model: model}, state)
+}
+
+func callDeciderWith(p profile, state map[string]any) (triageAnswers, string, error) {
 	var out triageAnswers
-	key, err := triageKey()
+	answers, served, _, err := postDecisionsWith(p, state, triageQuestions())
 	if err != nil {
 		return out, "", err
 	}
-	body, _ := json.Marshal(map[string]any{"model": model, "state": state, "questions": triageQuestions()})
-	req, _ := http.NewRequest("POST", envOr("ORCH_TRIAGE_URL", triageURLDefault), bytes.NewReader(body))
-	req.Header.Set("Authorization", "Bearer "+key)
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := (&http.Client{Timeout: triageTimeout}).Do(req)
-	if err != nil {
-		return out, "", err
-	}
-	defer resp.Body.Close()
-	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	if resp.StatusCode != 200 {
-		return out, "", fmt.Errorf("decisions API returned %d: %s", resp.StatusCode, short(strings.TrimSpace(string(raw)), 200))
-	}
-	var r struct {
-		Model   string               `json:"model"`
-		Answers map[string]decAnswer `json:"answers"`
-	}
-	if err := json.Unmarshal(raw, &r); err != nil {
-		return out, "", fmt.Errorf("decisions API reply is not JSON: %v", err)
-	}
+	r := struct {
+		Model   string
+		Answers map[string]decAnswer
+	}{served, answers}
 	for _, k := range []string{"clarity", "difficulty", "verifiable", "cross_cutting", "cause_known"} {
 		if _, ok := r.Answers[k]; !ok {
 			return out, "", fmt.Errorf("decisions API reply lacks the %q answer", k)
@@ -235,48 +245,88 @@ func appendTriage(root string, r triageRecord) error {
 // front matter. A task whose text has not changed since its last record is
 // not asked again.
 func (a *app) triageTask(s site, id string, force bool) (*triageRecord, error) {
-	dir, err := taskDir(s.root, id)
+	rec, cached, err := a.triageScore(s, id, force)
 	if err != nil {
 		return nil, err
+	}
+	if !cached {
+		if err := a.persistTriage(s, id, rec); err != nil {
+			return nil, err
+		}
+	}
+	return rec, nil
+}
+
+// persistTriage writes a fresh record and the task's `tier:`.
+func (a *app) persistTriage(s site, id string, rec *triageRecord) error {
+	dir, err := taskDir(s.root, id)
+	if err != nil {
+		return err
+	}
+	if err := appendTriage(s.root, *rec); err != nil {
+		return err
+	}
+	_ = setFrontMatter(filepath.Join(dir, "task.md"), "tier", rec.Tier)
+	return nil
+}
+
+// triageScore rates one task without writing anything. cached reports that
+// the record is an earlier one for the same text, which needs no new write.
+func (a *app) triageScore(s site, id string, force bool) (rec *triageRecord, cached bool, err error) {
+	dir, err := taskDir(s.root, id)
+	if err != nil {
+		return nil, false, err
 	}
 	// Triage sends the task's own words to a third-party model. A private
 	// task is kept on Claude so that its text stays off other providers.
 	if fm, _, err := readTask(filepath.Join(dir, "task.md")); err == nil && fm["private"] == "true" {
-		return nil, fail("%s is private: its text is not sent to the triage model. Choose its profile by hand", id)
+		return nil, false, fail("%s is private: its text is not sent to the triage model. Choose its profile by hand", id)
 	}
 	state, hash, err := triageState(dir, s.cfg)
 	if err != nil {
-		return nil, fail("no task %s", id)
+		return nil, false, fail("no task %s", id)
 	}
 	if !force {
 		recs := readTriage(s.root)
 		for i := len(recs) - 1; i >= 0; i-- {
-			if recs[i].ID == id && recs[i].TaskHash == hash {
-				return &recs[i], nil
+			if recs[i].ID == id && recs[i].TaskHash == hash && recs[i].Skipped == "" {
+				return &recs[i], true, nil
 			}
 		}
 	}
-	model := s.cfg.TriageModel
-	ans, served, err := callDecider(model, state)
-	if err != nil {
-		return nil, err
+	runner, _ := s.newRoleRun("decider", modelOptions{})
+	var ans triageAnswers
+	var served string
+	_, _, used, runErr := runner.run(func(p profile) (string, string, error) {
+		var e error
+		ans, served, e = callDeciderWith(p, state)
+		return "", "", e
+	})
+	if runErr != nil {
+		if choices, _ := runner.available(); len(choices) == 0 || providerDown(runErr) {
+			return nil, false, &triageOff{reason: short(runErr.Error(), 160) + ", " + used.lane(), id: id}
+		}
+		return nil, false, runErr
 	}
 	tier, reason := tierFor(ans)
 	fm, _, _ := readTask(filepath.Join(dir, "task.md"))
-	rec := triageRecord{ID: id, At: a.now().Unix(), Mode: s.cfg.TriageMode, Model: served, TaskHash: hash,
-		Actual: fm["harness"] + " " + fm["model"], Answers: ans, Tier: tier, Reason: reason}
-	if err := appendTriage(s.root, rec); err != nil {
-		return nil, err
-	}
-	_ = setFrontMatter(filepath.Join(dir, "task.md"), "tier", tier)
-	return &rec, nil
+	return &triageRecord{ID: id, At: a.now().Unix(), Mode: s.cfg.TriageMode, Model: served, TaskHash: hash,
+		Actual: fm["harness"] + " " + fm["model"], Answers: ans, Tier: tier, Reason: reason}, false, nil
 }
 
 // triageGate runs at spawn. Shadow mode never blocks. Enforce mode refuses a
 // model listed in weak_models for any tier but settled, and refuses to guess
 // when the decision model is unreachable.
 func (a *app) triageGate(s site, id string, fm map[string]string) error {
-	if s.cfg.TriageMode == "off" {
+	if a.skipTriage {
+		return nil
+	}
+	if reason := s.deciderOff(a.now()); reason != "" {
+		if s.cfg.TriageMode == "enforce" && !a.overrideTier {
+			return &triageOff{reason: reason, id: id}
+		}
+		a.recordTriageSkip(s, id, reason)
+		fmt.Fprintf(a.out, "triage skipped: decider off (%s)\n", reason)
 		return nil
 	}
 	rec, err := a.triageTask(s, id, false)
@@ -285,6 +335,7 @@ func (a *app) triageGate(s site, id string, fm map[string]string) error {
 		if enforce {
 			return fail("triage is unavailable (%v). Retry, or spawn with --override-tier after checking the task by hand", err)
 		}
+		a.recordTriageSkip(s, id, err.Error())
 		fmt.Fprintf(a.out, "warning: triage unavailable: %v\n", err)
 		return nil
 	}
@@ -320,10 +371,22 @@ func cmdTriage(a *app, args []string) error {
 	if len(pos) == 0 {
 		return &exitError{code: 2, msg: "usage: orch triage <id>... [--force] | orch triage report"}
 	}
+	if reason := s.deciderOff(a.now()); reason != "" {
+		for _, id := range pos {
+			a.recordTriageSkip(s, id, reason)
+		}
+		fmt.Fprintf(a.out, "triage skipped: decider off (%s)\n", reason)
+		return nil
+	}
 	var failed int
 	for _, id := range pos {
 		rec, err := a.triageTask(s, id, *force)
 		if err != nil {
+			if off, ok := err.(*triageOff); ok {
+				a.recordTriageSkip(s, id, off.reason)
+				fmt.Fprintf(a.out, "%s: skipped: decider off (%s)\n", id, off.reason)
+				continue
+			}
 			fmt.Fprintf(a.out, "%s: error: %v\n", id, err)
 			failed++
 			continue

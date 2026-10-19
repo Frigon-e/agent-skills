@@ -186,6 +186,9 @@ func cmdDoctor(a *app, args []string) error {
 	me := orchID()
 	var fs []finding
 	add := func(sev, where, msg, fix string) { fs = append(fs, finding{sev, where, msg, fix}) }
+	if s.cfg.benchSuiteIgnored {
+		add("warn", "config", "repo bench_suite ignored", "use --bench-suite or bench_suite in the user config")
+	}
 
 	leads := myLeads(openLeads(s.root), me)
 	if len(leads) > 0 && watcherAlive(s.root, me) == 0 {
@@ -228,7 +231,7 @@ func cmdDoctor(a *app, args []string) error {
 	for h, e := range limited {
 		n := 0
 		for _, ol := range leads {
-			if lane(ol.lead.Harness, ol.lead.Model) == h {
+			if laneWithin(lane(ol.lead.Harness, ol.lead.Model), h) {
 				n++
 			}
 		}
@@ -236,6 +239,11 @@ func cmdDoctor(a *app, args []string) error {
 			add("error", h, fmt.Sprintf("%s, and %d lead(s) still run on it", e, n), "orch respawn <id> --harness <other> --model <m> for each, or wait")
 		}
 	}
+	defer func() {
+		fmt.Fprintln(a.out, ctxReadiness(newCtxEnv(s.repo, ctxOpts{Cfg: s.cfg})))
+		printRoleReadiness(a.out, s)
+		fmt.Fprintln(a.out, benchDoctorLine())
+	}()
 	if len(fs) == 0 {
 		fmt.Fprintln(a.out, "doctor: ok")
 		return nil

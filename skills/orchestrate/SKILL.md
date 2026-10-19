@@ -83,22 +83,181 @@ lead cap is reached: queue the task and spawn it when a lead closes.
 When a spec with work packages exists (`references/spec-format.md`), run
 `orch gate <spec>` first, then `orch plan <spec>` instead of one `orch new`
 per package. The gate checks pointers and acceptance commands, then runs
-four read-only Flash passes (scope, questions, two adversaries) and keeps
-only claims whose `path:line` evidence exists. `orch plan` refuses a spec
+read-only model passes (one per group of up to 4 related packages for scope,
+questions and reuse, plus two adversaries; a pass is capped at 45 minutes, ends
+early when its session shows no activity for 6, and a timed-out or stalled group
+pass is retried once; token use per pass is logged in `gate.json` `pass_tokens`)
+and keeps only claims whose `path:line` evidence exists. `orch gate <spec>
+--dry-run` lists the passes, their sizes and the dossier sizes without calling a model. `orch plan` refuses a spec
 whose current text has not passed the gate; never use `--skip-gate` without
 the user's agreement. Read `gate/<hash>/report.md` (short), judge the
 findings yourself, add a Claude adversarial pass on the Design rules when
 the spec is risky, and show the user only what survives. Decisive open
 questions arrive as cards: `orch ask --cards <gate dir>/questions`. A model
 verdict is input, not truth: Flash can miss a flaw and the gate can fail a
-fine spec, so the call is yours and the user's. `orch plan` then makes the
+fine spec, so the call is yours and the user's. Inside herdr the model passes always run in the panes of a
+`gate-<hash>` tab (at most six, closed when the gate ends; if it cannot be opened no pass runs, the report says so and the verdict is `unverified`; headless passes are only for runs outside herdr, `--headless` or `ORCH_HEADLESS=1`); each pass is a
+real pi or Claude agent in a pane named after it, which you can watch and attach to; a pass that
+failed keeps its session and output under `gate/<hash>/` for 7 days and
+for the newest 5 gate runs. After a run, with no model call, `orch gate`
+enriches its question cards (also on demand: `orch gate enrich <spec>`): near
+duplicates merge, spec lines and code from `jbcontext` that may already answer
+a question are attached, and a tag (`owner`, `lead-may-decide`, `unclear`)
+advises who should decide; for Go and TypeScript symbols a question names, `gopls` and the TypeScript 7 native server (`tsc --lsp`, found in the project's own `typescript@7` package under `web/node_modules/.pnpm`; override with `ORCH_TSLS`) add exact facts (definition, callers outside tests, test references, implementations). Read `gate/<hash>/questions/INDEX.md` first: counts,
+then a table per package with owner-tagged questions on top. The tag and the
+hints are advice; `orch ask --cards` still asks every card. `orch plan` then makes the
 tasks and prints the waves: check and spawn the first wave, then each later
 wave when its dependencies are done.
+
+Model roles live in the user config next to dispatch rules: `[roles.gate]`,
+`[roles.spec_queries]`, `[roles.shadow_flash]`, `[roles.decider]`. Each role has
+an ordered `use = [{harness, model, effort, degraded}, ...]` list; first usable
+wins. `enabled = false` turns a role off. Without roles, installed harnesses
+supply defaults: pi Flash where pi is present, Claude Haiku otherwise; optional
+judges are off when unavailable. See `references/model-roles.md` for an example.
+The Decider uses `{harness="api", provider="openrouter", model="perplexity/..."}`
+and calls the HTTP API without pi's model allowlist or binary requirement.
+`orch doctor` lists choices, binaries and credential readiness per provider.
+Health lanes are `claude`, `pi:<provider>`, and `pi:openrouter:anthropic`.
+A `pi` limit covers all pi connectors; a provider limit covers its children.
+`pi-anthropic` remains an alias for direct `pi:anthropic`. OpenRouter's free
+key check attributes an empty key only to a proved model scope; otherwise it
+says `unknown scope` and uses `pi:openrouter`. OpenAI and Anthropic checks
+only inspect credential presence, never make model calls.
+`--runner pi:<model>,claude:haiku:low` overrides gate choices for one run;
+`ORCH_GATE_MODEL` puts a pi choice first, and `--degraded` permits approved
+weaker choices. `ORCH_PI` and `ORCH_CLAUDE` override headless binary paths.
+Provider-down errors skip that connector lane for the run and retry the pass once on
+the next choice, without writing health; the report prints the exact manual
+`orch health set <lane> limited --for 3h` hint. Stalls keep their existing retry
+rules. With no usable runner, deterministic checks and dossiers are still
+written and the gate is unverified. `gate.json` `pass_runners`, the report and
+compare output identify each pass's runner.
+If triage is off, `orch spawn <id> --auto` gives one short message, invents no
+tier, and starts no lead. `--auto --tier settled|standard|planning` skips the
+Decider and selects that dispatch rule. `--apply` still controls execution.
+A hand-picked `orch spawn <id> --harness H --model M [--effort E]` also skips
+triage. Quick shadow mode records `skipped: decider off` and proceeds; quick
+enforce mode refuses with the same manual-profile/`--tier` guidance.
+
+Gate agents use the plain `orch ctx` CLI, not a server or generated adapter.
+`--ctx-tool on|off` defaults to on: a read-only notice is first in the shared
+prompt prefix, `ORCH_CTX_ROOT` pins lookups to the code checkout, and a PATH
+shim resolves `orch` to this binary. Pi adds `bash`; Claude adds Bash with the
+`Bash(orch ctx:*)` permission. Prefer one `orch ctx batch` over several greps;
+read what it returns before searching again. With ctx off, the original read
+and search tools remain and the ctx notice/env are absent.
+`--context-files on|off` defaults to off: pi keeps `--no-context-files`; Claude
+uses `--settings '{"claudeMdExcludes":["**"]}'` instead of `--bare`, so disabling
+CLAUDE.md discovery does not disable subscription authentication. On removes
+those exclusions. The dossier stays in the task text, not in a context file.
+Both settings are in gate/experiment records, reports, and compare output.
+
+Every runner, including ctx-off runs, gets a post-pass unchanged-checkout
+check against the pre-pass baseline: Git status, diff and untracked-file
+content hashes. A change discards model results, cancels pending/in-flight
+passes, forces unverified, and puts a loud warning first in stdout/report.
+The record names changed files and passes in flight, not a proven culprit.
+Files are never reverted. Ignored files and writes outside the checkout are
+not covered; edits restored before the check can also escape detection.
+Pi's shell tool has no command allowlist: it can still read outside the repo,
+write ignored/outside files, or use the network. Its protection is the prompt,
+orch's pinned read-only ctx mode, and this post-pass check, not a sandbox.
+
+Gate options. Before each group pass the gate puts a code-built dossier after
+the package text (`--dossier code`, the default; `off` is the old prompt, `plan`
+adds a tool-less planner pass whose lookups code runs): ranked files, an
+interface sheet, existing look-alikes outside the package's `owns`, and names
+found nowhere, written to `gate/<hash>/dossier/<package>.md`. Each pass is given a turn budget (10 plus 5 per
+package, 40 for adversaries): at the budget a pane agent is told once to answer,
+at 1.4 times it, or when its context passes 150000 tokens, it is interrupted and
+asked for the answer; `gate.json` `pass_tokens` records turns, budget hits, cost
+and context. `--cache long` sets `PI_CACHE_RETENTION=long` for the pi passes,
+`--keep-sessions` keeps the sessions of passes that succeeded. To compare
+settings without touching the real record: `orch gate <spec> --only <group-key>
+--dossier off|code|plan [--cache short|long] --experiment <name>` runs just those
+group passes into `gate/<hash>/experiments/<name>/` (sessions kept), and `orch
+gate compare <spec> <expA> <expB>` prints requests, tokens, cost, seconds,
+findings, questions and their overlap, with an exploration profile per pass.
+
+Benchmarks. `orch bench record|import` snapshots finished runs into a private,
+machine-local store (`ORCH_BENCH_DIR` or the XDG data directory), preserving exact
+specs, subjects, item sets, immutable keys and scoring inputs after gate pruning.
+`--bench-suite` or user-only `bench_suite` enables experiment auto-recording; repo
+configuration cannot select the store's suite. `bench compare|report` recomputes
+location scores without models and identifies subject, key and group coverage.
+Use `bench verify` before trusting an import, and keep unknown historical facts
+unknown. See `references/bench.md` for commands, privacy, migration, export and
+the historical import recipe. Do not run imports or paid experiments without approval.
+
+Spec deliverables. Each package has `#### Builds`: plain-prose bullets, one
+human-readable deliverable per bullet. Optional indented `search:` lines name
+one behaviour per query; several distinct behaviours may have separate lines.
+Use `Code that <action> on <entity>, when <trigger>, producing <result>`, dropping
+slots that do not apply. Good: `Code that saves a payment method for a customer,
+when a checkout completes, producing a stored method row`. Good short query:
+`Code that lists payment gateways`. Bad: `payments, customers, checkout,
+gateways`. Do not invent paths or symbols. Omit search for tiny deliverables
+or near-duplicates that would repeat candidates. Optional `reuse:` lines list
+known pointers separated by commas. Prefer `path#Symbol`, methods
+`path#Type.Method`; use `path:line[-line]` for blocks, SQL, config, generated
+code or docs. `orch spec queries <spec> [--package id | --item id#n] [--json]`
+parses them without a model. Add `--generate` to propose missing queries (or
+Builds for a legacy package), never to edit the spec; `--dry-run` prints its
+prompt. Generation without a selector needs explicit `--all`.
+
+Reuse checklist. Items are only Builds bullets (ids `<package>#<n>`, saved in
+`items.json` with `queries` and `reuse` arrays); nothing is guessed from body
+or acceptance. A ship package without Builds gets a warning and skips its
+checklist; scouts are exempt. More than 8 bullets warns to split the package.
+Only explicit search lines retrieve candidates; items without them still
+appear. With the dossier on, the default is three candidates per query for
+small packages; larger ones divide a 24-body package budget over queries,
+clamped to 2..5. Repeated locations show once with `also for #2, #5`.
+Section 3a of the dossier shows path:range, enclosing symbol,
+signature, doc line, body up to 40 lines, callers; at most two per project root;
+tests, generated files, docs and the package's own files never count; items past
+12 come after a "treat them the same" line; the section is capped and says what
+was cut. The model is only given facts. Record-only shadow judges
+(`--shadow decider|flash|both`, or `reuse_shadow` in the config; default off)
+answer behavioral questions (`trigger_and_inputs`, `outputs_and_effects`,
+`relation`, `best_candidate`, `placement`) with classes `duplicate`,
+`variation_site`, or `none`. The `other` class was dropped. Shadow evidence adds
+resolvable author reuse hints after searched candidates, marks them as author
+hints, and caps the total at six per item. Derived duplicate and consistency
+checks are information only. Answers log to
+`gate/<hash>/shadow/<experiment or run>/items.jsonl`; they never change the gate.
+`orch gate probe-decider` measures the largest state the decisions API takes
+(paid requests; run by hand), `--dry-run --dump-decider <item|first>` prints a
+request without sending it. `orch gate compare <spec> <a> <b> --reference
+<file.json>` adds per-item columns, agreement between judges and precision/recall
+against an answer key (format: `[{"package","item" (id or text),"verdict"
+(duplicate|extend|new|unclear),"candidate","note"}]`). Per-item display matches
+by id or 60% word overlap; reference scoring uses locations, not item text.
+Compare also shows items with queries, queries run, distinct candidate
+locations and bodies shown. `--verdicts` (experimental, off) asks the group pass for a
+reuse|extend|new|unclear verdict per item and retries the items it skipped.
+
+**Code facts for any repo: `orch ctx`** (`references/context.md`). `orch ctx
+find` (a concept), `sym` (an exact symbol: doc, body preview, callers with their
+enclosing function, implementers), `text` (ripgrep with glob, word, type, context;
+an exact string, or its absence), `batch` (many lookups in one call, a place shown
+once, inline `-q "kind:query key=value"`) and `brief` (ranked files, interfaces
+and look-alikes for a piece of text) answer from jbcontext, gopls, the TypeScript
+server and rg with no run state and a cache keyed by HEAD and the working tree.
+Hits are grouped by file with totals, test files are hidden and counted
+(`--tests include|only`), `--compact` gives the shortest answer, and every answer
+ends with a `sources:` line and any staleness. `orch ctx status` shows the index, the watch and the
+tools, `orch ctx refresh` makes the index current. `orch plan` writes the same
+facts into each brief (`--no-ctx` skips them) and `orch doctor` reports whether
+the layer is ready. Tell leads to search with `orch ctx` before they read files.
 
 What makes a brief work (template: `references/task-template.md`):
 - **Intent** in the user's words. The lead falls back on it when the spec
   runs out.
-- **Pointers** are `path:line` plus why it matters, gathered by a scout if
+- **Pointers** are `path#Symbol` (methods `path#Type.Method`) plus why it
+  matters; use `path:line[-line]` for blocks, SQL, config, generated code or docs.
+  They are gathered by a scout if
   needed. They point; they never paste.
 - **Spec** carries every decision already made, so the lead doesn't remake
   it.
@@ -116,7 +275,7 @@ your turn:
 
 | Event | Do |
 |---|---|
-| `done` | Check the evidence before believing it. Ship: `git log -1 <sha>` on the named branch, then `orch verify <id>`; the lead's own check claim is not evidence. Scout: read `report.md`, or have a scout summarise a long one. Tell the user in a line or two. Merging is a separate instruction (`orch send`) given once the user approves, using the repo's own merge flow. Then `orch close <id>`. |
+| `done` | Check the evidence before believing it. Ship: `git log -1 <sha>` on the named branch, then `orch verify <id>`; the lead's own check claim is not evidence. When the spec has dependencies, a passing verify also merges the package into the spec's integration branch; `integration: conflict` or `integration: check failed` is a needs-decision for the user (the tool never resolves it), and dependents cannot spawn until the merge lands. Scout: read `report.md`, or have a scout summarise a long one. Tell the user in a line or two. Merging into the base branch (the integration branch included) is a separate instruction given once the user approves, using the repo's own merge flow. Then `orch close <id>`. |
 | `needs-decision [key]` | If the user's earlier answers settle it, `orch send <id> --resolve <key> "<answer>"`. Otherwise ask the user, batching open decisions, then send the answer. |
 | `needs-decision [context]` | The lead's context is past the limit and the next work is unrelated; it wrote `handoff.md` and stopped. Decide it yourself, without the user: `orch compact <id>` when the next work shares some of its context, `orch respawn <id>` (fresh session on the same task and worktree, started from the handoff) when it shares none. Both resolve the decision. |
 | `escalate [key]` | The lead is out of its depth. Follow the `escalate` rule under "Talking to the user". Never ask the lead to try again on the same model first. |
@@ -174,12 +333,13 @@ other way.
   `weak_models` entry on anything but settled work; `spawn --override-tier`
   gets past it.
 - **Allowed models.** `[allowed_models]` in the user config is the whole
-  list of models orch will start; `orch models` prints it. `new`, `plan`,
+  list of conversational harness models orch will start; `orch models` prints it. The API Decider does not use this list. `new`, `plan`,
   `spawn`, `respawn` and the gate model refuse anything else, and a dispatch
   profile outside the list is a config error. A repo file cannot set it.
   The list is partly dynamic: `[[allowed_when_limited]]` adds models only
   while a harness is limited (Haiku is allowed as a cheap lead only while
-  pi is down). `orch models` shows which are allowed right now.
+  pi is down). An optional `lane = "pi:openrouter"` scopes that condition to
+  one connector. `orch models` shows which are allowed right now.
   Never widen the list to get past an error: ask the user.
 - **`spawn --auto`.** Make a task with `--harness auto --model auto --effort
   auto`, write the brief, then `orch spawn <id> --auto`. orch rates the
@@ -188,14 +348,17 @@ other way.
   follows the tier (low for settled, high otherwise). Without `--apply` it
   is a dry run that prints the pick; `--apply` sets the profile and spawns;
   `--degraded` allows a stand-in the user agreed to. It parks when nothing is
-  usable. A task with a hand-chosen profile is never changed. Mark a task
-  `private: true` in its front matter to keep it on Claude; its text is never sent to the triage model, so `--auto` and `orch triage` refuse it and you choose its profile by hand. Use the dry run
+  usable. If the Decider is off, it prints guidance and starts nothing; use
+  `--tier settled|standard|planning` to select the tier without triage.
+  A task with a hand-chosen profile is never changed. Mark a task
+  `private: true` in its front matter to keep it on Claude; its text is never sent to the triage model. Without an explicit `--tier`, auto cannot rate private work; choose its profile by hand. Use the dry run
   until `orch triage report` has 20 outcomes and looks sound; the tiers come
   from untuned thresholds.
-- **Provider limits.** When a Claude or Pi (OpenRouter) limit stops work,
-  run `orch health set <claude|pi|pi-anthropic> limited --for <duration> --reason "..."`
-  (the user's say-so is the signal; a `ui-blocked` line that shows a limit
-  is a hint). `orch new`, `orch plan` and `spawn` then refuse that harness,
+- **Provider limits.** When a connector limit stops work,
+  run `orch health set <claude|pi:provider|pi:openrouter:anthropic> limited --for <duration> --reason "..."`.
+  `pi` remains the parent of all pi connectors; `pi-anthropic` aliases direct
+  `pi:anthropic`. The user's say-so is the signal; a `ui-blocked` line that
+  shows a limit is a hint. `orch new`, `orch plan` and `spawn` refuse that lane,
   and `orch status` and `orch dispatch` say what to use now. Park by
   default: a dispatch profile marked `degraded = true` is a weaker
   stand-in, and you use it (`--degraded`) only after the user agrees. Never
@@ -273,7 +436,7 @@ other way.
   to change it (rarely, with evidence and the user's approval) and setup.
   Settings a repo must not control live in
   `~/.config/orchestrate/config.toml`: `max_leads`, `lead_context_limit`,
-  `claude_args` and `pi_args` (extra CLI flags for leads), `triage_mode` (shadow, enforce or off), `quick_mode` (same values; for `orch quick`), `triage_model`, `weak_models` and `dispatch`
+  `claude_args` and `pi_args` (extra CLI flags for leads), `triage_mode` (shadow, enforce or off), `quick_mode` (same values; for `orch quick`), `triage_model`, `weak_models`, `reuse_shadow` (off, decider, flash or both: record-only judges of the gate's reuse checklist), `ctx_index` (`full`, the default, builds a missing jbcontext index and refreshes a stale one; `incremental` only refreshes; `off` never calls jbcontext), `ctx_deny` (repos that never use jbcontext) and `dispatch`
   rules (a profile may set `degraded = true` for a weaker fallback). orch refuses them in a repo file, so a commit can't change how
   leads launch.
 - Run state lives next to the repo's Herdr worktrees:

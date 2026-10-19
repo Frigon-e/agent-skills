@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -26,6 +27,7 @@ func cmdNew(a *app, args []string) error {
 	base := fs.String("base", "", "base branch (default: repo config, else the current branch)")
 	deps := fs.String("depends", "", "comma-separated task ids that must be done first")
 	degraded := fs.Bool("degraded", false, "allow a degraded fallback profile (ask the user first)")
+	noCtx := fs.Bool("no-ctx", false, "do not add the code-built facts section")
 	pos, err := parseArgs(fs, args)
 	if err != nil {
 		return err
@@ -43,7 +45,7 @@ func cmdNew(a *app, args []string) error {
 			depList = append(depList, d)
 		}
 	}
-	path, err := newTask(s, taskOpts{id: pos[0], kind: *kind, harness: *harness, model: *model, effort: *effort, base: *base, deps: depList, degraded: *degraded})
+	path, err := newTask(s, taskOpts{id: pos[0], kind: *kind, harness: *harness, model: *model, effort: *effort, base: *base, deps: depList, degraded: *degraded, noCtx: *noCtx})
 	if err != nil {
 		return err
 	}
@@ -60,6 +62,8 @@ type taskOpts struct {
 	spec                                   string
 	owns                                   []string
 	degraded                               bool
+	integration, specHash                  string // set by orch plan
+	noCtx                                  bool   // --no-ctx: no "Facts gathered by code" section
 }
 
 // newTask scaffolds task.md for one task and returns its path.
@@ -136,8 +140,19 @@ func newTask(s site, o taskOpts) (string, error) {
 	if len(o.owns) > 0 {
 		text = strings.Replace(text, "\ndepends_on:", "\nowns: "+strings.Join(o.owns, ", ")+"\ndepends_on:", 1)
 	}
+	if o.integration != "" {
+		text = strings.Replace(text, "\ndepends_on:", "\nintegration: "+o.integration+"\ndepends_on:", 1)
+	}
+	if o.specHash != "" {
+		text = strings.Replace(text, "\ndepends_on:", "\nspec_hash: "+o.specHash+"\ndepends_on:", 1)
+	}
 	for name, body := range o.fill {
 		text = fillSection(text, name, body)
+	}
+	if !o.noCtx {
+		if facts := taskFacts(s, o); facts != "" {
+			text = strings.Replace(text, "\n# Acceptance\n", "\n# Facts gathered by code\n\n"+facts+"\n\n# Acceptance\n", 1)
+		}
 	}
 	if err := os.WriteFile(path, []byte(text), 0o644); err != nil {
 		return "", err
@@ -244,6 +259,10 @@ func cmdSpawn(a *app, args []string) error {
 	auto := fs.Bool("auto", false, "choose the profile from triage and the dispatch rules (a dry run unless --apply)")
 	apply := fs.Bool("apply", false, "with --auto: set the chosen profile and spawn")
 	degraded := fs.Bool("degraded", false, "with --auto: allow a degraded fallback profile (ask the user first)")
+	tier := fs.String("tier", "", "with --auto: settled, standard or planning; skip triage")
+	harness := fs.String("harness", "", "choose a profile by hand: claude or pi")
+	model := fs.String("model", "", "model for a hand-chosen profile")
+	effort := fs.String("effort", "", "effort for a hand-chosen profile (default: task effort, or high)")
 	pos, err := parseArgs(fs, args)
 	if err != nil {
 		return err
@@ -251,58 +270,115 @@ func cmdSpawn(a *app, args []string) error {
 	if err := exactArgs(pos, 1, "spawn <id> [--override-tier] [--auto [--apply] [--degraded]]"); err != nil {
 		return err
 	}
-	if (*apply || *degraded) && !*auto {
-		return fail("--apply and --degraded go with --auto")
+	if (*apply || *degraded || *tier != "") && !*auto {
+		return fail("--apply, --degraded and --tier go with --auto")
+	}
+	if *tier != "" && *tier != "settled" && *tier != "standard" && *tier != "planning" {
+		return fail("--tier is settled, standard or planning")
+	}
+	if *harness != "" || *model != "" || *effort != "" {
+		if *auto || (*harness != "claude" && *harness != "pi") || *model == "" {
+			return fail("choose --harness claude|pi and --model M without --auto")
+		}
+		return a.spawnChosen(pos[0], *harness, *model, *effort)
 	}
 	if *auto {
-		return a.spawnAuto(pos[0], *apply, *degraded)
+		return a.spawnAuto(pos[0], *apply, *degraded, *tier)
 	}
 	a.overrideTier = *override
 	return a.spawn(pos[0], "")
 }
 
-// spawn starts a lead on a checked task; brief is appended to its launch
-// prompt.
-func (a *app) spawn(id, brief string) error {
+// spawnOverride is the profile a replacement lead will have when it differs
+// from what task.md says now: respawn --harness, or the pick of --auto.
+// degraded means the user approved a degraded stand-in.
+type spawnOverride struct {
+	harness, model, effort string
+	degraded               bool
+}
+
+// preflight makes the refusals that depend only on the task and the machine,
+// not on a free slot or a model call, so a respawn or an auto pick can check
+// them before it changes anything. fm is the task's front matter with ov laid
+// over it.
+func (a *app) preflight(id string, ov *spawnOverride) (s site, dir string, fm map[string]string, warnings []string, err error) {
 	if os.Getenv("HERDR_ENV") != "1" || os.Getenv("HERDR_WORKSPACE_ID") == "" {
-		return fail("spawn must run inside a Herdr pane (HERDR_ENV=1)")
+		return s, "", nil, nil, fail("spawn must run inside a Herdr pane (HERDR_ENV=1)")
 	}
-	s, err := a.site()
+	s, err = a.site()
 	if err != nil {
-		return err
+		return s, "", nil, nil, err
 	}
 	if why := spawnBlocked(s.root); why != "" {
-		return fail("%s", why)
+		return s, "", nil, nil, fail("%s", why)
 	}
 	problems, warnings, err := checkTask(s.root, id)
 	if err != nil {
-		return err
+		return s, "", nil, nil, err
+	}
+	if ov != nil { // the profile on disk is the one about to be replaced
+		kept := problems[:0:0]
+		for _, p := range problems {
+			if !strings.HasPrefix(p, "frontmatter: harness is auto") {
+				kept = append(kept, p)
+			}
+		}
+		problems = kept
 	}
 	if len(problems) > 0 {
-		return fail("task.md is not ready:\n  %s", strings.Join(problems, "\n  "))
+		return s, "", nil, nil, fail("task.md is not ready:\n  %s", strings.Join(problems, "\n  "))
 	}
-	dir, _ := taskDir(s.root, id)
+	dir, _ = taskDir(s.root, id)
+	fm, _, err = readTask(filepath.Join(dir, "task.md"))
+	if err != nil {
+		return s, "", nil, nil, err
+	}
+	allowDegraded := fm["degraded"] == "true"
+	if ov != nil {
+		fm["harness"], fm["model"], fm["effort"] = ov.harness, ov.model, ov.effort
+		allowDegraded = ov.degraded
+	}
+	if err := harnessUsable(s.cfg, fm["harness"], fm["model"], allowDegraded, a.now()); err != nil {
+		return s, "", nil, nil, err
+	}
+	if fm["private"] == "true" && fm["harness"] != "claude" {
+		return s, "", nil, nil, fail("%s is marked private, so it may only run on Claude, not %s", id, fm["harness"])
+	}
+	return s, dir, fm, warnings, nil
+}
+
+// spawnSlot refuses a task that already has an open lead and a spawn past
+// max_leads. It is called twice: early, so a doomed spawn fails before the
+// triage model call, and again under the spawn guard, where it is the
+// authoritative answer.
+func (a *app) spawnSlot(s site, dir, id string) ([]openLead, error) {
 	if l, err := loadLead(dir); err != nil {
-		return err
+		return nil, err
 	} else if l != nil && l.ClosedAt == 0 {
-		return fail("lead %s is already open in pane %s", id, l.PaneID)
+		return nil, fail("lead %s is already open in pane %s", id, l.PaneID)
 	}
-	me := orchID()
 	leads := openLeads(s.root)
 	if len(leads) >= s.cfg.MaxLeads {
-		return &exitError{code: 75, msg: fmt.Sprintf(
+		return nil, &exitError{code: 75, msg: fmt.Sprintf(
 			"deferred: %d/%d leads open; close one first or raise max_leads in %s",
 			len(leads), s.cfg.MaxLeads, userConfigPath())}
 	}
-	fm, _, err := readTask(filepath.Join(dir, "task.md"))
+	return leads, nil
+}
+
+// spawn starts a lead on a checked task; brief is appended to its launch
+// prompt.
+func (a *app) spawn(id, brief string) error {
+	s, dir, fm, warnings, err := a.preflight(id, nil)
 	if err != nil {
 		return err
 	}
-	if err := harnessUsable(s.cfg, fm["harness"], fm["model"], fm["degraded"] == "true", a.now()); err != nil {
+	if err := requireMerged(s, dir, id, fm); err != nil {
 		return err
 	}
-	if fm["private"] == "true" && fm["harness"] != "claude" {
-		return fail("%s is marked private, so it may only run on Claude, not %s", id, fm["harness"])
+	me := orchID()
+	if _, err := a.spawnSlot(s, dir, id); err != nil {
+		return err
 	}
 	if fm["quick"] != "true" && fm["private"] != "true" { // quick jobs were rated by `orch quick` itself; private text never leaves the machine for triage
 		if err := a.triageGate(s, id, fm); err != nil {
@@ -311,16 +387,29 @@ func (a *app) spawn(id, brief string) error {
 	}
 	name := leadName(id)
 	env := []string{"ORCH_TASK_DIR=" + dir, "ORCH_TASK_ID=" + id, "ORCH_ROLE=lead"}
-	paneID, tabID, err := placePane(myLeads(leads, me), s.repo, env)
+	// The slot check, the pane and the lead record go under one guard, so two
+	// spawns cannot both see a free slot or both take the same task. The slow
+	// agent start and prompt below run outside it.
+	var paneID string
+	var l *lead
+	err = withFlock(filepath.Join(s.root, ".spawn.guard"), func() error {
+		leads, err := a.spawnSlot(s, dir, id)
+		if err != nil {
+			return err
+		}
+		pane, tabID, err := placePane(myLeads(leads, me), s.repo, env)
+		if err != nil {
+			return err
+		}
+		paneID = pane
+		_, _ = herdrCmd(herdrTimeout, "pane", "rename", paneID, name)
+		l = &lead{ID: id, Name: name, Harness: fm["harness"], Model: fm["model"], PaneID: paneID, TabID: tabID, SpawnedAt: a.now().Unix(), Owner: me}
+		if l.Harness == "pi" {
+			l.Session = newSessionID()
+		}
+		return saveLead(dir, l)
+	})
 	if err != nil {
-		return err
-	}
-	_, _ = herdrCmd(herdrTimeout, "pane", "rename", paneID, name)
-	l := &lead{ID: id, Name: name, Harness: fm["harness"], Model: fm["model"], PaneID: paneID, TabID: tabID, SpawnedAt: a.now().Unix(), Owner: me}
-	if l.Harness == "pi" {
-		l.Session = newSessionID()
-	}
-	if err := saveLead(dir, l); err != nil {
 		return err
 	}
 	start := append([]string{"agent", "start", name, "--kind", fm["harness"], "--pane", paneID, "--timeout", "90000", "--"}, harnessArgs(fm, s.cfg, l.Session)...)
@@ -334,7 +423,8 @@ func (a *app) spawn(id, brief string) error {
 		launch += " " + brief
 	}
 	if _, err := herdrCmd(herdrTimeout, "agent", "prompt", paneID, launch); err != nil {
-		return err
+		_ = a.appendStatus(dir, "note", "agent prompt failed in pane "+paneID, "", "orch")
+		return fail("opened pane %s for %s, but the launch prompt failed (%v). Look with: orch peek %s; give up with: orch close %s --force", paneID, name, err, id, id)
 	}
 	_, waitErr := herdrCmd(30*time.Second, "agent", "wait", paneID, "--until", "working", "--until", "blocked", "--timeout", "20000")
 	if err := a.appendStatus(dir, "working", "spawned in pane "+paneID, "", "orch"); err != nil {
@@ -659,7 +749,7 @@ func cmdDispatch(a *app, args []string) error {
 		return nil
 	}
 	limited := loadHealth(a.now())
-	for _, h := range lanes {
+	for _, h := range healthLanes(limited) {
 		if e, ok := limited[h]; ok {
 			fmt.Fprintf(a.out, "health: %s %s\n", h, e)
 		}
@@ -689,7 +779,7 @@ func dispatchNow(r dispatchRule, limited map[string]healthEntry, allowed func(pr
 	var usable, degraded *profile
 	for i := range r.Use {
 		p := &r.Use[i]
-		_, lim := limited[lane(p.Harness, p.Model)]
+		_, _, lim := limitedBy(limited, p.lane())
 		anyLimited = anyLimited || lim
 		anyDegraded = anyDegraded || p.Degraded
 		switch {
@@ -762,7 +852,7 @@ func (a *app) board(s site, rows []row) string {
 		fmt.Sprintf("watcher: %s · leads open: %s", watcher, count),
 	}
 	limited := loadHealth(a.now())
-	for _, h := range lanes {
+	for _, h := range healthLanes(limited) {
 		if e, ok := limited[h]; ok {
 			out = append(out, fmt.Sprintf("health: %s %s; new tasks on it are refused (orch dispatch shows what to use)", h, e))
 		}
@@ -880,6 +970,19 @@ func cmdWatch(a *app, args []string) error {
 	pidFile, stateFile := watchFiles(s.root, me)
 	if pid := watcherAlive(s.root, me); pid != 0 {
 		return fail("a watcher is already running for this orchestrator (pid %d)", pid)
+	}
+	// The pid check above can't stop two watchers that start together: the
+	// holder of this lock is the only one that may write the cursor.
+	lockFile, err := os.OpenFile(strings.TrimSuffix(pidFile, ".pid")+".lock", os.O_CREATE|os.O_RDWR, 0o644)
+	if err != nil {
+		return err
+	}
+	defer lockFile.Close()
+	if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		if errors.Is(err, syscall.EWOULDBLOCK) {
+			return fail("a watcher is already running for this orchestrator")
+		}
+		return err
 	}
 	myPid := strconv.Itoa(os.Getpid())
 	if err := os.WriteFile(pidFile, fmt.Appendf(nil, "%s %d\n", myPid, a.now().Unix()), 0o644); err != nil {
@@ -1236,19 +1339,34 @@ func cmdRespawn(a *app, args []string) error {
 	if *harness != "" && *harness != "claude" && *harness != "pi" {
 		return fail("--harness must be claude or pi")
 	}
-	dir, l, err := a.requireLead(pos[0])
+	s0, err := a.site()
 	if err != nil {
 		return err
+	}
+	dir, err := taskDir(s0.root, pos[0])
+	if err != nil {
+		return err
+	}
+	l, err := loadLead(dir)
+	if err != nil {
+		return err
+	}
+	handoff := filepath.Join(dir, "handoff.md")
+	// A lead closed by an earlier respawn whose replacement did not start still
+	// has its handoff: that respawn is retried without closing anything.
+	retry := l != nil && l.ClosedAt != 0 && fileExists(handoff)
+	if l == nil || (l.ClosedAt != 0 && !retry) {
+		return fail("no open lead for %s", pos[0])
 	}
 	if why := frozenReason(readStatus(dir)); why != "" {
 		return fail("%s is frozen (%s). Decide with the user, then run: orch unfreeze %s", l.ID, why, l.ID)
 	}
-	handoff := filepath.Join(dir, "handoff.md")
 	_, haveHandoff := os.Stat(handoff)
 	if haveHandoff != nil && *harness == "" {
 		return fail("%s has no handoff.md; ask the lead to write one (Context budget in the lead protocol) first", l.ID)
 	}
 	taskPath := filepath.Join(dir, "task.md")
+	var ov *spawnOverride
 	if *harness != "" {
 		fm, _, err := readTask(taskPath)
 		if err != nil {
@@ -1264,28 +1382,51 @@ func cmdRespawn(a *app, args []string) error {
 		if *harness != fm["harness"] && *model == "" {
 			return fail("moving %s from %s to %s needs --model: model names differ between harnesses", l.ID, fm["harness"], *harness)
 		}
-		s, err := a.site()
-		if err != nil {
+		ov = &spawnOverride{harness: *harness, model: m, effort: e, degraded: *degraded}
+	}
+	// Every refusal the replacement could make comes before the old lead is
+	// closed or any file is touched.
+	s, _, _, _, err := a.preflight(l.ID, ov)
+	if err != nil {
+		return err
+	}
+	how := "closed for respawn with a fresh context"
+	if *harness != "" {
+		how = "closed for respawn on " + *harness
+	}
+	if !retry {
+		if err := a.closeLead(dir, l, how); err != nil {
 			return err
 		}
-		if err := harnessUsable(s.cfg, *harness, m, *degraded, a.now()); err != nil {
-			return err
-		}
-		for k, v := range map[string]string{"harness": *harness, "model": m, "effort": e} {
+	}
+	if err := a.resolveContext(dir, "respawned with a fresh context"); err != nil {
+		return err
+	}
+	// From here the task files change; keep what is needed to undo it if the
+	// replacement does not start.
+	origTask, err := os.ReadFile(taskPath)
+	if err != nil {
+		return err
+	}
+	if ov != nil {
+		for k, v := range map[string]string{"harness": ov.harness, "model": ov.model, "effort": ov.effort} {
 			if err := setFrontMatter(taskPath, k, v); err != nil {
 				return err
 			}
 		}
-		if degradedProfile(s.cfg, *harness, m) {
+		if degradedProfile(s.cfg, ov.harness, ov.model) {
 			if err := setFrontMatter(taskPath, "degraded", "true"); err != nil {
 				return err
 			}
 		}
+		_ = a.appendStatus(dir, "note", "respawned on "+ov.harness, "", "orch")
 	}
 	brief := ""
+	kept := ""
 	if haveHandoff == nil {
-		kept := filepath.Join(dir, fmt.Sprintf("handoff-%d.md", a.now().Unix()))
+		kept = filepath.Join(dir, fmt.Sprintf("handoff-%d.md", a.now().Unix()))
 		if err := os.Rename(handoff, kept); err != nil {
+			_ = os.WriteFile(taskPath, origTask, 0o644)
 			return err
 		}
 		brief = fmt.Sprintf("You replace a lead whose context filled up: read its handoff at %s before anything else. Its worktree and branch already exist; continue in them, and retake any lock the handoff names.", kept)
@@ -1293,21 +1434,16 @@ func cmdRespawn(a *app, args []string) error {
 		brief = fmt.Sprintf("You replace a lead whose provider failed mid-task; it left no handoff. Recover from disk: read the status log at %s, then run `git status` and `git log` in the worktree %s and read the diff against the base. Commit any uncommitted work that belongs to the task first, then continue the task. Its branch already exists; retake any lock it held. If the state is unclear, report `escalate` before changing anything.",
 			filepath.Join(dir, "status.log"), worktreePath(dir, l.ID))
 	}
-	how := "closed for respawn with a fresh context"
-	if *harness != "" {
-		how = "closed for respawn on " + *harness
-	}
-	if err := a.closeLead(dir, l, how); err != nil {
-		return err
-	}
-	if err := a.resolveContext(dir, "respawned with a fresh context"); err != nil {
-		return err
-	}
-	if *harness != "" {
-		_ = a.appendStatus(dir, "note", "respawned on "+*harness, "", "orch")
-	}
 	if err := a.spawn(l.ID, brief); err != nil {
-		return fail("closed %s, but the new lead did not start: %v", l.Name, err)
+		// A replacement that left a lead behind owns the new handoff path and
+		// profile; otherwise put both back as they were.
+		if nl, _ := loadLead(dir); nl == nil || nl.ClosedAt != 0 {
+			_ = os.WriteFile(taskPath, origTask, 0o644)
+			if kept != "" {
+				_ = os.Rename(kept, handoff)
+			}
+		}
+		return fail("closed %s, but the new lead did not start: %v. Once that is fixed, run `orch respawn %s` again: the handoff is kept", l.Name, err, l.ID)
 	}
 	return nil
 }

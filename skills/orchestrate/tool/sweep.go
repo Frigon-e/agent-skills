@@ -218,12 +218,10 @@ func (a *app) judgeQuestion(r *sweepResult, repo string, roots map[string]string
 		switch {
 		case !options[p.ans.Choice]:
 			invalid = append(invalid, fmt.Sprintf("%s picked %q, which is not an option", p.name, p.ans.Choice))
+		case len(p.bad) > 0:
+			invalid = append(invalid, p.name+": evidence does not resolve: "+strings.Join(p.bad, ", "))
 		case !supported(p):
-			why := "no evidence"
-			if len(p.bad) > 0 {
-				why = "evidence does not resolve: " + strings.Join(p.bad, ", ")
-			}
-			invalid = append(invalid, p.name+": "+why)
+			invalid = append(invalid, p.name+": no evidence")
 		default:
 			voting = append(voting, p)
 		}
@@ -247,7 +245,7 @@ func (a *app) judgeQuestion(r *sweepResult, repo string, roots map[string]string
 		return *r
 	}
 	for _, p := range r.passes {
-		if p.name == final && options[p.ans.Choice] && supported(p) {
+		if p.name == final && options[p.ans.Choice] && len(p.bad) == 0 && supported(p) {
 			r.status, r.choice, r.why = "final", p.ans.Choice, "final pass "+final
 			return *r
 		}

@@ -19,7 +19,9 @@ or compaction.
   rest out of it (Context budget below).
 - **Ship tasks:** work only in your own worktree and branch, created as the
   Report-back section says. Never commit in the main checkout. Never push,
-  merge or open a PR until a message tells you to.
+  merge or open a PR until a message tells you to. If your `base` is an
+  `orch/int-*` branch, that is already the tip with your prerequisites
+  merged; never touch that branch, `orch verify` merges your work into it.
 - **Scout tasks:** don't edit the repo. Write `report.md` in your task
   directory: findings with `path:line` evidence first, then the
   recommendation. It must make sense without your conversation.
@@ -42,6 +44,14 @@ crowds out what matters. Route by context as well as by model (`route-work`,
 - **Let a scout size the work.** Have `context-explorer` report change
   sites and a size guess (`Mode: scope`) instead of reading code to find out.
 - **Delegate single-use output:** wide reads, log digging, searches.
+- **Search with `orch ctx` first** (`references/context.md`), cheapest option
+  first: `text` with `--glob` and `--word` for a name or string you know (and
+  for its absence), `sym` for an exact symbol with its callers, `find` for a
+  concept only when you have no name to search (write it as one behavior, `Code that <action> <entity>, when <trigger>, producing <result>`; see "Writing a concept query" in `references/context.md`). Put two or more independent
+  lookups in one `batch` (`-q "kind:query key=value"`). Tests are hidden and
+  counted; add `--tests include|only` when you need them. Read files only
+  after, for what the tools do not tell you, and never re-read a file or the
+  spec you already read.
 
 **Full context and new work.** When `orch inbox` prints a `context:` line,
 your context is past the lead limit. If the new message starts work that

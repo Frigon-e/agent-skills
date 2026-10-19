@@ -24,8 +24,12 @@ Orchestrator:
   orch new <id> --kind ship|scout --harness claude|pi --model M --effort E [--base B] [--depends a,b]
   orch plan <spec> [--dry-run]
   orch check <id>
-  orch verify <id>
+  orch verify <id> [--no-merge]
+  orch integration remove <slug>
   orch gate <spec>
+  orch bench record|import|list|show|compare|key|spec|report|verify|migrate|export|import-archive|readme
+  orch spec queries <spec> [--package id | --item id#n] [--json] [--generate [--dry-run] [--all]]
+  orch ctx status|refresh|watch|find|sym|text|batch|brief   (code facts for any git repo; see references/context.md)
   orch quick <id> --owns <file>[,<file>] <request...>
   orch models
   orch triage <id>... [--force] | orch triage report
@@ -34,8 +38,9 @@ Orchestrator:
   orch audit [<id>] [--system S] [--since 6h] [--problems]
   orch hold [on <reason> | off]
   orch unfreeze <id>
-  orch health [set claude|pi|pi-anthropic ok|limited [--for 3h] [--reason R]]
-  orch spawn <id>
+  orch health [set claude|pi|pi:provider|pi:openrouter:anthropic ok|limited [--for 3h] [--reason R]]
+  orch spawn <id> [--auto [--tier settled|standard|planning] [--apply]]
+  orch spawn <id> --harness claude|pi --model M [--effort E]
   orch send <id> [--resolve KEY] <text...|->
   orch status [--json] [--all]
   orch ask [--cards DIR] [--out DIR]
@@ -60,6 +65,7 @@ Hooks:
 
 type app struct {
 	overrideTier bool // spawn --override-tier: skip the triage refusal
+	skipTriage   bool // an explicit --tier does not call the Decider
 	cwd          string
 	stdin        io.Reader
 	out          io.Writer
@@ -82,9 +88,13 @@ func fail(format string, a ...any) error {
 var commands = map[string]func(*app, []string) error{
 	"new":          cmdNew,
 	"plan":         cmdPlan,
+	"spec":         cmdSpec,
 	"check":        cmdCheck,
 	"verify":       cmdVerify,
+	"integration":  cmdIntegration,
 	"gate":         cmdGate,
+	"bench":        cmdBench,
+	"ctx":          cmdCtx,
 	"models":       cmdModels,
 	"triage":       cmdTriage,
 	"quick":        cmdQuick,

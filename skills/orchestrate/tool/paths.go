@@ -16,10 +16,11 @@ import (
 // repoConfig comes from <repo>/.agents/orchestrate.toml, so anyone who can
 // commit to the repo controls it. It only shapes briefs.
 type repoConfig struct {
-	BaseBranch   string   `toml:"base_branch"`
-	LeadSkills   []string `toml:"lead_skills"`
-	Check        string   `toml:"check"`
-	QuietMinutes int      `toml:"quiet_minutes"`
+	benchSuiteIgnored bool
+	BaseBranch        string   `toml:"base_branch"`
+	LeadSkills        []string `toml:"lead_skills"`
+	Check             string   `toml:"check"`
+	QuietMinutes      int      `toml:"quiet_minutes"`
 	// StallMinutes is how long a working lead may report nothing and change
 	// nothing in its worktree before the watcher says it stalled.
 	StallMinutes int `toml:"stall_minutes"`
@@ -39,15 +40,17 @@ const maxNotes, maxNoteLen = 5, 160
 // a repo key can't reach these fields under any spelling (the decoder
 // matches field names case-insensitively).
 type userConfig struct {
-	MaxLeads   int      `toml:"max_leads"`
-	ClaudeArgs []string `toml:"claude_args"`
-	PiArgs     []string `toml:"pi_args"`
+	UserBenchSuite string   `toml:"bench_suite"`
+	MaxLeads       int      `toml:"max_leads"`
+	ClaudeArgs     []string `toml:"claude_args"`
+	PiArgs         []string `toml:"pi_args"`
 	// LeadContextLimit is the context size, in tokens, past which a lead
 	// handed unrelated work asks for a compact or a fresh session.
 	LeadContextLimit int `toml:"lead_context_limit"`
 	// Dispatch rules say which harness and model suit which work. orch only
 	// prints them; the orchestrator matches them by judgment.
-	Dispatch []dispatchRule `toml:"dispatch"`
+	Dispatch []dispatchRule       `toml:"dispatch"`
+	Roles    map[string]modelRole `toml:"roles"`
 	// Triage: a decision model rates each task at spawn (see triage.go).
 	// TriageMode is shadow (record only, the default), enforce or off.
 	// WeakModels may only run tasks triage rates settled, in enforce mode.
@@ -63,11 +66,25 @@ type userConfig struct {
 	// AllowedWhenLimited adds models to the list only while a harness is
 	// limited, for example Haiku while pi is down.
 	AllowedWhenLimited []limitedAllow `toml:"allowed_when_limited"`
+	// ReuseShadow runs record-only judges of the gate's reuse checklist:
+	// off (default), decider, flash or both. They never change a verdict.
+	ReuseShadow string `toml:"reuse_shadow"`
+	// CtxLangs adds or overrides languages for `orch ctx` (see ctx_lang.go).
+	CtxLangs []langCfg `toml:"ctx_langs"`
+	// CtxIndex is the policy for the jbcontext index behind `orch ctx`: full
+	// (the default: build the index when a repo has none and refresh a stale
+	// one), incremental (refresh an existing index only, never a first full
+	// index) or off (never call jbcontext). CtxDeny lists repositories (paths)
+	// that never use jbcontext, whatever the policy.
+	CtxIndex string   `toml:"ctx_index"`
+	CtxDeny  []string `toml:"ctx_deny"`
+	CtxTrust []string `toml:"ctx_trust"` // repos allowed to run repo-local language servers
 }
 
 // limitedAllow allows the models in Allow (by harness) while Harness is limited.
 type limitedAllow struct {
 	Harness string              `toml:"harness"`
+	Lane    string              `toml:"lane"`
 	Allow   map[string][]string `toml:"allow"`
 }
 
@@ -81,9 +98,10 @@ type dispatchRule struct {
 }
 
 type profile struct {
-	Harness string `toml:"harness"`
-	Model   string `toml:"model"`
-	Effort  string `toml:"effort"`
+	Harness  string `toml:"harness"`
+	Provider string `toml:"provider"`
+	Model    string `toml:"model"`
+	Effort   string `toml:"effort"`
 	// Degraded marks a weaker stand-in, used only when the primary profile's
 	// harness is limited, and only with the user's approval.
 	Degraded bool `toml:"degraded"`
@@ -91,6 +109,9 @@ type profile struct {
 
 func (p profile) String() string {
 	s := strings.TrimSpace(p.Harness + " " + p.Model + " " + p.Effort)
+	if p.Harness == "api" {
+		s = strings.TrimSpace(p.Harness + " " + p.Provider + " " + p.Model)
+	}
 	if p.Degraded {
 		s += " [degraded]"
 	}
@@ -240,7 +261,7 @@ func userConfigPath() string {
 	return filepath.Join(envOr("XDG_CONFIG_HOME", expandHome("~/.config")), "orchestrate", "config.toml")
 }
 
-var userKeys = []string{"max_leads", "claude_args", "pi_args", "lead_context_limit", "dispatch", "triage_model", "triage_mode", "quick_mode", "weak_models", "allowed_models", "allowed_when_limited"}
+var userKeys = []string{"ctx_trust", "roles", "max_leads", "claude_args", "pi_args", "lead_context_limit", "dispatch", "triage_model", "triage_mode", "quick_mode", "weak_models", "allowed_models", "allowed_when_limited"}
 
 // decodeStrict refuses keys v has no field for. A key that belongs in the
 // other file gets a pointer there instead of "unknown key".
@@ -266,8 +287,22 @@ var repoKeys = []string{"base_branch", "lead_skills", "check", "quiet_minutes", 
 
 // readRepoConfig decodes a repo file over the defaults already in rc.
 func readRepoConfig(path string, rc *repoConfig) error {
-	if err := decodeStrict(path, rc, userKeys, userConfigPath()); err != nil {
-		return err
+	if _, err := os.Stat(path); err == nil {
+		md, err := toml.DecodeFile(path, rc)
+		if err != nil {
+			return fail("%s: %v", path, err)
+		}
+		for _, key := range md.Undecoded() {
+			k := key.String()
+			if len(key) > 0 && strings.EqualFold(key[0], "bench_suite") {
+				rc.benchSuiteIgnored = true
+				continue
+			}
+			if slices.ContainsFunc(userKeys, func(o string) bool { return strings.EqualFold(o, k) }) {
+				return fail("%s: %q is not allowed here; it belongs in %s", path, k, userConfigPath())
+			}
+			return fail("%s: unknown key %q", path, k)
+		}
 	}
 	if len(rc.Notes) > maxNotes {
 		return fail("%s: %d notes, at most %d: rewrite or drop one before adding another", path, len(rc.Notes), maxNotes)
@@ -294,7 +329,7 @@ func readRepoConfig(path string, rc *repoConfig) error {
 // loadUserConfig reads the machine's settings over their defaults. Leads use
 // it alone; they have no repo checkout to read the rest from.
 func loadUserConfig() (userConfig, error) {
-	uc := userConfig{MaxLeads: 3, LeadContextLimit: 150_000, TriageModel: triageModelDefault, TriageMode: "shadow", QuickMode: "shadow"}
+	uc := userConfig{MaxLeads: 3, LeadContextLimit: 150_000, TriageMode: "shadow", QuickMode: "shadow"}
 	err := decodeStrict(userConfigPath(), &uc, repoKeys, "<repo>/.agents/orchestrate.toml")
 	return uc, err
 }
@@ -314,6 +349,24 @@ func loadConfig(repo string) (config, error) {
 		return cfg, err
 	}
 	cfg.userConfig = uc
+	switch cfg.CtxIndex {
+	case "", "full", "incremental", "off":
+	default:
+		return cfg, fail("%s: ctx_index must be full, incremental or off, not %q", user, cfg.CtxIndex)
+	}
+	for name, r := range cfg.Roles {
+		if !slices.Contains(modelRoles, name) {
+			return cfg, fail("%s: unknown role %q", user, name)
+		}
+		for _, p := range r.Use {
+			if name == "decider" && p.Harness != "api" {
+				return cfg, fail("%s: role decider needs harness api and a provider", user)
+			}
+			if (p.Harness != "claude" && p.Harness != "pi" && p.Harness != "api") || p.Model == "" || (p.Harness == "api" && (name != "decider" || p.Provider == "" || !validLane("pi:"+p.Provider))) {
+				return cfg, fail("%s: role %s: choices need claude/pi and a model, or api with a provider and model for decider", user, name)
+			}
+		}
+	}
 	for i, r := range cfg.Dispatch {
 		if strings.TrimSpace(r.When) == "" || len(r.Use) == 0 {
 			return cfg, fail("%s: dispatch rule %d needs `when` and at least one `use` profile", user, i+1)
@@ -336,6 +389,9 @@ func loadConfig(repo string) (config, error) {
 		}
 	}
 	for i, w := range cfg.AllowedWhenLimited {
+		if w.Lane != "" && !validLane(w.Lane) {
+			return cfg, fail("%s: allowed_when_limited entry %d: invalid lane %q", user, i+1, w.Lane)
+		}
 		if w.Harness != "claude" && w.Harness != "pi" {
 			return cfg, fail("%s: allowed_when_limited entry %d: harness must be claude or pi", user, i+1)
 		}

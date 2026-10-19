@@ -208,3 +208,23 @@ func jsonString(s string) string {
 	b, _ := json.Marshal(s)
 	return string(b)
 }
+
+// One resolving citation must not hide an unresolved one in the same pass.
+func TestSweepMixedEvidenceNeedsRecheck(t *testing.T) {
+	h := setup(t)
+	os.MkdirAll(filepath.Join(h.repo, "adr"), 0o755)
+	os.WriteFile(filepath.Join(h.repo, "adr", "1.md"), []byte("a\nb\nc\n"), 0o644)
+	topic := filepath.Join(h.tmp, "topic")
+	for _, k := range []string{"mixed", "clean"} {
+		sweepCard(t, topic, k, "", "a", "b")
+	}
+	for _, p := range []string{"flash", "sonnet"} {
+		sweepPassFile(t, topic, p, "mixed", ans("a", "adr/1.md:2", "adr/1.md:99"))
+		sweepPassFile(t, topic, p, "clean", ans("a", "adr/1.md:2", "adr/1.md:3"))
+	}
+	out := h.must("sweep", topic)
+	wantContains(t, out, "clean -> a", "mixed", "does not resolve")
+	if strings.Contains(out, "mixed -> a") {
+		t.Errorf("a pass with an unresolved citation settled the question:\n%s", out)
+	}
+}

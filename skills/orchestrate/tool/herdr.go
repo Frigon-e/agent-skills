@@ -22,13 +22,20 @@ type herdrAgent struct {
 }
 
 func herdrCmd(timeout time.Duration, args ...string) ([]byte, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	return herdrCmdContext(context.Background(), timeout, args...)
+}
+
+func herdrCmdContext(parent context.Context, timeout time.Duration, args ...string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, envOr("ORCH_HERDR", "herdr"), args...)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
 	what := strings.Join(args[:min(2, len(args))], " ")
+	if parent.Err() != nil {
+		return out, parent.Err()
+	}
 	if ctx.Err() != nil {
 		return out, fail("herdr %s timed out after %s", what, timeout)
 	}

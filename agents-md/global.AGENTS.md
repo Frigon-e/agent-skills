@@ -6,6 +6,7 @@
 
 - **Text Searching:** Always use `rg` (ripgrep) for searching file contents. Do not use `grep`, `egrep`, or `fgrep`.
 - **File Finding:** Always use `fd` for finding file names or paths. Only use `find` if `fd` is unavailable.
+- **File Reading:** Always use the read tool, never `sed`, `cat`, `head` or `tail`. For part of a file pass `offset` and `limit` (several reads can go in one reply). Read output has line numbers, so cited `path:line` stay correct.
 - **Syntax Mapping:** `rg` syntax differs from traditional `grep`.
   - To exclude directories, use `-g '!pattern'` instead of `--exclude-dir`.
   - `rg` and `fd` search recursively by default and skip gitignored and hidden files. For ignored files use `rg -u` / `fd -I`; to also include hidden files use `rg -uu` / `fd -H -I`.
@@ -17,14 +18,6 @@ Before any `herdr` command, load the `herdr` skill (`herdr --skill` prints the s
 - Naming: agents `<role>` or `<role>-<topic>` (`reviewer`, `impl-auth`); numeric suffix only for identical parallel roles. `pane rename` each agent's pane to its agent name. Tabs by purpose (`agents`, `tests`, `logs`); workspaces `<repo>` or `<repo>-<task>`; worktree branches follow the repo's convention, else `<type>/<topic>`.
 - Always pass `--timeout` with `--wait` / `wait`.
 - Close the panes, tabs, and worktrees you created once their work is done; ask before `worktree remove --force`.
-
-<!-- jbcontext-instructions-start -->
-## Semantic code search (jbcontext)
-
-- When you don't yet know which file or symbol is relevant, start with `jbcontext search "<descriptive natural-language query>"` (`-p <repo-relative-path>` to narrow) rather than grep/find.
-- Once you have a relevant hit, read files directly.
-- For multi-step discovery, delegate to the context-explorer subagent (`context-explorer` in Claude Code, `context_explorer` in Codex) instead of searching repeatedly yourself.
-<!-- jbcontext-instructions-end -->
 
 ## Subagents
 

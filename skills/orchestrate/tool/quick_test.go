@@ -40,6 +40,12 @@ func TestQuickStructuralLimits(t *testing.T) {
 	refuse("1 to 3 files", quickRequest)
 	refuse("1 to 3 files", "--owns", "a.py,b.py,c.py,d.py", quickRequest)
 	refuse("plain relative file path", "--owns", "src/", quickRequest)
+	os.MkdirAll(filepath.Join(h.repo, "src"), 0o755)
+	os.WriteFile(filepath.Join(h.repo, "src", "slug.py"), []byte("x = 1\n"), 0o644)
+	h.git("add", "-A")
+	h.git("commit", "-q", "-m", "add src")
+	refuse("is a directory", "--owns", "src", quickRequest)
+	refuse("is a directory", "--owns", "src/slug.py,src", quickRequest)
 	refuse("plain relative file path", "--owns", "src/*.py", quickRequest)
 	refuse("plain relative file path", "--owns", "../x.py", quickRequest)
 	refuse("under 20 characters", "--owns", "slug.py", "fix it")
@@ -117,7 +123,7 @@ func TestQuickEnforceRefusesAndCleansUp(t *testing.T) {
 		t.Fatal("a pane was started for a refused quick job")
 	}
 	h.dec.set(500, `{"error":"down"}`)
-	if code, out := h.run("quick", "q2", "--owns", "slug.py", quickRequest); code != 1 || !strings.Contains(out, "triage is unavailable") {
+	if code, out := h.run("quick", "q2", "--owns", "slug.py", quickRequest); code != 1 || !strings.Contains(out, "triage is off") || !strings.Contains(out, "pi:openrouter") {
 		t.Fatalf("enforce guessed without a verdict: %d %s", code, out)
 	}
 	// A reworded request is a new text, so it is rated again.

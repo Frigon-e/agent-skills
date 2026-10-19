@@ -12,7 +12,8 @@ type specPackage struct {
 	id, title                          string
 	kind, model, effort, harness, base string
 	deps, owns                         []string
-	body, acceptance                   string
+	body, acceptance, raw              string
+	builds                             []buildItem // the bullets of `#### Builds`
 }
 
 type spec struct {
@@ -143,7 +144,7 @@ func (sp *spec) parsePackages(lines []string) {
 func (sp *spec) parsePackage(block []string) {
 	head := strings.TrimSpace(block[0][4:])
 	id, title, _ := strings.Cut(head, ":")
-	p := &specPackage{id: strings.TrimSpace(id), title: strings.TrimSpace(title)}
+	p := &specPackage{id: strings.TrimSpace(id), title: strings.TrimSpace(title), raw: strings.TrimSpace(strings.Join(block, "\n"))}
 	sp.packages = append(sp.packages, p)
 	name := p.id
 	if name == "" {
@@ -166,26 +167,39 @@ func (sp *spec) parsePackage(block []string) {
 			keys[k] = strings.TrimSpace(v)
 		}
 	}
-	var body, acc []string
-	inAcc, fenced := false, false
+	var body, acc, bld []string
+	cur, fenced := "", false
 	for _, l := range block[i:] {
 		if strings.HasPrefix(strings.TrimSpace(l), "```") {
 			fenced = !fenced
 		}
 		if !fenced && strings.HasPrefix(l, "#### ") {
-			inAcc = strings.TrimSpace(l[5:]) == "Acceptance"
-			if inAcc {
+			switch strings.TrimSpace(l[5:]) {
+			case "Acceptance":
+				cur = "acc"
+				continue
+			case "Builds":
+				cur = "builds"
 				continue
 			}
+			cur = ""
 		}
-		if inAcc {
+		switch cur {
+		case "acc":
 			acc = append(acc, l)
-		} else {
+		case "builds":
+			bld = append(bld, l)
+		default:
 			body = append(body, l)
 		}
 	}
 	p.body = strings.TrimSpace(strings.Join(body, "\n"))
 	p.acceptance = strings.TrimSpace(strings.Join(acc, "\n"))
+	var bprob []string
+	p.builds, bprob = parseBuilds(strings.Join(bld, "\n"))
+	for _, m := range bprob {
+		sp.add("package %s: %s", name, m)
+	}
 	p.kind = keys["kind"]
 	pick := func(key string) string {
 		if v := keys[key]; v != "" {
@@ -331,6 +345,7 @@ func cmdPlan(a *app, args []string) error {
 	fs := a.flags("plan")
 	dry := fs.Bool("dry-run", false, "check the spec and show what would be created; write nothing")
 	degraded := fs.Bool("degraded", false, "allow degraded fallback profiles (ask the user first)")
+	noCtx := fs.Bool("no-ctx", false, "do not add the code-built facts section to the briefs")
 	skipGate := fs.Bool("skip-gate", false, "plan without a passed `orch gate` (only with the user's agreement)")
 	pos, err := parseArgs(fs, args)
 	if err != nil {
@@ -389,6 +404,18 @@ func cmdPlan(a *app, args []string) error {
 		sp.add("spec has changes not in %s: commit them first", baseBranch)
 	}
 
+	var intBranch string
+	if sp.hasDeps() {
+		sl := slug(strings.TrimSuffix(filepath.Base(real), filepath.Ext(real)))
+		if intBranch = integrationPrefix + sl; sl == "" || !integrationRe.MatchString(intBranch) {
+			sp.add("spec file name %q gives no safe integration branch name", filepath.Base(real))
+		} else if out, err := gitOutput(s.repo, "check-ref-format", "--branch", intBranch); err != nil {
+			sp.add("integration branch %s is not a valid branch name: %s", intBranch, out)
+		} else if owner := integrationOwner(s.root, sl); owner != "" && owner != rel {
+			sp.add("integration branch %s already belongs to the spec %s; rename this spec file (%s), or delete %s if that spec is gone", intBranch, owner, rel, integrationSpecFile(s.root, sl))
+		}
+	}
+
 	status := map[string]string{}
 	for _, p := range sp.packages {
 		if !taskIDRe.MatchString(p.id) {
@@ -400,10 +427,13 @@ func cmdPlan(a *app, args []string) error {
 			continue
 		}
 		fm, _, _ := readTask(path)
-		if fm["spec"] == rel+"#"+p.id {
-			status[p.id] = "exists"
-		} else {
+		switch {
+		case fm["spec"] != rel+"#"+p.id:
 			sp.add("task id %s is already used by another task (%s)", p.id, path)
+		case fm["spec_hash"] != "" && fm["spec_hash"] != specInputsHash(p):
+			status[p.id] = "stale"
+		default:
+			status[p.id] = "exists"
 		}
 	}
 
@@ -427,6 +457,22 @@ func cmdPlan(a *app, args []string) error {
 		return fail("spec has %d %s; nothing was created", n, noun)
 	}
 
+	intNote := ""
+	if intBranch != "" {
+		suffix := ""
+		if *dry {
+			suffix = " (would create)"
+		}
+		intNote = fmt.Sprintf("integration: %s%s\nmerge_worktree: %s\n", intBranch, suffix, filepath.Join(integrationDir(s.root, strings.TrimPrefix(intBranch, integrationPrefix)), "wt"))
+		if !*dry {
+			if err := ensureIntegrationBranch(s.repo, intBranch, baseBranch); err != nil {
+				return err
+			}
+			if err := recordIntegrationOwner(s.root, strings.TrimPrefix(intBranch, integrationPrefix), rel); err != nil {
+				return err
+			}
+		}
+	}
 	for _, p := range sp.packages {
 		if status[p.id] != "created" {
 			continue
@@ -435,13 +481,22 @@ func cmdPlan(a *app, args []string) error {
 			status[p.id] = "would-create"
 			continue
 		}
-		if _, err := newTask(s, withDegraded(sp.taskOpts(p, rel, baseBranch), *degraded)); err != nil {
+		o := withDegraded(sp.taskOpts(p, rel, baseBranch), *degraded)
+		o.noCtx = *noCtx
+		if intBranch != "" {
+			o.base = intBranch
+			if p.kind == "ship" {
+				o.integration = intBranch
+			}
+		}
+		if _, err := newTask(s, o); err != nil {
 			return err
 		}
 	}
 
 	waves, _ := sp.waves()
-	fmt.Fprintf(a.out, "spec: %s\npackages: %d\n", toonValue(rel), len(sp.packages))
+	var stale []string
+	fmt.Fprintf(a.out, "spec: %s\npackages: %d\n%s", toonValue(rel), len(sp.packages), intNote)
 	fmt.Fprintf(a.out, "tasks[%d]{id,kind,model,depends,status}:\n", len(sp.packages))
 	for _, p := range sp.packages {
 		deps := ""
@@ -449,6 +504,17 @@ func cmdPlan(a *app, args []string) error {
 			deps = toonValue(strings.Join(p.deps, " "))
 		}
 		fmt.Fprintf(a.out, "  %s,%s,%s,%s,%s\n", toonValue(p.id), toonValue(p.kind), toonValue(p.model), deps, status[p.id])
+		if status[p.id] == "stale" {
+			stale = append(stale, p.id)
+		}
+	}
+	if len(stale) > 0 {
+		// An existing brief is never rewritten; the old one may be running.
+		fmt.Fprintf(a.out, "stale[%d]:\n", len(stale))
+		for _, id := range stale {
+			fmt.Fprintf(a.out, "  %s\n", toonValue(id+": the spec changed since its brief was written; close its lead if one is open, remove "+filepath.Join(s.root, id)+" by hand and rerun orch plan"))
+		}
+		return fail("%d stale brief(s); do not spawn until they are replaced", len(stale))
 	}
 	fmt.Fprintf(a.out, "waves[%d]:\n", len(waves))
 	for _, w := range waves {
@@ -456,6 +522,15 @@ func cmdPlan(a *app, args []string) error {
 	}
 	fmt.Fprintln(a.out, "help[2]:\n  orch check <id>\n  orch spawn <id>")
 	return nil
+}
+
+func (sp *spec) hasDeps() bool {
+	for _, p := range sp.packages {
+		if len(p.deps) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 func withDegraded(o taskOpts, degraded bool) taskOpts {
@@ -481,16 +556,37 @@ func (sp *spec) taskOpts(p *specPackage, rel, base string) taskOpts {
 	auth := sp.sections["Authority"]
 	return taskOpts{
 		id: p.id, kind: p.kind, harness: p.harness, model: p.model, effort: p.effort, base: base,
-		deps: p.deps, spec: rel + "#" + p.id, owns: p.owns,
+		deps: p.deps, spec: rel + "#" + p.id, owns: p.owns, specHash: specInputsHash(p),
 		fill: map[string]string{
 			"Intent": fmt.Sprintf("%s: %s. The whole feature is in `%s`; read its Behaviour and Design rules first.", sp.title, p.title, rel),
 			"Scope":  "In: " + in + "\nOut: " + out,
 			"Pointers": fmt.Sprintf("`%s` ## Behaviour - what the feature does\n`%s` ## Design rules - decisions already made\n`%s` ### %s - this package",
 				rel, rel, rel, p.id),
-			"Spec":       p.body,
+			"Spec":       specText(p),
 			"Acceptance": p.acceptance,
 			"Authority": fmt.Sprintf("May decide: %s\nMust escalate: %s\nNever: %s",
 				labelled(auth, "May decide"), labelled(auth, "Must escalate"), labelled(auth, "Never")),
 		},
 	}
+}
+
+// specText is the Spec section of a task: the package body, then its Builds
+// bullets as written.
+func specText(p *specPackage) string {
+	if len(p.builds) == 0 {
+		return p.body
+	}
+	var b strings.Builder
+	b.WriteString(p.body + "\n\nBuilds:\n")
+	for i, it := range p.builds {
+		fmt.Fprintf(&b, "- %s#%d: %s", p.id, i+1, it.Text)
+		b.WriteString("\n")
+		for _, q := range it.Queries {
+			b.WriteString("  search: " + q + "\n")
+		}
+		if len(it.Reuse) > 0 {
+			b.WriteString("  reuse: " + strings.Join(it.Reuse, ", ") + "\n")
+		}
+	}
+	return strings.TrimRight(b.String(), "\n")
 }

@@ -41,7 +41,13 @@ model: sonnet
 depends: transfer-model
 owns: internal/panel/transfer/api.go, internal/panel/transfer/api_test.go
 
-What this package builds. Pointers as `path:line` - why it matters.
+What this package does. Prefer `path#Symbol` pointers - why it matters.
+
+#### Builds
+- Queues a transfer and keeps it across panel restarts.
+  search: Code that saves a transfer for a server, when a user queues it, producing a durable queue row
+- Lists queued transfers in the panel.
+  search: Code that lists queued transfers
 
 #### Acceptance
 `scripts/agent/check go ./internal/panel/transfer/` passes; a test shows
@@ -55,6 +61,9 @@ owns: internal/panel/transfer/store.go, internal/panel/transfer/store_test.go, m
 
 Body.
 
+#### Builds
+- Stores queued transfers and their retry state.
+
 #### Acceptance
 ...
 
@@ -64,11 +73,15 @@ None.
 
 ## Rules
 
-- **Front matter** gives defaults for `harness` (claude or pi), `model`,
-  `effort` and `base`. A package line overrides its default. `base`
-  falls back to the repo config.
+- **Front matter** gives defaults for `harness` (claude or pi), `model`
+  and `effort`; a package line overrides its default. `base` is a
+  spec-wide default only (no package line sets it) and falls back to the
+  repo config.
 - **`## Behaviour`, `## Design rules` and `## Authority`** are required.
-  Authority needs its three lines; every task gets them.
+  Authority needs its three lines; every task gets them. Put cross-cutting
+  decisions in Design rules, but keep a rule that concerns one area inside
+  that package's body: every lead and every per-package gate pass reads the
+  shared sections in full.
 - **`## Packages`** holds one `### <id>: <title>` block per package:
   - `<id>` becomes the task id (lowercase, starts with a letter, at most
     27 characters).
@@ -77,6 +90,28 @@ None.
     this spec), `owns` (comma-separated files or directories, required
     for ship). A blank line ends them.
   - The text after the blank line is the package's own spec.
+  - `#### Builds` lists plain-prose deliverables, one bullet per item. Indented
+    continuation lines are joined; the text is kept verbatim. Optional indented
+    `search:` lines are jbcontext queries, one behaviour per query; several are
+    allowed on a bullet with distinct behaviours. Optional `reuse:` lines name
+    known existing code (comma-separated pointers).
+  - Search guidance: `Code that <action> on <entity>, when <trigger>, producing
+    <result>`. Drop any slot that does not apply; never invent symbols or paths.
+    Good (full): `Code that saves a payment method for a customer, when a checkout
+    completes, producing a stored method row`. Good (short): `Code that lists
+    payment gateways`. Bad (noun list): `payments, customers, checkout, gateways`.
+    Omit `search:` for tiny bullets without a search target, or near-duplicates
+    that would only repeat candidates and skew counts. Without it the item still
+    appears in the checklist, but gets no searched candidates.
+  - A ship package without Builds gets a warning, not an error: its reuse
+    checklist is skipped. Scouts are exempt. More than 8 bullets warns to split
+    the package. Items have ids `<package>#<n>` (1-based), saved in `items.json`
+    with `queries` and `reuse` arrays; no items are guessed from body/acceptance.
+  - Prefer `path#Symbol` (methods: `path#Type.Method`) anywhere existing code is
+    referenced. `path:line` and `path:line-line` remain useful for a block inside
+    a function, SQL, config, generated code or docs. The gate verifies the file
+    defines the symbol via ctx's declaration tier; unsupported languages fall
+    back to a word match with a note. Plan copies pointers as written.
   - `#### Acceptance` is required: commands and expected results, or for
     a scout, the evidence each finding needs.
 - **Ownership is disjoint.** No file or directory belongs to two packages,
@@ -94,14 +129,34 @@ None.
 
 `orch gate <spec>` runs before `orch plan` and records a verdict for the
 spec's exact text (a change to the spec voids it). It checks that every
-`path:line` pointer and every acceptance command exists, then runs four
+`path#Symbol` or `path:line[-line]` pointer and every acceptance command exists, then runs four
 read-only passes on a cheap model (`ORCH_GATE_MODEL`, default DeepSeek
-Flash through pi): scope, open questions, and two adversaries. A model
+Flash through pi): one per package for scope and open questions, and two
+adversaries. A model
 claim counts only when its evidence line exists in the repo, and only a
 question whose answer changes visible behaviour blocks. The verdict is
 `pass`, `fail` or `unverified` (a pass could not run, or pi is marked
 limited); only `pass` unlocks `orch plan`. The report, findings and
 question cards are in `<run root>/gate/<hash>/`.
+
+## Inspect or propose queries
+
+`orch spec queries <spec>` is a parser, with grouped text or `--json`.
+`--package <id>` or `--item <id>#<n>` selects a subset. It shows every item's
+text, search lines and reuse pointers without a model or repo state.
+
+`orch spec queries <spec> --generate --package <id>` proposes search lines
+only for items without them, or Builds plus search lines for a legacy package.
+It uses role `spec_queries`, never edits the spec, and prints text to paste.
+`--dry-run` prints the prompt without calling a model. Whole-spec generation
+requires explicit `--all`; a package or item selector is the normal use.
+
+Candidates are retrieved only from explicit queries. The default is three per
+query for small packages; larger packages divide a 24-body budget over their
+queries, clamped to 2..5 per query. A location answering several items is shown
+once with `also for #2, #5`. Compare reports items with queries, queries run,
+distinct locations and bodies shown; reference precision/recall scores
+locations rather than item wording.
 
 ## What `orch plan` does
 
@@ -117,7 +172,16 @@ and copies only the package's own text: Intent names the feature and the
 package, Scope In is `owns` and Scope Out is the other packages' files,
 Pointers name the spec's sections, Spec is the package body, Acceptance
 and Authority come from the spec. A rerun skips tasks it made before
-(`exists`), so it is safe to run again after adding packages.
+(`exists`), so it is safe to run again after adding packages. A task also
+stores `spec_hash`; if its package changed since, the rerun reports it
+`stale`, exits 1 and rewrites nothing. Close its lead, remove the task
+directory by hand and rerun.
+
+When any package has `depends`, plan cuts `orch/int-<spec file name>` from
+the base and gives every ship task that base plus `integration: <branch>`.
+`orch verify` merges a passing package into it; dependents start from its
+tip. The branch is never the base branch: you merge it there and delete it,
+and `orch integration remove <slug>` drops its merge worktree.
 
 Output lists each task with its status and the waves: a wave holds the
 packages whose dependencies are all in earlier waves. Check and spawn the

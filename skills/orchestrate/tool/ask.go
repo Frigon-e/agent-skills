@@ -483,6 +483,9 @@ func cmdAsk(a *app, args []string) error {
 		paths, _ := filepath.Glob(filepath.Join(cardsDir, "*.md"))
 		sort.Strings(paths)
 		for _, cardPath := range paths {
+			if filepath.Base(cardPath) == "INDEX.md" { // the gate's overview of its cards, not a card
+				continue
+			}
 			key := strings.TrimSuffix(filepath.Base(cardPath), ".md")
 			if !keyRe.MatchString(key) {
 				warnings = append(warnings, askWarning{"", filepath.Base(cardPath), fmt.Sprintf("skipped: the name must match %s.md", keyRe)})
@@ -494,7 +497,7 @@ func cmdAsk(a *app, args []string) error {
 	}
 	var leads []openLead
 	if root != "" {
-		leads = openLeads(root)
+		leads = myLeads(openLeads(root), orchID())
 	}
 	for _, ol := range leads {
 		taskReal, err := filepath.EvalSymlinks(ol.dir)

@@ -1,0 +1,165 @@
+package main
+
+import (
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+)
+
+type modelRunner func(role, prompt string) (string, error)
+
+var queryModelRunner modelRunner = func(role, prompt string) (string, error) {
+	return "", fmt.Errorf("no runner configured")
+}
+
+func generateQueries(role, prompt string) (string, error) {
+	return queryModelRunner(role, prompt)
+}
+
+type specQueriesPackage struct {
+	ID    string     `json:"id"`
+	Items []gateItem `json:"items"`
+}
+
+func cmdSpec(a *app, args []string) error {
+	if len(args) == 0 || args[0] != "queries" {
+		return &exitError{code: 2, msg: "usage: orch spec queries <spec> [--package id | --item id#n] [--json] [--generate [--dry-run] [--all]]"}
+	}
+	fs := a.flags("spec queries")
+	pkg := fs.String("package", "", "select one package")
+	item := fs.String("item", "", "select one item (<package>#<n>)")
+	asJSON := fs.Bool("json", false, "print JSON")
+	gen := fs.Bool("generate", false, "propose missing queries; never edit the spec")
+	dry := fs.Bool("dry-run", false, "print the generation prompt without calling a model")
+	all := fs.Bool("all", false, "allow generation across the whole spec")
+	fs.Usage = func() {
+		fmt.Fprintln(a.errw, "usage: orch spec queries <spec> [options]\nExamples:\n  orch spec queries spec.md --package api\n  orch spec queries spec.md --item 'api#1' --generate --dry-run\n  orch spec queries spec.md --generate --all")
+		fs.PrintDefaults()
+	}
+	pos, err := parseArgs(fs, args[1:])
+	if err != nil {
+		return err
+	}
+	if err := exactArgs(pos, 1, "spec queries <spec> [--package id | --item id#n] [--json] [--generate [--dry-run] [--all]]"); err != nil {
+		return err
+	}
+	if *pkg != "" && *item != "" {
+		return &exitError{code: 2, msg: "use --package or --item, not both"}
+	}
+	if (*dry || *all) && !*gen {
+		return &exitError{code: 2, msg: "--dry-run and --all require --generate"}
+	}
+	if *gen && *pkg == "" && *item == "" && !*all {
+		return &exitError{code: 2, msg: "generation needs --package, --item, or explicit --all"}
+	}
+	path := pos[0]
+	if !filepath.IsAbs(path) {
+		path = filepath.Join(a.cwd, path)
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	sp := parseSpec(string(b))
+	var groups []specQueriesPackage
+	var selected []*specPackage
+	for _, p := range sp.packages {
+		if *pkg != "" && p.id != *pkg {
+			continue
+		}
+		its := []gateItem{}
+		for _, it := range packageItems(p) {
+			if *item == "" || it.ID == *item {
+				its = append(its, it)
+			}
+		}
+		if *item != "" && len(its) == 0 {
+			continue
+		}
+		groups = append(groups, specQueriesPackage{ID: p.id, Items: its})
+		selected = append(selected, p)
+	}
+	if (*pkg != "" || *item != "") && len(groups) == 0 {
+		return fail("no matching package or item: %s%s", *pkg, *item)
+	}
+	if *gen {
+		prompt, count := queriesPrompt(groups, selected)
+		if count == 0 {
+			fmt.Fprintln(a.out, "No selected items need search lines.")
+			return nil
+		}
+		output := prompt
+		if !*dry {
+			output, err = generateQueries("spec_queries", prompt)
+			if err != nil {
+				return err
+			}
+		}
+		if *asJSON {
+			return json.NewEncoder(a.out).Encode(output)
+		}
+		fmt.Fprintln(a.out, output)
+		return nil
+	}
+	if *asJSON {
+		return json.NewEncoder(a.out).Encode(groups)
+	}
+	if len(groups) == 0 {
+		fmt.Fprintln(a.out, "No packages found.")
+	}
+	for _, g := range groups {
+		fmt.Fprintf(a.out, "Package %s\n", g.ID)
+		if len(g.Items) == 0 {
+			fmt.Fprintln(a.out, "  No Builds bullets; reuse checklist skipped.")
+		}
+		for _, it := range g.Items {
+			fmt.Fprintf(a.out, "- %s: %s\n", it.ID, it.Text)
+			for _, q := range it.Queries {
+				fmt.Fprintln(a.out, "  search: "+q)
+			}
+			if len(it.Reuse) > 0 {
+				fmt.Fprintln(a.out, "  reuse: "+strings.Join(it.Reuse, ", "))
+			}
+		}
+	}
+	return nil
+}
+
+const queriesGuidance = `Propose spec-format text a human can paste. Never edit the spec. Return only the selected packages/items, with #### Builds and plain-prose bullets, one human-readable deliverable per bullet. Keep existing bullet text and reuse pointers as written. For legacy packages without Builds, propose bullets from the supplied body.
+Add optional indented search: lines only where useful. Query guidance: Code that <action> on <entity>, when <trigger>, producing <result>. Drop any slot that does not apply. Do not invent symbols or paths. One behaviour per query, not noun lists. Multiple search lines are allowed for distinct behaviours. Omit search for tiny bullets without a search target or near-duplicates that would only duplicate candidates and skew counts. reuse: is optional, comma-separated known pointers; prefer path#Symbol or path#Type.Method, with path:line or path:line-line for blocks, SQL, config, generated code or docs.
+Good (full): Code that saves a payment method for a customer, when a checkout completes, producing a stored method row
+Good (short): Code that lists payment gateways
+Bad (noun list): payments, customers, checkout, gateways
+
+Selected input:
+`
+
+func queriesPrompt(groups []specQueriesPackage, packages []*specPackage) (string, int) {
+	var b strings.Builder
+	b.WriteString(queriesGuidance)
+	count := 0
+	for i, g := range groups {
+		var pending []gateItem
+		for _, it := range g.Items {
+			if len(it.Queries) == 0 {
+				pending = append(pending, it)
+			}
+		}
+		if len(packages[i].builds) == 0 {
+			count++
+			fmt.Fprintf(&b, "### %s: %s\nLegacy package body:\n%s\nAcceptance:\n%s\n", g.ID, packages[i].title, packages[i].body, packages[i].acceptance)
+		} else if len(pending) > 0 {
+			fmt.Fprintf(&b, "### %s: %s\n#### Builds\n", g.ID, packages[i].title)
+			for _, it := range pending {
+				count++
+				fmt.Fprintf(&b, "- %s\n", it.Text)
+				if len(it.Reuse) > 0 {
+					fmt.Fprintf(&b, "  reuse: %s\n", strings.Join(it.Reuse, ", "))
+				}
+			}
+		}
+	}
+	return b.String(), count
+}

@@ -78,7 +78,12 @@ func withLockGuard(name string, fn func() error) error {
 	if err := os.MkdirAll(locksDir(), 0o755); err != nil {
 		return err
 	}
-	f, err := os.OpenFile(filepath.Join(locksDir(), name+".guard"), os.O_CREATE|os.O_RDWR, 0o644)
+	return withFlock(filepath.Join(locksDir(), name+".guard"), fn)
+}
+
+// withFlock runs fn holding an exclusive flock on path, created if absent.
+func withFlock(path string, fn func() error) error {
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o644)
 	if err != nil {
 		return err
 	}

@@ -23,10 +23,16 @@ var baseSHARe = regexp.MustCompile(`^[0-9a-f]{7,40}$`)
 // lead changed outside the paths the task owns. The check command comes from
 // the main checkout's repo config, so a lead cannot change it from its branch.
 func cmdVerify(a *app, args []string) error {
-	if err := exactArgs(args, 1, "verify <id>"); err != nil {
+	fs := a.flags("verify")
+	noMerge := fs.Bool("no-merge", false, "do not merge a passing package into its integration branch")
+	pos, err := parseArgs(fs, args)
+	if err != nil {
 		return err
 	}
-	id := args[0]
+	if err := exactArgs(pos, 1, "verify <id> [--no-merge]"); err != nil {
+		return err
+	}
+	id := pos[0]
 	s, err := a.site()
 	if err != nil {
 		return err
@@ -102,13 +108,17 @@ func cmdVerify(a *app, args []string) error {
 	if result != "pass" {
 		return &exitError{code: 1, msg: ""}
 	}
+	if fm["integration"] != "" && !*noMerge {
+		return a.integrate(s, dir, id, fm)
+	}
 	return nil
 }
 
 // changedFiles lists every path that differs from base in the worktree:
-// committed, staged, modified and untracked.
+// committed, staged, modified and untracked. Renames are not detected, so a
+// file moved into the owned paths still lists the source it left.
 func changedFiles(wt, base string) ([]string, error) {
-	diff, err := git(wt, "diff", "--name-only", base, "--")
+	diff, err := git(wt, "diff", "--name-only", "--no-renames", base, "--")
 	if err != nil {
 		return nil, fail("git diff in %s failed: is %s a commit in that worktree?", wt, base)
 	}
@@ -126,7 +136,7 @@ func changedFiles(wt, base string) ([]string, error) {
 
 // changedLines counts added plus removed lines against base, tracked files only.
 func changedLines(wt, base string) int {
-	out, err := git(wt, "diff", "--numstat", base, "--")
+	out, err := git(wt, "diff", "--numstat", "--no-renames", base, "--")
 	if err != nil {
 		return 0
 	}

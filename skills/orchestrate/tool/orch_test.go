@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -65,6 +66,9 @@ func flagValue(args []string, name string) string {
 }
 
 func fakeHerdr(path string, args []string) int {
+	if code, ok := fakeGatePaneVerbs(path, args); ok {
+		return code
+	}
 	st := loadFake(path)
 	st.Calls = append(st.Calls, args)
 	defer saveFake(path, st)
@@ -95,6 +99,10 @@ func fakeHerdr(path string, args []string) int {
 		}
 		return print(map[string]any{"result": map[string]any{"pane": map[string]any{"pane_id": args[2]}}})
 	case "tab create":
+		if exists(path + ".tabfail") {
+			fmt.Fprintln(os.Stderr, `{"error":{"code":"internal","message":"cannot create a tab"}}`)
+			return 1
+		}
 		st.Next++
 		tab, pane := fmt.Sprintf("w1:t%d", st.Next), fmt.Sprintf("w1:p%d", st.Next)
 		st.Panes[pane] = tab
@@ -155,6 +163,10 @@ type decStub struct {
 func newDecStub(t *testing.T) *decStub {
 	d := &decStub{status: 200, reply: decReply(settledAnswers)}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "GET" && r.URL.Path == "/key" {
+			fmt.Fprint(w, `{"data":{"limit_remaining":100}}`)
+			return
+		}
 		d.mu.Lock()
 		defer d.mu.Unlock()
 		d.hits++
@@ -166,6 +178,7 @@ func newDecStub(t *testing.T) *decStub {
 	}))
 	t.Cleanup(srv.Close)
 	t.Setenv("ORCH_TRIAGE_URL", srv.URL)
+	t.Setenv("ORCH_OPENROUTER_KEY_URL", srv.URL+"/key")
 	t.Setenv("ORCH_TRIAGE_KEY", "test-key")
 	return d
 }
@@ -207,16 +220,34 @@ func decReply(v decVals) string {
 
 func setup(t *testing.T) *harness {
 	t.Helper()
+	oldExt := gatePiExtension
+	t.Cleanup(func() { gatePiExtension = oldExt })
+	oldWarm := gateWarmDelay
+	gateWarmDelay = 0
+	oldLimits := [3]time.Duration{gateTimeout, gateStall, gatePoll}
+	gatePoll = 20 * time.Millisecond
+	t.Cleanup(func() { gateTimeout, gateStall, gatePoll = oldLimits[0], oldLimits[1], oldLimits[2] })
+	oldWait, oldPoll := gateLeaveWait, gateLeavePoll
+	gateLeaveWait, gateLeavePoll = time.Second, 10*time.Millisecond
+	t.Cleanup(func() { gateLeaveWait, gateLeavePoll = oldWait, oldPoll })
+	t.Cleanup(func() { gateWarmDelay = oldWarm })
 	tmp, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
 	skill, _ := filepath.Abs("..")
+	gatePiExtension = filepath.Join(tmp, "no-extension.ts")
+	t.Setenv("ORCH_JBCONTEXT", filepath.Join(tmp, "no-jbcontext"))
+	t.Setenv("ORCH_GOPLS", filepath.Join(tmp, "no-gopls"))
+	t.Setenv("ORCH_TSLS", filepath.Join(tmp, "no-tsls"))
+	oldTSReady := tsReady
+	tsReady = 0
+	t.Cleanup(func() { tsReady = oldTSReady })
 	for k, v := range map[string]string{
 		"GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1",
 		"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.com",
 		"GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.com",
-		"ORCH_HOME": filepath.Join(tmp, "state"), "ORCH_ROLES_DIR": filepath.Join(tmp, "roles"),
+		"ORCH_HOME": filepath.Join(tmp, "state"), "ORCH_CACHE_DIR": filepath.Join(tmp, "cache"), "ORCH_ROLES_DIR": filepath.Join(tmp, "roles"),
 		"ORCH_CONFIG":    filepath.Join(tmp, "config.toml"),
 		"ORCH_LOCKS_DIR": filepath.Join(tmp, "locks"), "ORCH_LOCK_POLL_MS": "50",
 		"ORCH_HERDR_CONFIG": filepath.Join(tmp, "none.toml"),
@@ -224,6 +255,7 @@ func setup(t *testing.T) *harness {
 		"HERDR_ENV": "1", "HERDR_WORKSPACE_ID": "w1", "HERDR_PANE_ID": "w1:p0",
 		"ORCH_HERDR": os.Args[0], "ORCH_FAKE_HERDR": filepath.Join(tmp, "herdr.json"),
 		"ORCH_ROLE": "", "ORCH_TASK_DIR": "",
+		"ORCH_PI": fakeRunner(t, "pi", `case "$*" in *"auth check"*) printf '{"status":"ready"}';; *"auth print-"*) printf 'fake-key';; esac`), "ORCH_CLAUDE": fakeRunner(t, "claude", "exit 0"),
 		"CLAUDE_CONFIG_DIR": filepath.Join(tmp, "claude"), "ORCH_PI_DIR": filepath.Join(tmp, "pi"), "ORCH_HEALTH": filepath.Join(tmp, "health.json"),
 	} {
 		t.Setenv(k, v)
@@ -615,18 +647,31 @@ func (h *harness) fakePi(passes map[string]string) string {
 	os.MkdirAll(dir, 0o755)
 	script := `#!/bin/sh
 echo "$*" >> "` + dir + `/calls.log"
+echo "$PI_CACHE_RETENTION" >> "` + dir + `/cache.log"
+case "$*" in *GATE-PLAN*) case "$*" in *--no-tools*) echo no-tools >> "` + dir + `/plan.log";; *) echo tools >> "` + dir + `/plan.log";; esac;; esac
 case "$*" in
-*GATE-SCOPE*) f=scope;; *GATE-QUESTIONS*) f=questions;; *GATE-ADVERSARY-A*) f=adv-a;; *GATE-ADVERSARY-B*) f=adv-b;; esac
+*GATE-GROUP*) f=group; ids=$(echo "$*" | sed -n 's/.*Packages in this pass: \([a-z0-9 ,_-]*\)\..*/\1/p' | head -1 | tr -d ,)
+	[ -f "` + dir + `/group.json" ] && { cat "` + dir + `/group.json"; exit 0; }
+	out=""; sep=""
+	for id in $ids; do
+		if [ -f "` + dir + `/package-$id.json" ]; then frag=$(cat "` + dir + `/package-$id.json"); else frag=$(sed "s/@ID@/$id/g" "` + dir + `/package.json"); fi
+		out="$out$sep$frag"; sep=","
+	done
+	echo "{\"packages\":[$out]}"; exit 0;;
+*GATE-ADVERSARY-A*) f=adv-a;; *GATE-ADVERSARY-B*) f=adv-b;; *GATE-PLAN*) f=plan;; esac
 [ -f "` + dir + `/$f.fail" ] && { echo boom >&2; exit 1; }
 cat "` + dir + `/$f.json"
 `
 	bin := filepath.Join(dir, "pi")
 	os.WriteFile(bin, []byte(script), 0o755)
-	for _, f := range []string{"scope", "questions", "adv-a", "adv-b"} {
-		os.Remove(filepath.Join(dir, f+".json"))
-		os.Remove(filepath.Join(dir, f+".fail"))
+	old, _ := filepath.Glob(filepath.Join(dir, "*.json"))
+	fails, _ := filepath.Glob(filepath.Join(dir, "*.fail"))
+	for _, f := range append(old, fails...) {
+		os.Remove(f)
 	}
 	os.Remove(filepath.Join(dir, "calls.log"))
+	os.Remove(filepath.Join(dir, "cache.log"))
+	os.Remove(filepath.Join(dir, "plan.log"))
 	for name, body := range passes {
 		if body == "FAIL" {
 			os.WriteFile(filepath.Join(dir, name+".fail"), nil, 0o644)
@@ -639,10 +684,12 @@ cat "` + dir + `/$f.json"
 }
 
 var gateClean = map[string]string{
-	"scope":     `{"packages":[{"id":"api","will_change":["internal/api.go"],"claims":[{"claim":"store has Put","evidence":"internal/store.go:3"}]}]}`,
-	"questions": `{"questions":[{"package":"api","question":"Which table?","answered_by":"internal/store.go:3"}]}`,
-	"adv-a":     `{"findings":[]}`,
-	"adv-b":     `{"findings":[]}`,
+	// package answers every package pass; package-api answers the api one, so a
+	// package never reports another package's files.
+	"package":     `{"id":"@ID@","will_change":[],"claims":[{"claim":"store has Put","evidence":"internal/store.go:3"}],"questions":[]}`,
+	"package-api": `{"id":"api","will_change":["internal/api.go"],"claims":[{"claim":"store has Put","evidence":"internal/store.go:3"}],"questions":[{"package":"api","question":"Which table?","answered_by":"internal/store.go:3"}]}`,
+	"adv-a":       `{"findings":[]}`,
+	"adv-b":       `{"findings":[]}`,
 }
 
 func gatePasses(over map[string]string) map[string]string {
@@ -692,7 +739,7 @@ func TestGateQuestionsScopeAndFailures(t *testing.T) {
 	gdir := filepath.Join(filepath.Dir(h.dir("x")), "gate", hash)
 
 	// An unanswered question fails the gate and becomes a card orch ask renders.
-	h.fakePi(gatePasses(map[string]string{"questions": `{"questions":[{"package":"api","question":"Soft or hard delete?","answered_by":"","changes_result":true}]}`}))
+	h.fakePi(gatePasses(map[string]string{"package-api": `{"id":"api","questions":[{"package":"api","question":"Soft or hard delete?","answered_by":"","changes_result":true}]}`}))
 	code, out := h.run("gate", "spec.md")
 	if code != 1 {
 		t.Fatalf("an open question passed the gate: %d %s", code, out)
@@ -701,17 +748,17 @@ func TestGateQuestionsScopeAndFailures(t *testing.T) {
 	wantContains(t, h.must("ask", "--cards", filepath.Join(gdir, "questions")), "questions: 1")
 
 	// A question whose answer changes nothing visible does not block.
-	h.fakePi(gatePasses(map[string]string{"questions": `{"questions":[{"package":"api","question":"Where does sub go?","answered_by":"","changes_result":false}]}`}))
+	h.fakePi(gatePasses(map[string]string{"package-api": `{"id":"api","questions":[{"package":"api","question":"Where does sub go?","answered_by":"","changes_result":false}]}`}))
 	wantContains(t, h.must("gate", "spec.md"), "gate: pass", "questions: 0 need a decision")
 
 	// An answer that cites a line the repo does not have is no answer.
-	h.fakePi(gatePasses(map[string]string{"questions": `{"questions":[{"package":"api","question":"Which table?","answered_by":"internal/store.go:99","changes_result":true}]}`}))
+	h.fakePi(gatePasses(map[string]string{"package-api": `{"id":"api","questions":[{"package":"api","question":"Which table?","answered_by":"internal/store.go:99","changes_result":true}]}`}))
 	if code, out := h.run("gate", "spec.md"); code != 1 || !strings.Contains(out, "questions: 1 need a decision") {
 		t.Fatalf("a fake answer counted: %d %s", code, out)
 	}
 
 	// A package that must change a file another package owns is a blocker.
-	h.fakePi(gatePasses(map[string]string{"scope": `{"packages":[{"id":"api","will_change":["internal/store.go"],"claims":[]}]}`}))
+	h.fakePi(gatePasses(map[string]string{"package-api": `{"id":"api","will_change":["internal/store.go"],"claims":[]}`}))
 	if code, out := h.run("gate", "spec.md"); code != 1 || !strings.Contains(out, "blockers: 1 verified") {
 		t.Fatalf("ownership conflict passed: %d %s", code, out)
 	}
@@ -727,10 +774,10 @@ func TestGateQuestionsScopeAndFailures(t *testing.T) {
 		t.Fatal("plan accepted an unverified gate")
 	}
 
-	// With pi limited no model pass runs at all.
+	// With only a pi choice and pi limited, no model pass runs.
 	dir := h.fakePi(gatePasses(nil))
 	h.must("health", "set", "pi", "limited")
-	code, out = h.run("gate", "spec.md")
+	code, out = h.run("gate", "spec.md", "--runner", "pi:"+gateModelDef)
 	if code != 1 || !strings.Contains(out, "gate: unverified") {
 		t.Fatalf("gate with pi limited: %d %s", code, out)
 	}
@@ -1084,7 +1131,7 @@ func TestAllowedModels(t *testing.T) {
 	// So the gate model.
 	t.Setenv("ORCH_GATE_MODEL", "weird/model")
 	h.commitSpec(threePkgSpec())
-	if code, out := h.run("gate", "spec.md"); code != 1 || !strings.Contains(out, "the gate model") {
+	if code, out := h.run("gate", "spec.md"); code != 1 || !strings.Contains(out, "gate: unverified") || !strings.Contains(out, "not on the allowed list") {
 		t.Fatalf("gate ran a disallowed model: %d %s", code, out)
 	}
 
@@ -1213,7 +1260,8 @@ func TestHaikuComesInWhenPiIsDown(t *testing.T) {
 	h.must("health", "set", "pi", "limited")
 	wantContains(t, h.must("models"), "haiku (only while pi is limited: allowed now)")
 	wantContains(t, h.must("dispatch"), "now: claude haiku")
-	wantContains(t, h.must("spawn", "a", "--auto"), "skipped pi flash: pi is limited", "would use: claude haiku (effort low)")
+	wantContains(t, h.must("spawn", "a", "--auto"), "triage is off", "pi:openrouter", "pass --tier settled|standard|planning")
+	wantContains(t, h.must("spawn", "a", "--auto", "--tier", "settled"), "skipped pi flash: pi is limited", "would use: claude haiku (effort low)")
 	h.must("new", "y", "--kind", "ship", "--harness", "claude", "--model", "haiku", "--effort", "low")
 	// And it goes away again when pi recovers.
 	h.must("health", "set", "pi", "ok")
@@ -1240,7 +1288,7 @@ func TestSpawnAutoNeedsATierRule(t *testing.T) {
 		t.Fatalf("bad tier accepted: %d %s", code, out)
 	}
 	os.WriteFile(os.Getenv("ORCH_CONFIG"), []byte("triage_mode = \"off\"\n"), 0o644)
-	if code, out := h.run("spawn", "a", "--auto"); code != 1 || !strings.Contains(out, "triage_mode is off") {
+	if code, out := h.run("spawn", "a", "--auto"); code != 0 || !strings.Contains(out, "triage is off (triage_mode off, pi:openrouter)") {
 		t.Fatalf("auto with triage off: %d %s", code, out)
 	}
 }
@@ -2401,7 +2449,11 @@ const planHeader = "---\nharness: claude\nmodel: sonnet\neffort: medium\nbase: m
 const planTail = "\n## Open questions\nNone.\n"
 
 func planPkg(id, keys, extra string) string {
-	return "### " + id + ": Package " + id + "\n" + keys + "\n\nBuild " + id + ".\n\n#### Acceptance\nTests for " + id + " pass." + extra + "\n\n"
+	builds := ""
+	if strings.Contains(keys, "kind: ship") {
+		builds = "#### Builds\n- Code that builds " + id + ".\n\n"
+	}
+	return "### " + id + ": Package " + id + "\n" + keys + "\n\nBuild " + id + ".\n\n" + builds + "#### Acceptance\nTests for " + id + " pass." + extra + "\n\n"
 }
 
 func (h *harness) git(args ...string) {
@@ -2584,12 +2636,114 @@ use = [{ harness = "claude", model = "sonnet" }, { harness = "pi", model = "anth
 	if code != 1 {
 		t.Fatalf("parked spawn should exit 1: %d", code)
 	}
-	wantContains(t, out, "skipped pi anthropic/claude-sonnet-5-5: pi-anthropic is limited", "degraded option: pi flash")
-	if code, out = h.run("new", "c", "--kind", "ship", "--harness", "pi", "--model", "anthropic/claude-sonnet-5-5", "--effort", "high"); code != 1 || !strings.Contains(out, "pi-anthropic is limited") {
+	wantContains(t, out, "skipped pi anthropic/claude-sonnet-5-5: pi:anthropic is limited", "degraded option: pi flash")
+	if code, out = h.run("new", "c", "--kind", "ship", "--harness", "pi", "--model", "anthropic/claude-sonnet-5-5", "--effort", "high"); code != 1 || !strings.Contains(out, "pi:anthropic is limited") {
 		t.Fatalf("anthropic lane used while limited: %d %s", code, out)
 	}
-	// OpenRouter being down does not block the Anthropic lane.
+	// OpenRouter being down does not block direct Anthropic; the pi parent does.
 	h.must("health", "set", "pi-anthropic", "ok")
-	h.must("health", "set", "pi", "limited")
+	h.must("health", "set", "pi:openrouter", "limited")
 	h.must("new", "d", "--kind", "ship", "--harness", "pi", "--model", "anthropic/claude-sonnet-5-5", "--effort", "high")
+	h.must("health", "set", "pi", "limited")
+	if code, out := h.run("new", "e", "--kind", "ship", "--harness", "pi", "--model", "anthropic/claude-sonnet-5-5", "--effort", "high"); code != 1 || !strings.Contains(out, "pi is limited") {
+		t.Fatalf("pi parent was ignored: %d %s", code, out)
+	}
+}
+
+func TestAdversaryScopeNamesOnlyRealSpecFiles(t *testing.T) {
+	repo := t.TempDir()
+	if err := os.WriteFile(filepath.Join(repo, "a.go"), []byte("package a\n\nfunc A() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	src := "see a.go:3 and a.go:1, missing.go:9, https://example.com/x.go:2"
+	files := specFiles(repo, src)
+	if !slices.Equal(files, []string{"a.go"}) {
+		t.Fatalf("specFiles = %v, want [a.go]", files)
+	}
+	if got := adversaryScope(files); !strings.Contains(got, "a.go") || !strings.Contains(got, "empty findings list") {
+		t.Fatalf("scope clause = %q", got)
+	}
+	if adversaryScope(nil) != "" {
+		t.Fatal("no files should add no scope clause")
+	}
+}
+
+func TestAcceptanceCommandSkipsProse(t *testing.T) {
+	for span, want := range map[string]string{
+		"scripts/agent/check test ./internal/x/...": "scripts/agent/check",
+		"go test ./...":            "go",
+		"./run.sh":                 "./run.sh",
+		"models.go":                "",
+		"crm:invoices.refund":      "",
+		"Retry-After":              "",
+		"SANDBOX_STRIPE_*":         "",
+		"safehttp":                 "",
+		"ON CONFLICT DO NOTHING":   "",
+		"models.go owns the table": "",
+	} {
+		if got, ok := acceptanceCommand(span); got != want || ok != (want != "") {
+			t.Errorf("acceptanceCommand(%q) = %q, %v; want %q", span, got, ok, want)
+		}
+	}
+}
+
+// A file renamed into the owned paths must still report the path it left, or
+// a move from outside owns would pass the scope check.
+func TestVerifyFlagsRenameFromOutsideOwns(t *testing.T) {
+	h := setup(t)
+	os.MkdirAll(filepath.Join(h.repo, "outside"), 0o755)
+	os.WriteFile(filepath.Join(h.repo, "outside", "f.go"), []byte("package x\n\nfunc F() {}\n"), 0o644)
+	h.git("add", "-A")
+	h.git("commit", "-q", "-m", "add outside/f.go")
+	os.MkdirAll(filepath.Join(h.repo, ".agents"), 0o755)
+	os.WriteFile(filepath.Join(h.repo, ".agents", "orchestrate.toml"), []byte("check = \"true\"\n"), 0o644)
+
+	h.task("t1")
+	d := h.dir("t1")
+	path := filepath.Join(d, "task.md")
+	b, _ := os.ReadFile(path)
+	os.WriteFile(path, bytes.Replace(b, []byte("\ndepends_on:"), []byte("\nowns: owned/\ndepends_on:"), 1), 0o644)
+	wt := filepath.Join(filepath.Dir(d), "worktrees", "t1")
+	h.gitIn(h.repo, "worktree", "add", "-q", "-b", "orch/t1", wt, "main")
+	os.MkdirAll(filepath.Join(wt, "owned"), 0o755)
+	h.gitIn(wt, "mv", "outside/f.go", "owned/f.go")
+
+	files, err := changedFiles(wt, "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sort.Strings(files)
+	if strings.Join(files, ",") != "outside/f.go,owned/f.go" {
+		t.Fatalf("changedFiles = %v; a rename must list both paths", files)
+	}
+	if n := changedLines(wt, "main"); n != 6 {
+		t.Fatalf("changedLines = %d; a rename counts as delete plus add (3 + 3)", n)
+	}
+	if code, out := h.run("verify", "t1"); code != 1 || !strings.Contains(out, "outside_owns[1]:") || !strings.Contains(out, "outside/f.go") {
+		t.Fatalf("rename from outside owns passed: %d %s", code, out)
+	}
+}
+
+// orch ask lists only the questions of leads this orchestrator watches.
+func TestAskListsOnlyMyLeads(t *testing.T) {
+	h := setup(t)
+	h.task("a1")
+	h.must("spawn", "a1")
+	h.must("report", "--dir", h.dir("a1"), "--key", "mine", "needs-decision", "Question from mine?")
+	t.Setenv("HERDR_PANE_ID", "w2:p0")
+	h.task("b1")
+	h.must("spawn", "b1")
+	h.must("report", "--dir", h.dir("b1"), "--key", "theirs", "needs-decision", "Question from theirs?")
+
+	h.must("ask")
+	page := h.askPage()
+	if !strings.Contains(page, "Question from theirs?") || strings.Contains(page, "Question from mine?") {
+		t.Fatalf("w2:p0 page should hold only its own lead's question:\n%s", page)
+	}
+	t.Setenv("HERDR_PANE_ID", "w1:p0")
+	h.must("ask")
+	page = h.askPage()
+	if !strings.Contains(page, "Question from mine?") || strings.Contains(page, "Question from theirs?") {
+		t.Fatalf("w1:p0 page should hold only its own lead's question:\n%s", page)
+	}
 }

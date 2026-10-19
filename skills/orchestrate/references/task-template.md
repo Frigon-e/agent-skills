@@ -20,7 +20,7 @@ Out: {{what it must not touch, and which other task owns it if any}}
 
 # Pointers
 
-{{Where to start reading, one per line: `path/file.ext:line` - why it matters; docs, ADRs, issues, earlier task reports. Pointers, not pasted content.}}
+{{Where to start reading, one per line: `path/file.ext:line` - why it matters; docs, ADRs, issues, earlier task reports. Pointers, not pasted content. To find more, search with `orch ctx` (find, sym, text, batch) before reading files.}}
 
 # Spec
 

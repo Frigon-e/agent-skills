@@ -15,16 +15,74 @@ import (
 // reports a subscription limit; the watcher only hints at it.
 var harnesses = []string{"claude", "pi"}
 
-// A lane is what runs out together. Pi reaches Anthropic through its own
-// credits, so "pi-anthropic" can be usable while the Claude subscription is
-// limited, and OpenRouter can be limited while Anthropic credits remain.
-var lanes = []string{"claude", "pi", "pi-anthropic"}
+// Lanes follow connectors. Parent limits cover their child lanes.
+var lanes = []string{"claude", "pi", "pi:openrouter", "pi:openrouter:anthropic", "pi:openai", "pi:anthropic"}
 
 func lane(harness, model string) string {
-	if harness == "pi" && strings.HasPrefix(model, "anthropic/") {
-		return "pi-anthropic"
+	if harness != "pi" {
+		return harness
 	}
-	return harness
+	provider, _, found := strings.Cut(model, "/")
+	if !found || provider == "" {
+		return "pi"
+	}
+	if provider == "openrouter" && strings.Contains(model, "anthropic/") {
+		return "pi:openrouter:anthropic"
+	}
+	return "pi:" + provider
+}
+
+func canonicalLane(name string) string {
+	if name == "pi-anthropic" {
+		return "pi:anthropic"
+	}
+	return name
+}
+
+func validLane(name string) bool {
+	name = canonicalLane(name)
+	if name == "claude" || name == "pi" || name == "pi:openrouter:anthropic" {
+		return true
+	}
+	if !strings.HasPrefix(name, "pi:") {
+		return false
+	}
+	provider := strings.TrimPrefix(name, "pi:")
+	return provider != "" && strings.IndexFunc(provider, func(r rune) bool {
+		return !(r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '-' || r == '_' || r == '.')
+	}) < 0
+}
+
+func limitedBy(cur map[string]healthEntry, name string) (string, healthEntry, bool) {
+	for name = canonicalLane(name); name != ""; {
+		if e, ok := cur[name]; ok {
+			return name, e, true
+		}
+		i := strings.LastIndexByte(name, ':')
+		if i < 0 {
+			break
+		}
+		name = name[:i]
+	}
+	return "", healthEntry{}, false
+}
+
+func healthLanes(cur map[string]healthEntry) []string {
+	out := append([]string{}, lanes...)
+	for name := range cur {
+		if !slices.Contains(out, name) {
+			out = append(out, name)
+		}
+	}
+	slices.Sort(out)
+	return out
+}
+
+func (w limitedAllow) limitedLane() string {
+	if w.Lane != "" {
+		return canonicalLane(w.Lane)
+	}
+	return canonicalLane(w.Harness)
 }
 
 type healthEntry struct {
@@ -55,7 +113,7 @@ func loadHealth(now time.Time) map[string]healthEntry {
 	}
 	for h, e := range all {
 		if e.State == "limited" && (e.Until == 0 || e.Until > now.Unix()) {
-			out[h] = e
+			out[canonicalLane(h)] = e
 		}
 	}
 	return out
@@ -91,18 +149,23 @@ func cmdHealth(a *app, args []string) error {
 	}
 	cur := loadHealth(a.now())
 	if len(pos) == 0 {
-		for _, h := range lanes {
-			if e, ok := cur[h]; ok {
-				fmt.Fprintf(a.out, "%s: %s\n", h, e)
+		for _, h := range healthLanes(cur) {
+			if parent, e, ok := limitedBy(cur, h); ok {
+				note := ""
+				if parent != h {
+					note = " (" + parent + ")"
+				}
+				fmt.Fprintf(a.out, "%s: %s%s\n", h, e, note)
 			} else {
 				fmt.Fprintf(a.out, "%s: ok\n", h)
 			}
 		}
 		return nil
 	}
-	if len(pos) != 3 || pos[0] != "set" || !slices.Contains(lanes, pos[1]) || (pos[2] != "ok" && pos[2] != "limited") {
-		return &exitError{code: 2, msg: "usage: orch health [set <claude|pi|pi-anthropic> ok|limited [--for DURATION] [--reason TEXT]]"}
+	if len(pos) != 3 || pos[0] != "set" || !validLane(pos[1]) || (pos[2] != "ok" && pos[2] != "limited") {
+		return &exitError{code: 2, msg: "usage: orch health [set <claude|pi|pi:provider|pi:openrouter:anthropic|pi-anthropic> ok|limited [--for DURATION] [--reason TEXT]]"}
 	}
+	pos[1] = canonicalLane(pos[1])
 	if pos[2] == "ok" {
 		delete(cur, pos[1])
 	} else {
@@ -143,8 +206,8 @@ func harnessUsable(cfg config, harness, model string, allowDegraded bool, now ti
 	if err := cfg.modelAllowed(harness, model, now); err != nil {
 		return err
 	}
-	if e, ok := loadHealth(now)[lane(harness, model)]; ok {
-		return fail("%s is %s. Pick a usable profile from `orch dispatch`, or if the limit is over run: orch health set %s ok", lane(harness, model), e, lane(harness, model))
+	if parent, e, ok := limitedBy(loadHealth(now), lane(harness, model)); ok {
+		return fail("%s is %s. Pick a usable profile from `orch dispatch`, or if the limit is over run: orch health set %s ok", parent, e, parent)
 	}
 	if !allowDegraded && degradedProfile(cfg, harness, model) {
 		return fail("%s %s is a degraded fallback in your dispatch rules: it is weaker than the primary profile. Ask the user, then pass --degraded; or wait for the primary to recover", harness, model)
@@ -200,10 +263,10 @@ func (c config) modelAllowed(harness, model string, now time.Time) error {
 	limited := loadHealth(now)
 	for _, w := range c.AllowedWhenLimited {
 		if slices.Contains(w.Allow[harness], model) {
-			if _, down := limited[w.Harness]; down {
+			if _, _, down := limitedBy(limited, w.limitedLane()); down {
 				return nil
 			}
-			return c.notAllowed(harness, model, fmt.Sprintf("; %s is allowed only while %s is limited, and it is not", model, w.Harness))
+			return c.notAllowed(harness, model, fmt.Sprintf("; %s is allowed only while %s is limited, and it is not", model, w.limitedLane()))
 		}
 	}
 	return c.notAllowed(harness, model, "")
@@ -238,21 +301,21 @@ func cmdModels(a *app, args []string) error {
 		fmt.Fprintf(a.out, "%s (%s):\n", h, state)
 		for _, m := range s.cfg.AllowedModels[h] {
 			if l := lane(h, m); l != h {
-				if e, ok := limited[l]; ok {
-					fmt.Fprintf(a.out, "  %s (%s %s)\n", m, l, e)
+				if parent, e, ok := limitedBy(limited, l); ok {
+					fmt.Fprintf(a.out, "  %s (%s %s)\n", m, parent, e)
 					continue
 				}
 			}
 			fmt.Fprintf(a.out, "  %s\n", m)
 		}
 		for _, w := range s.cfg.AllowedWhenLimited {
-			_, down := limited[w.Harness]
+			_, _, down := limitedBy(limited, w.limitedLane())
 			for _, m := range w.Allow[h] {
 				state := "not allowed now"
 				if down {
 					state = "allowed now"
 				}
-				fmt.Fprintf(a.out, "  %s (only while %s is limited: %s)\n", m, w.Harness, state)
+				fmt.Fprintf(a.out, "  %s (only while %s is limited: %s)\n", m, w.limitedLane(), state)
 			}
 		}
 	}

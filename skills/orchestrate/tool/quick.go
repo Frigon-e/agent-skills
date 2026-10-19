@@ -96,6 +96,13 @@ func cmdQuick(a *app, args []string) error {
 	if err := quickLimits(s.cfg, request, owns); err != nil {
 		return err
 	}
+	// ownedPath lets a directory own everything under it, so a directory would
+	// slip past the file limit.
+	for _, o := range owns {
+		if out, _ := git(s.repo, "ls-tree", s.cfg.BaseBranch, "--", o); strings.Contains(out, " tree ") {
+			return fail("--owns %q is a directory; a quick job owns plain files, so name the file", o)
+		}
+	}
 	var rule *dispatchRule
 	for i := range s.cfg.Dispatch {
 		if s.cfg.Dispatch[i].Tier == "settled" {
@@ -115,7 +122,7 @@ func cmdQuick(a *app, args []string) error {
 	}
 
 	check := s.cfg.Check
-	path, err := newTask(s, taskOpts{id: id, kind: "ship", harness: c.profile.Harness, model: c.profile.Model, effort: c.effort, owns: owns,
+	path, err := newTask(s, taskOpts{noCtx: true, id: id, kind: "ship", harness: c.profile.Harness, model: c.profile.Model, effort: c.effort, owns: owns,
 		fill: map[string]string{
 			"Intent":     request,
 			"Scope":      "In: " + strings.Join(owns, ", ") + "\nOut: every other file. This is a quick job: it owns only the files above.",
@@ -138,16 +145,26 @@ func cmdQuick(a *app, args []string) error {
 
 	// Triage rates the request the same way it rates a brief. The verdict is
 	// logged under the `quick` tier so the report can say whether it was right.
-	verdict := "triage off"
-	if s.cfg.TriageMode != "off" {
+	verdict := "skipped: decider off"
+	if reason := s.deciderOff(a.now()); reason != "" {
+		if s.cfg.QuickMode == "enforce" {
+			cleanup()
+			return &triageOff{reason: reason, id: id}
+		}
+		a.recordTriageSkip(s, id, reason)
+	} else {
 		rec, terr := a.triageTask(s, id, false)
 		switch {
 		case terr != nil && s.cfg.QuickMode == "enforce":
 			cleanup()
+			if off, ok := terr.(*triageOff); ok {
+				return off
+			}
 			return fail("triage is unavailable (%v), so quick cannot be checked. Retry, or use the full path", terr)
 		case terr != nil:
-			verdict = "triage unavailable: " + terr.Error()
-			fmt.Fprintf(a.out, "warning: %s\n", verdict)
+			verdict = "skipped: decider off"
+			a.recordTriageSkip(s, id, terr.Error())
+			fmt.Fprintf(a.out, "warning: triage unavailable: %v\n", terr)
 		default:
 			ok, why := quickFit(rec.Answers)
 			tier := "quick"
