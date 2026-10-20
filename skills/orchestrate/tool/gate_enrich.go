@@ -690,6 +690,7 @@ func enrichGate(dir, code, src, rel string, sp *spec) (*enrichResult, error) {
 	if err := addReportSection(filepath.Join(dir, "report.md"), res); err != nil {
 		return nil, err
 	}
+	queueQuestionClassifier(dir, code, rel, sp, rec, res, cfg)
 	return res, nil
 }
 
