@@ -22,7 +22,7 @@ func sweepCard(t *testing.T, topic, key, area string, options ...string) {
 	if len(options) > 0 {
 		body += "recommend: " + options[0] + "\naction: Record the owner's chosen fixture path.\n"
 	}
-	body += "---\n## Context\nWe must choose a fixture path; the first option is the baseline recommendation, not an authorized decision.\n"
+	body += "---\n## Context\nWe must choose.\nThe first option is the baseline recommendation, not an authorized decision.\n"
 	if len(options) > 0 {
 		body += "\n## Options\n"
 		for _, o := range options {
@@ -393,7 +393,11 @@ func TestSweepCardRevisionInvalidatesSameKey(t *testing.T) {
 			wantContains(t, h.must("sweep", topic), "q -> a")
 			path := filepath.Join(topic, "questions", "q.md")
 			src := mustRead(t, path)
-			os.WriteFile(path, bytes.ReplaceAll(src, []byte(change.from), []byte(change.to)), 0o644)
+			changed := bytes.ReplaceAll(src, []byte(change.from), []byte(change.to))
+			if bytes.Equal(src, changed) {
+				t.Fatalf("fixture has no mutation anchor %q", change.from)
+			}
+			os.WriteFile(path, changed, 0o644)
 			out := h.must("sweep", topic)
 			wantContains(t, out, "recheck:", "card_rev or code subject changed")
 			if strings.Contains(out, "q -> a") {
