@@ -87,6 +87,7 @@ case "$*" in
 `+match("pay/pay.go", 4, "\\tStartCheckout(ctx int) error")+`
 `+match("pay/pay.go", 7, "func (s *Stripe) StartCheckout(ctx int) error { return nil }")+`
 `+match("pay/pay_test.go", 3, "g.StartCheckout(1)")+`
+{"type":"summary","data":{}}
 EOF
 ;;
 esac

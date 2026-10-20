@@ -22,15 +22,14 @@ Do not run commands that write. No network.
 
 HOW TO LOOK AT CODE. You have no project instructions, so this is the whole guide.
 Your shell runs from the repository root, so paths are repo-relative: never cd.
-Use "orch ctx" for every search. It groups hits by file and enclosing function, hides tests and generated files, and answers several lookups in one call. It is faster and shows more than grep, rg, find, ls, awk or wc: do not use those in the shell, and use the native grep/find/ls tools only for what orch ctx cannot do.
-DEFAULT TO BATCH. You almost always have more than one thing to look up, so send them all in ONE call; a single command is only for when you truly have exactly one question:
-  orch ctx batch -q "find:Code that ..." -q "symbol:Name refs=3" -q "text:pattern glob=dir/**" -q "text:other"   up to 50 lookups; answers come back in order, a place hit twice is printed once. A batch answer is capped at 70000 characters (9000 per lookup), so past about 8 lookups add limit=N to the broad ones or the last answers are dropped
+Use "orch ctx" first for search: hits are grouped by file, tests and generated files are hidden by default, and independent lookups can share a call. If a backend cannot answer, use scoped native search or inspect source; in a ctx-only shell, shell fallbacks are blocked.
+` + ctxResultGuide + `
+  orch ctx batch -q "find:Code that ..." -q "symbol:Name refs=3" -q "text:pattern glob=dir/**"   up to 50 lookups; answers return in order, a repeated place prints once. Normal output budgets are about 70000 characters/batch and 9000/lookup; narrow broad lookups or run a cut lookup alone.
 The lookups (find, sym and text are the batch kinds find, symbol and text):
-  orch ctx find "<one behaviour in plain words>"              where something lives, when you do not know its name. Write it like "Code that lists payment gateways", "Code that saves a payment method for a customer, when a checkout completes" or "Code that verifies a webhook signature, producing a stored receipt" (one behaviour per query, not a list of nouns)
-  orch ctx sym <Name|Type.Method> [--refs N]                  an exact symbol: definition, doc, callers outside tests, implementers
-  orch ctx text '<regex>' [--glob 'dir/**'] [--word] [-F]      exact strings, and the proof that something does not exist (--files-only lists the files)
+  orch ctx find "<one behaviour in plain words>"              ranked candidates when you do not know a name. Write "Code that lists payment gateways" or "Code that verifies a webhook signature, producing a stored receipt" (one behaviour per query, not a list of nouns)
+  orch ctx sym <Name|Type.Method> [--refs N]                  exact/candidate definitions, doc, body preview and available references/implementers
+  orch ctx text '<regex>' [--glob 'dir/**'] [--word] [-F]      pattern matches in the stated scope (--files-only lists files)
 An answer ends with a sources: line and notes (a stale index, files edited in this worktree): read the notes.
-A find hit is a ranked guess. Confirm absence with text, never by one failed search.
 
 HOW TO READ CODE. Use your native read tool with offset and limit. When you need several files or ranges, issue all the reads in one turn. Never use sed, cat, head or tail, and never read a whole large file to find one function: orch ctx sym or text gives its line, then read that range.
 A violation fails the review.`

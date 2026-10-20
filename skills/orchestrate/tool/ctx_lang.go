@@ -707,7 +707,7 @@ func rootFor(code, path, lang string) (projectRoot, bool) {
 	var best projectRoot
 	found := false
 	for _, r := range projectRoots(code) {
-		if r.Dir != "" && !strings.HasPrefix(path, r.Dir) {
+		if r.Dir != "" && !symPathWithin(path, r.Dir) {
 			continue
 		}
 		ok := lang == ""

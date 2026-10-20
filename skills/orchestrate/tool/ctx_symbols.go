@@ -10,12 +10,16 @@ import (
 
 // Symbols looks the Go names up with gopls and the TypeScript ones (those Go
 // did not find) with the TypeScript 7 server, one server for all of them. A
-// missing tool is a note, never an error.
+// missing tool leaves an availability error, never a zero-reference fact.
 func (e *ctxEnv) Symbols(goNames []string, ts []tsJob) (map[string]*symFact, map[tsJob]*symFact) {
 	goFacts := map[string]*symFact{}
 	if len(goNames) > 0 && repoHasLang(e.Code, "go") {
 		if _, err := exec.LookPath(e.Gopls); err != nil {
-			e.note("no Go symbol facts: " + e.Gopls + " was not found")
+			why := "Go language server unavailable: " + e.Gopls + " was not found"
+			e.note(why)
+			for _, n := range goNames {
+				goFacts[n] = &symFact{Symbol: n, Lang: "go", Errors: []string{e.Code + ": " + why}}
+			}
 		} else {
 			e.use("gopls", e.Gopls)
 			// gopls works inside a Go module: one runner per module of the repo.
@@ -24,22 +28,19 @@ func (e *ctxEnv) Symbols(goNames []string, ts []tsJob) (map[string]*symFact, map
 				runners = append(runners, &goplsRunner{bin: e.Gopls, dir: dir, root: e.Code, cacheDir: e.CacheDir})
 			}
 			var mu sync.Mutex
-			e.parallel(len(goNames), func(i int) {
+			symParallel(len(goNames), func(i int) {
 				merged := symFact{Symbol: goNames[i], Lang: "go", Tier: "gopls"}
 				got := false
 				for _, g := range runners {
 					f, err := g.symbolFacts(goNames[i])
 					if err != nil {
+						merged.Errors = append(merged.Errors, g.dir+": workspace/symbol: "+err.Error())
 						continue
 					}
 					got = true
-					for _, d := range f.Defs {
-						if len(merged.Defs) < goplsMaxDefs {
-							merged.Defs = append(merged.Defs, d)
-						}
-					}
+					merged.Defs = append(merged.Defs, f.Defs...)
 				}
-				if got {
+				if got || len(merged.Errors) > 0 {
 					mu.Lock()
 					goFacts[goNames[i]] = &merged
 					mu.Unlock()
@@ -70,6 +71,14 @@ func (e *ctxEnv) Symbols(goNames []string, ts []tsJob) (map[string]*symFact, map
 		tsFacts, note = tsFactsFor(jobs, e.CacheDir, e.Code, roots)
 		if note != "" {
 			e.note(note)
+			if tsFacts == nil {
+				tsFacts = map[tsJob]*symFact{}
+			}
+			for _, j := range jobs {
+				if tsFacts[j] == nil {
+					tsFacts[j] = &symFact{Symbol: j.sym, Lang: "typescript", Errors: []string{j.root + ": " + note}}
+				}
+			}
 		} else if bin := tslsBin(e.Code); bin != "" {
 			e.use("ts server", bin)
 		}
@@ -93,6 +102,39 @@ func (e *ctxEnv) Symbols(goNames []string, ts []tsJob) (map[string]*symFact, map
 	if len(rest) > 0 {
 		e.otherSymbols(rest, goFacts)
 	}
+	// A declaration fallback must retain the backend's availability failures.
+	for n, f := range goFacts {
+		if f.Tier != "declaration scan (rg)" {
+			continue
+		}
+		for j, tf := range tsFacts {
+			if j.sym == n && tf != nil {
+				f.Errors = append(f.Errors, tf.Errors...)
+			}
+		}
+		if len(f.Errors) > 0 {
+			for i := range f.Defs {
+				if f.Defs[i].Func && f.Defs[i].ByName {
+					symDefError(&f.Defs[i], "references", fmt.Errorf("%s", strings.Join(f.Errors, "; ")))
+				}
+			}
+		}
+	}
+	// If no tier found a definition, an empty answer from another language
+	// cannot erase an unavailable backend.
+	for n, gf := range goFacts {
+		if len(gf.Defs) > 0 {
+			continue
+		}
+		for j, tf := range tsFacts {
+			if j.sym != n || tf == nil || len(tf.Defs) > 0 {
+				continue
+			}
+			errs := append(append([]string(nil), gf.Errors...), tf.Errors...)
+			gf.Errors = append([]string(nil), errs...)
+			tf.Errors = append([]string(nil), errs...)
+		}
+	}
 	return goFacts, tsFacts
 }
 
@@ -102,7 +144,7 @@ func (e *ctxEnv) Symbols(goNames []string, ts []tsJob) (map[string]*symFact, map
 func (e *ctxEnv) otherSymbols(names []string, out map[string]*symFact) {
 	decl := map[string]*symFact{}
 	var mu sync.Mutex
-	e.parallel(len(names), func(i int) {
+	symParallel(len(names), func(i int) {
 		if f := e.declFacts(names[i]); f != nil {
 			mu.Lock()
 			decl[names[i]] = f
@@ -116,6 +158,9 @@ func (e *ctxEnv) otherSymbols(names []string, out map[string]*symFact) {
 	for n, f := range decl {
 		if r := refined[n]; r != nil {
 			f = r
+		}
+		if prev := out[n]; prev != nil {
+			f.Errors = append(f.Errors, prev.Errors...)
 		}
 		out[n] = f
 	}
@@ -141,6 +186,14 @@ func (e *ctxEnv) Sym(name string) symFact {
 			return *f
 		}
 	}
+	if f := g[name]; f != nil {
+		return *f
+	}
+	for _, f := range t {
+		if f != nil {
+			return *f
+		}
+	}
 	return symFact{Symbol: name}
 }
 
@@ -155,6 +208,9 @@ type sheetOpts struct {
 // definition gets a "no symbol named" line.
 func (e *ctxEnv) sheetLines(f symFact, o sheetOpts) []string {
 	if len(f.Defs) == 0 {
+		if len(f.Errors) > 0 {
+			return []string{"- symbol lookup unavailable for `" + f.Symbol + "`: " + strings.Join(f.Errors, "; ")}
+		}
 		return []string{fmt.Sprintf("- no symbol named `%s` found (%s)", f.Symbol, orDefault(f.Lang, "go and typescript"))}
 	}
 	var out []string
@@ -169,7 +225,12 @@ func (e *ctxEnv) sheetLines(f symFact, o sheetOpts) []string {
 				line += "; doc: " + doc
 			}
 		}
-		if df.Func {
+		if df.Match == "candidate" {
+			line += "; candidate (identity not verified)"
+		}
+		if df.Func && (df.RefsUnknown || df.ByName) {
+			line += "; references unavailable as an exact count"
+		} else if df.Func {
 			switch {
 			case df.Total == 0:
 				line += "; no callers outside tests"
@@ -192,13 +253,11 @@ func (e *ctxEnv) sheetLines(f symFact, o sheetOpts) []string {
 }
 
 // goModuleDirs lists the directories of the repo's Go project roots (a go.work
-// parent stands for its modules; at most four); the repo itself when it has none.
+// parent stands for its modules); the repo itself when it has none.
 func (e *ctxEnv) goModuleDirs() []string {
 	var dirs []string
 	for _, r := range rootsOf(e.Code, "go") {
-		if len(dirs) < 4 {
-			dirs = append(dirs, filepath.Join(e.Code, filepath.FromSlash(strings.TrimSuffix(r.Dir, "/"))))
-		}
+		dirs = append(dirs, filepath.Join(e.Code, filepath.FromSlash(strings.TrimSuffix(r.Dir, "/"))))
 	}
 	if len(dirs) == 0 {
 		return []string{e.Code}

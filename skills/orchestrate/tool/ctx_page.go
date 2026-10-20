@@ -39,6 +39,9 @@ func checkPaging(a *app, visited map[string]bool, vals map[string]int) error {
 		if visited[k] && vals[k] < 1 {
 			return ctxErr(a, fmt.Sprintf("--%s must be at least 1 (got %d)", k, vals[k]))
 		}
+		if visited[k] && vals[k] > ctxRgMax {
+			return ctxErr(a, fmt.Sprintf("--%s is capped at %d; narrow the lookup", k, ctxRgMax))
+		}
 	}
 	return nil
 }

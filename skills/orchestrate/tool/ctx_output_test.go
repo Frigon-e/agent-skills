@@ -148,7 +148,7 @@ func TestViewCutSaysWhatWasLeftOutAndTheFlag(t *testing.T) {
 	var b strings.Builder
 	v.write(&b, ctxFmt{}, nil, 0, 400)
 	out := b.String()
-	if !strings.Contains(out, "cut at about 400 characters: ") || !strings.Contains(out, "--full lifts the cap") {
+	if !strings.Contains(out, "cut at about 400 characters: ") || !strings.Contains(out, "--full raises the bounded cap") {
 		t.Errorf("no cut note:\n%s", out)
 	}
 	if shown := count(out, "x\n") + count(out, "xxxx\n") - 0; shown == 0 || count(out, ": xxxxxxxxxxxxxxxxxxxx") >= 100 {
@@ -279,7 +279,7 @@ func TestCtxSymbolOptionsShapeTheAnswer(t *testing.T) {
 	wantContains(t, only, "2 definitions of")
 
 	compact := c.must("ctx", "sym", "StartCheckout", "--compact")
-	wantContains(t, compact, "StartCheckout  method  pay/pay.go:4\n", "used by 8, +1 in tests (--refs N lists them)")
+	wantContains(t, compact, "StartCheckout  method  pay/pay.go:4  candidate (identity not verified)\n", "used by 8, +1 in tests (--refs N lists them)")
 	if strings.Contains(compact, "svc/svc.go") || strings.Contains(compact, "implemented by") {
 		t.Errorf("--compact listed callers:\n%s", compact)
 	}
@@ -309,7 +309,7 @@ func TestCtxBatchDedupesAcrossLookupsAndCrossReferences(t *testing.T) {
 		}
 	}
 	wantContains(t, section(out, "#2 sym", "#3 "), "pay/pay.go also #1: ")
-	wantContains(t, section(out, "#3 find", "#4 "), "pay/pay.go also #1: 4-6")
+	wantContains(t, section(out, "#3 find", "#4 "), "pay/pay.go also #1: 3-5")
 	four := section(out, "#4 text", "")
 	wantContains(t, four, `#4 text "StartCheckout" [again]: 2 of 2 matches`, "pay/pay.go also #1: ")
 	if strings.Contains(four, "  4: ") {

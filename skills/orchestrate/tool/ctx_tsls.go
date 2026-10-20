@@ -232,16 +232,22 @@ func firstSource(root string) string {
 	return found
 }
 
+type lspReply struct {
+	raw json.RawMessage
+	err error
+}
+
 // lspClient is a minimal JSON-RPC client over a child's stdio.
 type lspClient struct {
-	cmd     *exec.Cmd
-	in      io.WriteCloser
-	mu      sync.Mutex
-	nextID  int
-	waits   map[int]chan json.RawMessage
-	writeMu sync.Mutex
-	opened  map[string]bool
-	dead    chan struct{}
+	cmd      *exec.Cmd
+	in       io.WriteCloser
+	mu       sync.Mutex
+	nextID   int
+	waits    map[int]chan lspReply
+	writeMu  sync.Mutex
+	openedMu sync.Mutex
+	opened   map[string]bool
+	dead     chan struct{}
 }
 
 func startLSP(bin string, dir string, args ...string) (*lspClient, error) {
@@ -262,7 +268,7 @@ func startLSP(bin string, dir string, args ...string) (*lspClient, error) {
 	if err := cmd.Start(); err != nil {
 		return nil, err
 	}
-	c := &lspClient{cmd: cmd, in: in, waits: map[int]chan json.RawMessage{}, opened: map[string]bool{}, dead: make(chan struct{})}
+	c := &lspClient{cmd: cmd, in: in, waits: map[int]chan lspReply{}, opened: map[string]bool{}, dead: make(chan struct{})}
 	go c.read(bufio.NewReaderSize(out, 1<<20))
 	return c, nil
 }
@@ -292,7 +298,7 @@ func (c *lspClient) read(r *bufio.Reader) {
 				n, _ = strconv.Atoi(strings.TrimSpace(v))
 			}
 		}
-		if n < 0 {
+		if n < 0 || n > 16<<20 {
 			return
 		}
 		body := make([]byte, n)
@@ -303,13 +309,20 @@ func (c *lspClient) read(r *bufio.Reader) {
 			ID     json.RawMessage `json:"id"`
 			Method string          `json:"method"`
 			Result json.RawMessage `json:"result"`
+			Error  *struct {
+				Code    int    `json:"code"`
+				Message string `json:"message"`
+			} `json:"error"`
 			Params struct {
 				Items []json.RawMessage `json:"items"`
 			} `json:"params"`
 		}
-		if json.Unmarshal(body, &m) != nil || len(m.ID) == 0 {
-			continue // a notification
+		if json.Unmarshal(body, &m) != nil {
+			return
 		}
+		if len(m.ID) == 0 {
+			continue
+		} // a notification
 		if m.Method != "" {
 			// A request from the server must be answered or the server waits for
 			// it: there is nothing to configure (one null per configuration item),
@@ -327,22 +340,32 @@ func (c *lspClient) read(r *bufio.Reader) {
 		delete(c.waits, id)
 		c.mu.Unlock()
 		if ch != nil {
-			ch <- m.Result
+			reply := lspReply{raw: m.Result}
+			if m.Error != nil {
+				reply.err = fmt.Errorf("JSON-RPC error %d: %s", m.Error.Code, m.Error.Message)
+			} else if len(m.Result) == 0 {
+				reply.err = fmt.Errorf("malformed JSON-RPC response: result missing")
+			}
+			ch <- reply
 		}
 	}
 }
 
 func (c *lspClient) call(method string, params any, limit time.Duration) (json.RawMessage, error) {
-	ch := make(chan json.RawMessage, 1)
+	ch := make(chan lspReply, 1)
 	c.mu.Lock()
 	c.nextID++
 	id := c.nextID
 	c.waits[id] = ch
 	c.mu.Unlock()
+	defer func() { c.mu.Lock(); delete(c.waits, id); c.mu.Unlock() }()
 	c.send(map[string]any{"jsonrpc": "2.0", "id": id, "method": method, "params": params})
 	select {
 	case r := <-ch:
-		return r, nil
+		if r.err != nil {
+			return nil, fmt.Errorf("%s: %w", method, r.err)
+		}
+		return r.raw, nil
 	case <-c.dead:
 		return nil, fmt.Errorf("the language server exited")
 	case <-time.After(limit):
@@ -358,6 +381,8 @@ func fileURI(p string) string { return (&url.URL{Scheme: "file", Path: p}).Strin
 
 // open sends didOpen for a source file once.
 func (c *lspClient) open(path string) {
+	c.openedMu.Lock()
+	defer c.openedMu.Unlock()
 	if c.opened[path] {
 		return
 	}
@@ -412,7 +437,14 @@ func tsFacts(c *lspClient, code, name string) (symFact, error) {
 		Kind     int    `json:"kind"`
 		Location lspLoc `json:"location"`
 	}
-	_ = json.Unmarshal(raw, &syms)
+	if err := json.Unmarshal(raw, &syms); err != nil {
+		return f, fmt.Errorf("workspace/symbol: malformed result: %w", err)
+	}
+	for _, s := range syms {
+		if err := validLSPSymbol(s.Name, s.Kind, s.Location); err != nil {
+			return f, fmt.Errorf("workspace/symbol: %w", err)
+		}
+	}
 	relPath := func(uri string) string {
 		u, err := url.Parse(uri)
 		if err != nil {
@@ -430,7 +462,10 @@ func tsFacts(c *lspClient, code, name string) (symFact, error) {
 			continue
 		}
 		file := relPath(s.Location.URI)
-		d := symDef{Where: fmt.Sprintf("%s:%d", file, s.Location.Range.Start.Line+1), Kind: tsKindName[s.Kind]}
+		d := symDef{Where: fmt.Sprintf("%s:%d", file, s.Location.Range.Start.Line+1), Kind: tsKindName[s.Kind], Match: "exact"}
+		if s.Kind == 6 {
+			d.Match = "candidate"
+		}
 		if d.Kind == "" {
 			d.Kind = "Symbol"
 		}
@@ -453,11 +488,13 @@ func tsFacts(c *lspClient, code, name string) (symFact, error) {
 				"position":     map[string]any{"line": line, "character": ch},
 				"context":      map[string]any{"includeDeclaration": false},
 			}, tsRequestLimit)
-			if err != nil {
-				return f, err
-			}
 			var refs []lspLoc
-			_ = json.Unmarshal(rr, &refs)
+			if err == nil {
+				refs, err = decodeLSPLocs(rr, false)
+			}
+			if err != nil {
+				symDefError(&d, "references", err)
+			}
 			for _, r := range refs {
 				p := relPath(r.URI)
 				if isTestPath(p) {
@@ -474,9 +511,7 @@ func tsFacts(c *lspClient, code, name string) (symFact, error) {
 			}
 		}
 		f.Defs = append(f.Defs, d)
-		if len(f.Defs) == tsMaxDefs {
-			break
-		}
+
 	}
 	return f, nil
 }
@@ -488,9 +523,9 @@ func tsFactsFor(order []tsJob, cacheDir, code string, roots map[string]int) (map
 	var missing []tsJob
 	for _, j := range order {
 		sum := sha256.Sum256([]byte(j.root + "\x00" + j.sym))
-		if b, err := os.ReadFile(filepath.Join(cacheDir, fmt.Sprintf("ts-%x.json", sum[:8]))); err == nil {
+		if b, err := os.ReadFile(filepath.Join(cacheDir, fmt.Sprintf("ts-v2-%x.json", sum[:8]))); err == nil {
 			var f symFact
-			if json.Unmarshal(b, &f) == nil {
+			if decodeSymCache(b, &f, j.sym, "typescript") {
 				facts[j] = &f
 				continue
 			}
@@ -615,11 +650,18 @@ func runTSServer(jobs []tsJob, facts map[tsJob]*symFact, cacheDir, code string, 
 	for _, r := range rootList {
 		folders = append(folders, map[string]string{"uri": fileURI(r), "name": filepath.Base(r)})
 	}
-	if _, err := c.call("initialize", map[string]any{
+	raw, err := c.call("initialize", map[string]any{
 		"processId": os.Getpid(), "rootUri": fileURI(rootList[0]), "rootPath": rootList[0], "workspaceFolders": folders,
 		"clientInfo": map[string]any{"name": "orch"}, "capabilities": tsClientCapabilities,
-	}, tsRequestLimit); err != nil {
+	}, tsRequestLimit)
+	if err != nil {
 		return "no TypeScript facts: " + err.Error()
+	}
+	var init struct {
+		Capabilities map[string]json.RawMessage `json:"capabilities"`
+	}
+	if json.Unmarshal(raw, &init) != nil || init.Capabilities == nil {
+		return "no TypeScript facts: initialize: malformed capabilities result"
 	}
 	c.notify("initialized", map[string]any{})
 	for _, r := range rootList {
@@ -628,8 +670,15 @@ func runTSServer(jobs []tsJob, facts map[tsJob]*symFact, cacheDir, code string, 
 		}
 	}
 	note, fails := "", 0
-	ready, deadline := false, time.Now().Add(tsReady)
+	readyRoots := map[string]bool{}
+	deadlines := map[string]time.Time{}
 	for _, j := range jobs {
+		ready := readyRoots[j.root]
+		deadline := deadlines[j.root]
+		if deadline.IsZero() {
+			deadline = time.Now().Add(tsReady)
+			deadlines[j.root] = deadline
+		}
 		if fails >= tsMaxFails {
 			break
 		}
@@ -641,17 +690,20 @@ func runTSServer(jobs []tsJob, facts map[tsJob]*symFact, cacheDir, code string, 
 			f, err = tsFacts(c, code, j.sym)
 		}
 		ready = ready || len(f.Defs) > 0
+		readyRoots[j.root] = ready
 		if err != nil {
 			if fails++; note == "" {
 				note = "TypeScript facts stopped: " + err.Error()
 			}
 			continue
 		}
+		if !ready && len(f.Defs) == 0 {
+			f.Errors = append(f.Errors, j.root+": workspace/symbol: project readiness unconfirmed; empty response is not proof of absence")
+		}
 		facts[j] = &f
-		if b, err := json.Marshal(f); err == nil {
+		if symFactValid(&f, j.sym) {
 			sum := sha256.Sum256([]byte(j.root + "\x00" + j.sym))
-			_ = os.MkdirAll(cacheDir, 0o755)
-			_ = os.WriteFile(filepath.Join(cacheDir, fmt.Sprintf("ts-%x.json", sum[:8])), b, 0o644)
+			ctxCacheWrite(filepath.Join(cacheDir, fmt.Sprintf("ts-v2-%x.json", sum[:8])), f)
 		}
 	}
 	return note

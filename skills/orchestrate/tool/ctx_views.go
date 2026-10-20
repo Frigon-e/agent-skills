@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"path/filepath"
 	"regexp"
@@ -163,11 +164,21 @@ func inName(in string) string {
 
 // usedBy states a definition's use once: callers outside tests, the files they
 // are in and the test references.
-func usedBy(d symDef, listed int, tests string) string {
-	s := fmt.Sprintf("used by %d", d.Total)
+func usedBy(d symDef, _ int, tests string) string {
 	if d.ByName {
-		s += " (by name)"
+		s := fmt.Sprintf("at least %d non-test name matches (by name, not a call graph)", d.Total)
+		if d.GenHidden > 0 {
+			s += fmt.Sprintf(", +%d in generated", d.GenHidden)
+		}
+		if d.RefsUnknown {
+			return s + "; references unavailable (counts unknown)"
+		}
+		return s + "; test reference count unknown"
 	}
+	if d.RefsUnknown {
+		return "references unavailable (counts unknown)"
+	}
+	s := fmt.Sprintf("used by %d", d.Total)
 	if n := distinctFiles(d.Callers); n > 1 {
 		s += fmt.Sprintf(" in %d%s files", n, map[bool]string{true: "+", false: ""}[d.Total > len(d.Callers)])
 	}
@@ -214,7 +225,13 @@ func testsTitle(d symDef, o symOpts) string {
 // place), the doc comment and a body preview sized by kind, one "used by" line
 // with the callers outside tests, the implementers and where it is wired.
 func (e *ctxEnv) symView(f symFact, o symOpts) *ctxView {
-	v := &ctxView{Kind: "sym", Query: f.Symbol, Unit: "definitions", TestsIn: o.Tests, Total: len(f.Defs)}
+	v := &ctxView{Kind: "sym", Query: f.Symbol, Unit: "definitions", TestsIn: o.Tests, Total: len(f.Defs), Errors: append([]string(nil), f.Errors...), SearchedScope: orDefault(o.In, "repository declarations")}
+	defer func() {
+		v.finishTruth()
+		if v.Head != "" && v.Status == "partial" {
+			v.Head += " (partial; counts not established)"
+		}
+	}()
 	if len(f.Defs) == 0 {
 		v.Zero = fmt.Sprintf("no symbol named %s found (declarations searched in every language of the repo; `orch ctx text` finds a name that is not a declaration)", quoteQuery(f.Symbol))
 		return v
@@ -225,12 +242,22 @@ func (e *ctxEnv) symView(f symFact, o symOpts) *ctxView {
 		if o.Kind != "" && !strings.EqualFold(d.Kind, o.Kind) {
 			continue
 		}
-		if o.In != "" && !strings.HasPrefix(path, strings.TrimSuffix(o.In, "/")) {
+		if o.In != "" && !symPathWithin(path, o.In) {
 			continue
+		}
+		v.Errors = append(v.Errors, d.Errors...)
+		if d.Match == "candidate" || d.ByName || d.RefsUnknown {
+			v.Status = "partial"
+			v.CountKind = "unknown"
 		}
 		defs = append(defs, d)
 	}
-	v.Shown = len(defs)
+	v.Total = len(defs)
+	v.Shown = min(len(defs), goplsMaxDefs)
+	if len(defs) > goplsMaxDefs {
+		v.Cut = fmt.Sprintf("showing %d of %d scoped definitions; narrow with --in and --kind", goplsMaxDefs, len(defs))
+		defs = defs[:goplsMaxDefs]
+	}
 	if len(defs) == 0 {
 		v.Zero = fmt.Sprintf("0 of %d definitions match kind=%q in=%q", len(f.Defs), o.Kind, o.In)
 		return v
@@ -288,6 +315,9 @@ func (e *ctxEnv) symView(f symFact, o symOpts) *ctxView {
 			place = fmt.Sprintf("%s:%d-%d", path, start, end)
 		}
 		head := fmt.Sprintf("%s  %s  %s", f.Symbol, kind, place)
+		if d.Match == "candidate" {
+			head += "  candidate (identity not verified)"
+		}
 		if e.isGenerated(path) {
 			head += "  generated" // the real definition, even though the file is generated
 		}
@@ -418,6 +448,16 @@ var ctxKinds = []string{"concept", "symbol", "text", "read"}
 var ctxOptionKeys = []string{"tests", "generated", "max", "limit", "page", "fixed", "word", "ignore_case", "glob", "type", "files_only", "count", "context", "multiline",
 	"only_matching", "per_file", "all", "refs", "impl", "def_kind", "in", "path", "from", "to", "why"}
 
+// These per-kind option definitions drive inline/JSON validation and help.
+var ctxOptionsByKind = map[string]string{
+	"concept": "tests generated max limit page path why",
+	"text":    "tests generated max limit page fixed word ignore_case glob type files_only count context multiline only_matching per_file all path why",
+	"symbol":  "tests generated max limit page refs impl def_kind in context why",
+	"read":    "path from to why",
+}
+
+func lookupOptionKeys(kind string) []string { return strings.Fields(ctxOptionsByKind[canonKind(kind)]) }
+
 func canonKind(k string) string {
 	switch strings.ToLower(strings.TrimSpace(k)) {
 	case "concept", "find":
@@ -439,6 +479,43 @@ func (l *ctxLookup) validate() error {
 		return fmt.Errorf("unknown kind %q; valid kinds: %s", l.Kind, strings.Join(ctxKinds, ", "))
 	}
 	l.Kind = k
+	allowed := map[string]bool{"kind": true, "query": true, "package": true}
+	for _, key := range lookupOptionKeys(k) {
+		allowed[key] = true
+	}
+	// Marshal supplies nonzero options of programmatic plans; present also
+	// retains explicitly supplied false/zero options from inline and JSON plans.
+	b, _ := json.Marshal(l)
+	var supplied map[string]json.RawMessage
+	_ = json.Unmarshal(b, &supplied)
+	for key := range l.present {
+		if supplied == nil {
+			supplied = map[string]json.RawMessage{}
+		}
+		supplied[key] = nil
+	}
+	for key := range supplied {
+		if !allowed[key] {
+			return fmt.Errorf("option %q is not valid for %s; valid options: %s", key, k, strings.Join(lookupOptionKeys(k), ", "))
+		}
+	}
+	for _, key := range []string{"limit", "max", "page"} {
+		if l.present[key] {
+			n := map[string]int{"limit": l.Limit, "max": l.Max, "page": l.Page}[key]
+			if n < 1 {
+				return fmt.Errorf("%s must be at least 1", key)
+			}
+		}
+	}
+	if l.PerFile < 0 || l.From < 0 || l.To < 0 || l.Context != nil && *l.Context < 0 || l.Refs != nil && *l.Refs < 0 {
+		return fmt.Errorf("numeric options cannot be negative")
+	}
+	if l.FilesOnly && l.Count {
+		return fmt.Errorf("files_only and count cannot be combined")
+	}
+	if l.Limit > ctxRgMax || l.Max > ctxRgMax || l.Page > ctxRgMax {
+		return fmt.Errorf("limit, max and page are capped at %d; narrow the lookup", ctxRgMax)
+	}
 	if l.Limit < 0 || l.Max < 0 || l.Page < 0 {
 		return fmt.Errorf("limit, max and page must be at least 1")
 	}
@@ -520,6 +597,7 @@ func parseInlineLookup(s string) (ctxLookup, error) {
 		return l, fmt.Errorf("%q: write kind:query, with kind one of %s", s, strings.Join(ctxKinds, ", "))
 	}
 	l.Kind = kind
+	l.present = map[string]bool{}
 	toks, quoted := inlineTokens(rest)
 	var query []string
 	for i, t := range toks {
@@ -528,6 +606,7 @@ func parseInlineLookup(s string) (ctxLookup, error) {
 			query = append(query, t)
 			continue
 		}
+		l.present[key] = true
 		var err error
 		switch key {
 		case "tests":
@@ -630,14 +709,14 @@ func (l ctxLookup) rgQuery() rgQuery {
 	}
 	return rgQuery{Pattern: strings.TrimSpace(l.Query), Fixed: l.Fixed, Word: l.Word, IgnoreCase: l.IgnoreCase, Multiline: l.Multiline,
 		OnlyMatching: l.OnlyMatching, FilesOnly: l.FilesOnly, Count: l.Count, PerFile: l.PerFile,
-		Globs: l.Glob, Type: l.Type, Path: l.Path, AllFiles: l.All, Generated: gen}
+		Globs: l.Glob, Type: l.Type, Path: l.Path, AllFiles: l.All, Generated: gen, Tests: l.Tests, ViewFilters: true}
 }
 
 // textLookup runs a text lookup and builds its view.
 func (e *ctxEnv) textLookup(l ctxLookup, f ctxFmt) *ctxView {
 	q := l.rgQuery()
 	v := &ctxView{Kind: "text", Query: q.Pattern, Why: l.Why}
-	if q.Path != "" {
+	if q.Path != "" && q.Path != "." {
 		p, ok := repoPath(q.Path)
 		if !ok {
 			v.Err = "path " + q.Path + " is outside the repo"
@@ -646,10 +725,6 @@ func (e *ctxEnv) textLookup(l ctxLookup, f ctxFmt) *ctxView {
 		q.Path = p
 	}
 	res, err := e.Text(q)
-	if err != nil {
-		v.Err = err.Error()
-		return v
-	}
 	ctx := ctxTune.Context
 	if f.Compact {
 		ctx = 0
@@ -659,6 +734,36 @@ func (e *ctxEnv) textLookup(l ctxLookup, f ctxFmt) *ctxView {
 	}
 	v = e.textView(q, l.Tests, res, l.pageSize(0), l.pageNo(), ctx, f)
 	v.Why = l.Why
+	v.SearchedScope = "checkout root " + e.Code
+	if q.Path != "" {
+		v.SearchedScope += "; path " + q.Path
+	}
+	if len(q.Globs) > 0 {
+		v.SearchedScope += "; globs " + strings.Join(q.Globs, ",")
+	}
+	if q.Type != "" {
+		v.SearchedScope += "; type " + q.Type
+	}
+	v.Excluded = []string{"gitignored and hidden files", "tests=" + orDefault(l.Tests, "none"), "generated=" + orDefault(q.Generated, "none")}
+	if !q.AllFiles {
+		v.Excluded = append(v.Excluded, "default lockfile, minified, generated and vendor globs (use --all; gitignore still applies)")
+	}
+	if q.PerFile > 0 {
+		v.Excluded = append(v.Excluded, fmt.Sprintf("at most %d matches per file (--per-file)", q.PerFile))
+	}
+	if err != nil {
+		v.Err = err.Error()
+		v.CountKind = "unknown"
+		if res.Total > 0 {
+			v.Status, v.CountKind = "partial", "lower_bound"
+		} else {
+			v.Status = "failed"
+		}
+	}
+	if res.Limited && v.Shown == 0 {
+		v.Zero = ""
+		v.Head = "requested page is beyond retained excerpts; narrow with --glob/-p"
+	}
 	if len(l.Glob) > 0 {
 		v.Scope = strings.TrimSpace(v.Scope + " glob " + strings.Join(l.Glob, ","))
 		v.setZero("the whole repo")
@@ -702,12 +807,30 @@ func (e *ctxEnv) conceptLookup(l ctxLookup, f ctxFmt) *ctxView {
 	if f.Compact {
 		def = 3
 	}
-	limit, page := l.pageSize(def), l.pageNo()
+	limit, page := min(l.pageSize(def), ctxRgMax), min(l.pageNo(), ctxRgMax)
+	fetch := min(limit*page+ctxFindLookahead, ctxRgMax)
 	// A few ranked hits past the page are fetched to name their files in the footer.
-	hits, err := e.Concept(short(flat(l.Query), 300), l.Path, limit*page+ctxFindLookahead)
-	if err != nil {
-		return &ctxView{Kind: "find", Query: l.Query, Why: l.Why, Err: err.Error()}
+	hits, err := e.Concept(short(flat(l.Query), 300), l.Path, fetch)
+	rawFull := len(hits) >= fetch
+	if err != nil && len(hits) == 0 {
+		return &ctxView{Kind: "find", Query: l.Query, Why: l.Why, Err: err.Error(), Status: "failed", CountKind: "unknown"}
 	}
+	// Filtering before slicing gives pages over visible candidates within the
+	// fetched raw-rank window. The window limitation is explicit below.
+	hidden, hiddenG := 0, 0
+	var visible []codeHit
+	for _, h := range hits {
+		if !passTests(l.Tests, h.Path) {
+			hidden++
+			continue
+		}
+		if !e.passGen(l.Gen, h.Path) {
+			hiddenG++
+			continue
+		}
+		visible = append(visible, h)
+	}
+	hits = visible
 	var ahead []codeHit
 	if len(hits) > limit*page {
 		hits, ahead = hits[:limit*page], hits[limit*page:]
@@ -716,12 +839,29 @@ func (e *ctxEnv) conceptLookup(l ctxLookup, f ctxFmt) *ctxView {
 	lo, hi, past := pageRange(len(hits), limit, page)
 	v := e.conceptViewG(l.Query, l.Path, l.Tests, l.Gen, hits[lo:hi], f)
 	v.Why = l.Why
+	v.Hidden, v.HiddenG = hidden, hiddenG
+	v.SearchedScope = "semantic index candidate window; path=" + orDefault(l.Path, ".")
+	v.CountKind = "unknown"
+	v.Cut = fmt.Sprintf("semantic pagination uses visible candidates within the first %d raw ranks (backend cap %d); filters or stale locations can hide later candidates; narrow with -p/path= or increase limit within the cap; candidates never establish absence", fetch, ctxRgMax)
+	if rawFull {
+		v.Status, v.CountKind = "partial", "lower_bound"
+	}
+	if hidden+hiddenG > 0 {
+		v.Status = "partial"
+	}
+	if err != nil {
+		v.Err, v.Status, v.CountKind = err.Error(), "partial", "lower_bound"
+	}
 	if conceptTip(l.Query, len(hits)) {
 		v.Tip = conceptTipText
 	}
 	switch {
 	case past:
-		v.Zero = pastEnd(len(hits), limit, page, "hits")
+		if rawFull || hidden+hiddenG > 0 {
+			v.Head = fmt.Sprintf("page %d is beyond visible candidates in the fetched raw-rank window; narrow with -p/path=", page)
+		} else {
+			v.Zero = pastEnd(len(hits), limit, page, "hits")
+		}
 	case full && hi-lo == limit:
 		v.Pager = pageFooter(lo, hi, hi+len(ahead), limit, page, true, f.Batch, narrowFind)
 	default:
@@ -729,7 +869,7 @@ func (e *ctxEnv) conceptLookup(l ctxLookup, f ctxFmt) *ctxView {
 	}
 	// The header counts the hits on this page (the view counts merged blocks);
 	// how many exist is the footer's business.
-	v.Shown = max(hi-lo-v.Hidden-v.HiddenG, 0)
+	v.Shown = hi - lo
 	v.Total = v.Shown
 	if v.Pager != "" {
 		var left []string
@@ -740,7 +880,9 @@ func (e *ctxEnv) conceptLookup(l ctxLookup, f ctxFmt) *ctxView {
 		}
 		v.Pager += restNote(left)
 	}
-	v.setZero("the index")
+	if v.Total == 0 && v.Zero == "" && v.Err == "" {
+		v.Zero = "no visible candidates in the searched index window; this does not establish absence"
+	}
 	return v
 }
 
@@ -815,6 +957,7 @@ func (e *ctxEnv) BatchViews(lks []ctxLookup, f ctxFmt) ([]*ctxView, error) {
 			}
 		}
 		views[i].Why = l.Why
+		views[i].finishTruth()
 	})
 	return views, nil
 }

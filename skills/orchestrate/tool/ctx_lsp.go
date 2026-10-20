@@ -128,26 +128,55 @@ func (s *lspSession) refine(e *ctxEnv, l *langDef, f *symFact, base string) *sym
 				Kind     int    `json:"kind"`
 				Location lspLoc `json:"location"`
 			}
-			_ = json.Unmarshal(raw, &syms)
+			if err := json.Unmarshal(raw, &syms); err != nil {
+				f.Errors = append(f.Errors, base+": workspace/symbol: malformed result: "+err.Error())
+			}
 			var ws []symDef
 			for _, x := range syms {
-				if x.Name != base || len(ws) >= goplsMaxDefs {
+				if err := validLSPSymbol(x.Name, x.Kind, x.Location); err != nil {
+					f.Errors = append(f.Errors, base+": workspace/symbol: "+err.Error())
+					continue
+				}
+				if x.Name != base {
 					continue
 				}
 				p := s.locOf(e.Code, x.Location.URI)
+				sourceLang := langOf(p)
+				if len(f.Defs) == 0 {
+					continue
+				}
+				defPath, _ := splitWhere(f.Defs[0].Where)
+				targetRoot, _ := rootFor(e.Code, defPath, l.ID)
+				symbolRoot, _ := rootFor(e.Code, p, l.ID)
+				if sourceLang == nil || sourceLang.ID != l.ID || targetRoot.Dir != symbolRoot.Dir {
+					continue
+				}
 				k := tsKindName[x.Kind]
 				if k == "" {
 					k = "Symbol"
 				}
-				ws = append(ws, symDef{Where: fmt.Sprintf("%s:%d", p, x.Location.Range.Start.Line+1), Kind: k})
+				ws = append(ws, symDef{Where: fmt.Sprintf("%s:%d", p, x.Location.Range.Start.Line+1), Kind: k, Match: "candidate"})
 			}
 			if len(ws) > 0 {
+				// A server may return a bounded workspace-symbol window. Keep scanned
+				// declarations it did not return as candidates instead of hiding them.
+				seen := map[string]bool{}
+				for _, d := range ws {
+					seen[d.Where] = true
+				}
+				for _, d := range defs {
+					if !seen[d.Where] {
+						ws = append(ws, d)
+					}
+				}
 				defs = ws
 			}
+		} else {
+			f.Errors = append(f.Errors, base+": workspace/symbol: "+err.Error())
 		}
 	}
-	out := &symFact{Symbol: f.Symbol, Lang: l.ID}
-	for i, d := range defs {
+	out := &symFact{Symbol: f.Symbol, Lang: l.ID, Errors: append([]string(nil), f.Errors...)}
+	for _, d := range defs {
 		path, ln := splitWhere(d.Where)
 		abs := filepath.Join(e.Code, filepath.FromSlash(path))
 		s.c.open(abs)
@@ -156,13 +185,17 @@ func (s *lspSession) refine(e *ctxEnv, l *langDef, f *symFact, base string) *sym
 			ch = max(strings.Index(ls[ln-1], base), 0)
 		}
 		pos := map[string]any{"textDocument": map[string]any{"uri": fileURI(abs)}, "position": map[string]any{"line": line, "character": ch}}
-		nd := symDef{Where: d.Where, Kind: d.Kind}
-		if d.Kind != "Module" && i == 0 {
+		nd := symDef{Where: d.Where, Kind: d.Kind, Match: d.Match}
+		if d.Kind != "Module" {
 			nd.Func = true
 			rr, err := s.c.call("textDocument/references", withCtx(pos, map[string]any{"includeDeclaration": false}), tsRequestLimit)
+			var refs []lspLoc
 			if err == nil {
-				var refs []lspLoc
-				_ = json.Unmarshal(rr, &refs)
+				refs, err = decodeLSPLocs(rr, false)
+			}
+			if err != nil {
+				symDefError(&nd, "references", err)
+			} else {
 				for _, r := range refs {
 					p := s.locOf(e.Code, r.URI)
 					loc := fmt.Sprintf("%s:%d", p, r.Range.Start.Line+1)
@@ -184,14 +217,14 @@ func (s *lspSession) refine(e *ctxEnv, l *langDef, f *symFact, base string) *sym
 			}
 		}
 		if s.caps.Impl && (d.Kind == "Class" || d.Kind == "Interface" || d.Kind == "Method" || d.Kind == "Type") {
-			if rr, err := s.c.call("textDocument/implementation", pos, tsRequestLimit); err == nil {
-				var locs []lspLoc
-				if json.Unmarshal(rr, &locs) != nil {
-					var one lspLoc
-					if json.Unmarshal(rr, &one) == nil && one.URI != "" {
-						locs = []lspLoc{one}
-					}
-				}
+			rr, err := s.c.call("textDocument/implementation", pos, tsRequestLimit)
+			var locs []lspLoc
+			if err == nil {
+				locs, err = decodeLSPLocs(rr, true)
+			}
+			if err != nil {
+				symDefError(&nd, "implementation", err)
+			} else {
 				for _, r := range locs {
 					p := s.locOf(e.Code, r.URI)
 					if len(nd.Impls) < ctxMaxRefs && !isTestPath(p) {
@@ -258,7 +291,11 @@ func (e *ctxEnv) lspTier(decl map[string]*symFact) map[string]*symFact {
 		var todo []string
 		for _, n := range g.names {
 			if f := e.lspCached(g, n); f != nil {
-				out[n] = f
+				base := out[n]
+				if base == nil {
+					base = decl[n]
+				}
+				out[n] = mergeSymGroup(base, f, e.symGroupFact(decl[n], g))
 				continue
 			}
 			todo = append(todo, n)
@@ -272,14 +309,28 @@ func (e *ctxEnv) lspTier(decl map[string]*symFact) map[string]*symFact {
 		}
 		sess, why := openLSP(e.Code, g.lang, root)
 		if sess == nil {
+			for _, n := range todo {
+				f := e.symGroupFact(decl[n], g)
+				symUnavailable(f, g.root.Dir+" ("+g.lang.ID+")", why)
+				base := out[n]
+				if base == nil {
+					base = decl[n]
+				}
+				out[n] = mergeSymGroup(base, f, e.symGroupFact(decl[n], g))
+			}
 			e.use("sym "+g.lang.ID, "declaration scan (rg), callers by name; "+why+" ("+g.lang.Hint+")")
 			continue
 		}
 		for _, n := range todo {
 			base := n[strings.LastIndex(n, ".")+1:]
-			nf := sess.refine(e, g.lang, decl[n], base)
+			old := e.symGroupFact(decl[n], g)
+			nf := sess.refine(e, g.lang, old, base)
 			mu.Lock()
-			out[n] = nf
+			previous := out[n]
+			if previous == nil {
+				previous = decl[n]
+			}
+			out[n] = mergeSymGroup(previous, nf, old)
 			mu.Unlock()
 			e.lspStore(g, n, nf)
 		}
@@ -291,7 +342,7 @@ func (e *ctxEnv) lspTier(decl map[string]*symFact) map[string]*symFact {
 
 func (e *ctxEnv) lspKey(g *lspGroup, name string) string {
 	sum := sha256.Sum256([]byte(g.lang.ID + "\x00" + g.root.Dir + "\x00" + name))
-	return filepath.Join(e.CacheDir, fmt.Sprintf("lsp-%x.json", sum[:8]))
+	return filepath.Join(e.CacheDir, fmt.Sprintf("lsp-v2-%x.json", sum[:8]))
 }
 
 func (e *ctxEnv) lspCached(g *lspGroup, name string) *symFact {
@@ -300,15 +351,14 @@ func (e *ctxEnv) lspCached(g *lspGroup, name string) *symFact {
 		return nil
 	}
 	var f symFact
-	if json.Unmarshal(b, &f) != nil {
+	if !decodeSymCache(b, &f, name, g.lang.ID) {
 		return nil
 	}
 	return &f
 }
 
 func (e *ctxEnv) lspStore(g *lspGroup, name string, f *symFact) {
-	if b, err := json.Marshal(f); err == nil {
-		_ = os.MkdirAll(e.CacheDir, 0o755)
-		_ = os.WriteFile(e.lspKey(g, name), b, 0o644)
+	if symFactValid(f, name) {
+		ctxCacheWrite(e.lspKey(g, name), f)
 	}
 }

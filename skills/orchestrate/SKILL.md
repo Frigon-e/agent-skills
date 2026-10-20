@@ -246,18 +246,26 @@ locations and bodies shown. `--verdicts` (experimental, off) asks the group pass
 reuse|extend|new|unclear verdict per item and retries the items it skipped.
 
 **Code facts for any repo: `orch ctx`** (`references/context.md`). `orch ctx
-find` (a concept), `sym` (an exact symbol: doc, body preview, callers with their
-enclosing function, implementers), `text` (ripgrep with glob, word, type, context;
-an exact string, or its absence), `batch` (many lookups in one call, a place shown
-once, inline `-q "kind:query key=value"`) and `brief` (ranked files, interfaces
-and look-alikes for a piece of text) answer from jbcontext, gopls, the TypeScript
-server and rg with no run state and a cache keyed by HEAD and the working tree.
-Hits are grouped by file with totals, test files are hidden and counted
-(`--tests include|only`), `--compact` gives the shortest answer, and every answer
-ends with a `sources:` line and any staleness. `orch ctx status` shows the index, the watch and the
-tools, `orch ctx refresh` makes the index current. `orch plan` writes the same
-facts into each brief (`--no-ctx` skips them) and `orch doctor` reports whether
-the layer is ready. Tell leads to search with `orch ctx` before they read files.
+find` (semantic candidates), `sym` (exact or candidate-labelled definitions,
+with docs, previews and available references), `text` (scoped regex/literal
+matches), `batch` (independent lookups in one call, a place shown once, inline
+`-q "kind:query key=value"`) and `brief` (ranked files, interfaces and
+look-alikes) answer from jbcontext, language servers and rg without run state.
+Use one `orch ctx batch` for independent lookups, then native Read/read with
+offset and limit to inspect source. Do not assume ctx is always faster or that
+no hits prove absence. Check `status` (`ok|empty|partial|failed`), `count_kind`
+(`exact|lower_bound|unknown`), scope, exclusions, errors and cuts. Semantic
+candidates never establish absence; a missing server is not zero callers.
+A failed single lookup or all-failed batch exits 1; a partial batch exits 0
+with `status: partial`. Tests are hidden and counted (`--tests include|only`).
+`--full` raises finite display caps, not backend limits; `--all` broadens text
+file globs but still honors gitignore/hidden rules and the tests filter.
+Narrow path/glob scope or use native reads when caps apply. See
+`references/context.md` for limits and recovery. Repo-local servers require
+`ctx_trust = ["/absolute/repo"]` in user config, except the installed-skill repo;
+`ctx_deny` wins and read-only mode never runs them. `orch ctx status` shows the
+index, watch and tools; `orch ctx refresh` updates the index. `orch plan` writes
+facts into briefs (`--no-ctx` skips them); `orch doctor` reports readiness.
 
 What makes a brief work (template: `references/task-template.md`):
 - **Intent** in the user's words. The lead falls back on it when the spec

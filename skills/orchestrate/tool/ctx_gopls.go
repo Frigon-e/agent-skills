@@ -1,10 +1,12 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"fmt"
+	"go/parser"
+	"go/token"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -119,19 +121,23 @@ func goSymbols(q string) []string {
 }
 
 type symDef struct {
-	Where     string // rel:line
-	Kind      string
-	Callers   []string
-	Total     int // call sites outside tests
-	Tests     int
-	TestRefs  []string // test references (up to ctxMaxRefs)
-	Impls     []string
-	Func      bool // references were looked up
-	ByName    bool // callers are word matches by name, not a call graph
-	GenHidden int  // callers left out because they are in generated files
+	Match       string   `json:"match"` // exact or candidate; candidate never proves qualified identity
+	Errors      []string `json:"errors,omitempty"`
+	RefsUnknown bool     `json:"refs_unknown,omitempty"`
+	Where       string   // rel:line
+	Kind        string
+	Callers     []string
+	Total       int // call sites outside tests
+	Tests       int
+	TestRefs    []string // test references (up to ctxMaxRefs)
+	Impls       []string
+	Func        bool // references were looked up
+	ByName      bool // callers are word matches by name, not a call graph
+	GenHidden   int  // callers left out because they are in generated files
 }
 
 type symFact struct {
+	Errors []string `json:"errors,omitempty"`
 	Symbol string
 	Lang   string // a language id: go, typescript, python, ...
 	Tier   string // what answered: "gopls", "typescript server", "<server> (refs/impl), declarations by rg", "declaration scan (rg)"
@@ -166,9 +172,12 @@ func (g *goplsRunner) run(args ...string) (string, error) {
 		return "", fmt.Errorf("gopls skipped after repeated failures")
 	}
 	sum := sha256.Sum256([]byte(g.dir + "\x00" + strings.Join(args, "\x00")))
-	cache := filepath.Join(g.cacheDir, fmt.Sprintf("gopls-%x.txt", sum[:8]))
+	cache := filepath.Join(g.cacheDir, fmt.Sprintf("gopls-v2-%x.json", sum[:8]))
 	if b, err := os.ReadFile(cache); err == nil {
-		return string(b), nil
+		var out string
+		if json.Unmarshal(b, &out) == nil && validGoplsOutput(args[0], out) == nil {
+			return out, nil
+		}
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), goplsLimit)
 	defer cancel()
@@ -178,9 +187,15 @@ func (g *goplsRunner) run(args ...string) (string, error) {
 	}
 	cmd := exec.CommandContext(ctx, bin, args...)
 	cmd.Dir = g.dir
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	out, err := cmd.Output()
+	stderr := &ctxBoundedBuffer{limit: 64 << 10}
+	cmd.Stderr = stderr
+	outBuf := &ctxBoundedBuffer{limit: 16 << 20}
+	cmd.Stdout = outBuf
+	err = cmd.Run()
+	out := outBuf.Bytes()
+	if err == nil && outBuf.cut {
+		return "", fmt.Errorf("gopls %s: response exceeded 16 MiB; narrow the symbol lookup", args[0])
+	}
 	if err != nil {
 		g.mu.Lock()
 		defer g.mu.Unlock()
@@ -192,10 +207,12 @@ func (g *goplsRunner) run(args ...string) (string, error) {
 				g.note = fmt.Sprintf("gopls failed on `%s`: %v: %s", strings.Join(args, " "), err, short(strings.TrimSpace(stderr.String()), 160))
 			}
 		}
-		return "", fmt.Errorf("gopls failed")
+		return "", fmt.Errorf("%s", g.note)
 	}
-	_ = os.MkdirAll(g.cacheDir, 0o755)
-	_ = os.WriteFile(cache, out, 0o644)
+	if err := validGoplsOutput(args[0], string(out)); err != nil {
+		return "", err
+	}
+	ctxCacheWrite(cache, string(out))
 	return string(out), nil
 }
 
@@ -254,34 +271,42 @@ func (g *goplsRunner) symbolFacts(sym string) (symFact, error) {
 		return f, err
 	}
 	for _, line := range strings.Split(out, "\n") {
-		fs := strings.Fields(line)
-		if len(fs) < 3 {
+		pos, qname, kind, ok := parseGoplsSymbol(line)
+		if !ok {
 			continue
 		}
-		pos, qname, kind := fs[0], fs[1], fs[2]
 		last := qname[strings.LastIndex(qname, ".")+1:]
 		if last != name {
 			continue
 		}
 		// A capitalised first part is a type that must be in the qualified name.
-		if typ != "" && typ[0] >= 'A' && typ[0] <= 'Z' && !strings.Contains(qname, typ+".") {
+		if typ != "" && typ[0] >= 'A' && typ[0] <= 'Z' && qname != sym && !strings.HasSuffix(qname, "."+sym) {
 			continue
 		}
 		path, ln, col, ok := parsePos(pos)
 		if !ok {
 			continue
 		}
-		// A lowercase first part is a package: take it to be the directory's name.
-		if typ != "" && typ[0] >= 'a' && typ[0] <= 'z' && filepath.Base(filepath.Dir(path)) != typ {
-			continue
+		match := "exact"
+		if typ == "" && kind == "Method" {
+			match = "candidate"
 		}
-		d := symDef{Where: fmt.Sprintf("%s:%d", g.rel(path), ln), Kind: kind}
+		if typ != "" && typ[0] >= 'a' && typ[0] <= 'z' {
+			pkg, err := parser.ParseFile(token.NewFileSet(), path, nil, parser.PackageClauseOnly)
+			if err != nil || pkg.Name.Name != typ {
+				continue
+			}
+			if kind == "Method" {
+				match = "candidate"
+			}
+		}
+		d := symDef{Where: fmt.Sprintf("%s:%d", g.rel(path), ln), Kind: kind, Match: match}
 		if kind == "Function" || kind == "Method" {
 			d.Func = true
 			at := fmt.Sprintf("%s:%d:%d", path, ln, col)
 			refs, err := g.run("references", at)
 			if err != nil {
-				return f, err
+				symDefError(&d, "references", err)
 			}
 			for _, r := range strings.Split(refs, "\n") {
 				rp, rl, rc, ok := parsePos(strings.TrimSpace(r))
@@ -303,7 +328,7 @@ func (g *goplsRunner) symbolFacts(sym string) (symFact, error) {
 			if kind == "Method" && isInterfaceMethod(path, ln) {
 				impls, err := g.run("implementation", at)
 				if err != nil {
-					return f, err
+					symDefError(&d, "implementation", err)
 				}
 				for _, r := range strings.Split(impls, "\n") {
 					ip, il, _, ok := parsePos(strings.TrimSpace(r))
@@ -314,9 +339,6 @@ func (g *goplsRunner) symbolFacts(sym string) (symFact, error) {
 			}
 		}
 		f.Defs = append(f.Defs, d)
-		if len(f.Defs) == goplsMaxDefs {
-			break
-		}
 	}
 	return f, nil
 }
@@ -337,12 +359,21 @@ func factLines(facts []symFact) []string {
 	var out []string
 	for _, f := range facts {
 		if len(f.Defs) == 0 {
+			if len(f.Errors) > 0 {
+				out = append(out, "- symbol lookup unavailable for `"+f.Symbol+"`: "+strings.Join(f.Errors, "; "))
+				continue
+			}
 			out = append(out, fmt.Sprintf("- no symbol named `%s` found (%s)", f.Symbol, f.Lang))
 			continue
 		}
 		for _, d := range f.Defs {
 			line := fmt.Sprintf("- `%s` (%s %s) is defined at `%s`", f.Symbol, f.Lang, d.Kind, d.Where)
-			if d.Func {
+			if d.Match == "candidate" {
+				line += " (candidate, identity not verified)"
+			}
+			if d.Func && (d.RefsUnknown || d.ByName) {
+				line += "; references unavailable as an exact count"
+			} else if d.Func {
 				if d.Total == 0 {
 					line += "; no callers outside tests"
 				} else {

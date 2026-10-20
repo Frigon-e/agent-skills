@@ -21,18 +21,19 @@ const (
 // the other fields are options of that kind, all optional. Why is a label for
 // the reader and never part of any cache key.
 type ctxLookup struct {
-	Kind    string `json:"kind"`
-	Query   string `json:"query"`
-	Path    string `json:"path,omitempty"`
-	From    int    `json:"from,omitempty"`
-	To      int    `json:"to,omitempty"`
-	Why     string `json:"why,omitempty"`
-	Package string `json:"package,omitempty"`   // the gate's planner names one; ignored here
-	Tests   string `json:"tests,omitempty"`     // none (default), include or only
-	Gen     string `json:"generated,omitempty"` // generated files: none (default), include or only
-	Max     int    `json:"max,omitempty"`       // alias of limit
-	Limit   int    `json:"limit,omitempty"`     // page size
-	Page    int    `json:"page,omitempty"`      // 1-based page of the list
+	present map[string]bool // explicitly supplied options, including false and zero
+	Kind    string          `json:"kind"`
+	Query   string          `json:"query"`
+	Path    string          `json:"path,omitempty"`
+	From    int             `json:"from,omitempty"`
+	To      int             `json:"to,omitempty"`
+	Why     string          `json:"why,omitempty"`
+	Package string          `json:"package,omitempty"`   // the gate's planner names one; ignored here
+	Tests   string          `json:"tests,omitempty"`     // none (default), include or only
+	Gen     string          `json:"generated,omitempty"` // generated files: none (default), include or only
+	Max     int             `json:"max,omitempty"`       // alias of limit
+	Limit   int             `json:"limit,omitempty"`     // page size
+	Page    int             `json:"page,omitempty"`      // 1-based page of the list
 	// text options (ripgrep)
 	Fixed        bool    `json:"fixed,omitempty"`
 	Word         bool    `json:"word,omitempty"`
@@ -51,6 +52,31 @@ type ctxLookup struct {
 	Impl    *bool  `json:"impl,omitempty"` // implementers listed (default true)
 	DefKind string `json:"def_kind,omitempty"`
 	In      string `json:"in,omitempty"`
+}
+
+// Keep custom decoding on the CLI plan type, not ctxLookup: the gate embeds
+// ctxLookup next to package metadata, and a promoted UnmarshalJSON would swallow it.
+type ctxPlanLookup ctxLookup
+
+// UnmarshalJSON tracks explicit false/zero options for per-kind validation.
+func (l *ctxPlanLookup) UnmarshalJSON(b []byte) error {
+	type plain ctxLookup
+	var p plain
+	dec := json.NewDecoder(strings.NewReader(string(b)))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&p); err != nil {
+		return err
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(b, &fields); err != nil {
+		return err
+	}
+	*l = ctxPlanLookup(p)
+	l.present = map[string]bool{}
+	for k := range fields {
+		l.present[k] = true
+	}
+	return nil
 }
 
 // strList decodes either one string or a list of strings.
@@ -121,6 +147,12 @@ func (e *ctxEnv) Batch(lks []ctxLookup, rootOf func(i int) string, capChars int)
 		}
 		return tsProjectRoot(e.Code, lks[i].Query, nil)
 	}
+	// Validate every lookup before starting dependencies. This legacy API has
+	// no error return, so keep valid results and name each invalid lookup.
+	invalid := make([]error, len(lks))
+	for i := range lks {
+		invalid[i] = lks[i].validate()
+	}
 	// Symbols in one batch, so one language server serves them all.
 	goSeen := map[string]bool{}
 	var goNames []string
@@ -128,7 +160,7 @@ func (e *ctxEnv) Batch(lks []ctxLookup, rootOf func(i int) string, capChars int)
 	var tsJobs []tsJob
 	for i, l := range lks {
 		q := strings.TrimSpace(l.Query)
-		if strings.ToLower(strings.TrimSpace(l.Kind)) != "symbol" || !symIdent.MatchString(q) {
+		if invalid[i] != nil || l.Kind != "symbol" || !symIdent.MatchString(q) {
 			continue
 		}
 		if !goSeen[q] {
@@ -153,6 +185,10 @@ func (e *ctxEnv) Batch(lks []ctxLookup, rootOf func(i int) string, capChars int)
 		l.Kind = strings.ToLower(strings.TrimSpace(l.Kind))
 		var res string
 		what := l.Query
+		if invalid[i] != nil {
+			out[i] = ctxResult{Lookup: l, Head: fmt.Sprintf("- [%s] `%s`", l.Kind, short(flat(what), 80)), Output: "error: " + invalid[i].Error()}
+			return
+		}
 		switch l.Kind {
 		case "concept":
 			res = e.lookupConcept(l.Query, l.Path)
@@ -165,7 +201,7 @@ func (e *ctxEnv) Batch(lks []ctxLookup, rootOf func(i int) string, capChars int)
 				}
 			}
 			if f == nil {
-				res = "no result (symbol lookup unavailable or failed)"
+				res = "error: symbol lookup unavailable or failed; references unknown"
 			} else {
 				res = strings.Join(e.sheetLines(*f, sheetOpts{Callers: 6, Impls: true}), "\n")
 			}
@@ -190,7 +226,7 @@ func (e *ctxEnv) lookupConcept(q, pathFilter string) string {
 	q = short(flat(q), 300)
 	hits, err := e.Concept(q, pathFilter, 3)
 	if err != nil {
-		return "no result (" + err.Error() + ")"
+		return "error: " + err.Error()
 	}
 	var b strings.Builder
 	for _, h := range hits {
@@ -200,7 +236,7 @@ func (e *ctxEnv) lookupConcept(q, pathFilter string) string {
 		}
 	}
 	if b.Len() == 0 {
-		return "no hits"
+		return "no semantic candidates in the searched index window; this does not establish absence"
 	}
 	return b.String()
 }
@@ -208,18 +244,18 @@ func (e *ctxEnv) lookupConcept(q, pathFilter string) string {
 func (e *ctxEnv) lookupText(q, path string) string {
 	q = strings.TrimSpace(q)
 	if q == "" || len(q) > 200 {
-		return "no result (empty or too long query)"
+		return "error: empty or too long query"
 	}
 	if path != "" {
 		p, ok := repoPath(path)
 		if !ok {
-			return "no result (path outside the repo)"
+			return "error: path outside the repo"
 		}
 		path = p
 	}
 	res, err := e.Text(rgQuery{Pattern: q, Path: path, AllFiles: true, CaseSensitive: true})
 	if err != nil {
-		return "no result (" + err.Error() + ")"
+		return "error: " + err.Error()
 	}
 	if len(res.Hits) == 0 {
 		return "no matches"
@@ -234,14 +270,14 @@ func (e *ctxEnv) lookupText(q, path string) string {
 func (e *ctxEnv) lookupRead(path string, from, to int) string {
 	p, ok := repoPath(path)
 	if !ok {
-		return "no result (path outside the repo)"
+		return "error: path outside the repo"
 	}
 	if real, err := filepath.EvalSymlinks(filepath.Join(e.Code, p)); err != nil || !strings.HasPrefix(real, evalOr(e.Code)+string(filepath.Separator)) {
-		return "no result (file not found in the repo)"
+		return "error: file not found in the repo"
 	}
 	ls := e.Lines(p)
 	if len(ls) == 0 {
-		return "no result (file not found or empty)"
+		return "error: file not found or empty"
 	}
 	from = max(from, 1)
 	if to < from || to-from+1 > ctxReadLines {
@@ -249,7 +285,7 @@ func (e *ctxEnv) lookupRead(path string, from, to int) string {
 	}
 	to = min(to, len(ls))
 	if from > to {
-		return "no result (range past the end of the file)"
+		return "error: range past the end of the file"
 	}
 	var b strings.Builder
 	for i := from; i <= to; i++ {
