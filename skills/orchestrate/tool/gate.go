@@ -88,6 +88,9 @@ type gateQuestion struct {
 func (q gateQuestion) blocks() bool { return q.Decisive && q.AnsweredBy == "" }
 
 type gateRecord struct {
+	Subject           *gateSubject          `json:"subject,omitempty"`
+	ReviewPolicy      *gateReviewPolicy     `json:"review_policy,omitempty"`
+	SubjectStale      []string              `json:"subject_stale,omitempty"`
 	BenchBuild        benchBuild            `json:"bench_build,omitempty"`
 	BenchInputs       benchInputs           `json:"bench_inputs,omitempty"`
 	BenchConfig       benchConfig           `json:"bench_config,omitempty"`
@@ -99,7 +102,7 @@ type gateRecord struct {
 	CtxTool           string                `json:"ctx_tool"`
 	ContextFiles      string                `json:"context_files"`
 	CtxProfile        string                `json:"ctx_profile,omitempty"` // a named orch ctx tuning, empty for the default
-	CtxShell          string                `json:"ctx_shell,omitempty"`   // "ctx-only" when the pass shell was limited to orch ctx
+	CtxShell          string                `json:"ctx_shell,omitempty"`   // effective shell policy: open or ctx-only
 	TreeChanged       []string              `json:"tree_changed,omitempty"`
 	TreeChangedPasses []string              `json:"tree_changed_passes,omitempty"`
 	TreeCheckError    string                `json:"tree_check_error,omitempty"`
@@ -281,14 +284,11 @@ func specHash(src []byte) string {
 
 func gateDir(root, hash string) string { return filepath.Join(root, "gate", hash) }
 
-// gatePassed reports whether the gate passed for exactly this spec text.
-func gatePassed(root string, src []byte) bool {
-	b, err := os.ReadFile(filepath.Join(gateDir(root, specHash(src)), "gate.json"))
-	if err != nil {
-		return false
-	}
-	var r gateRecord
-	return json.Unmarshal(b, &r) == nil && r.Status == gateStatePass
+// gatePassed reports whether approval is bound to this exact current subject.
+// The short spec hash is a storage locator only, never approval identity.
+func gatePassed(root, code string, src []byte) bool {
+	passed, _ := gateApproval(root, code, src)
+	return passed
 }
 
 var (
@@ -1196,9 +1196,11 @@ func cmdGate(a *app, args []string) error {
 	}
 	rec := &gateRecord{Spec: pos[0], Hash: hash, At: a.now().Unix(), PassErrors: map[string]string{}, PassSeconds: map[string]int{}, PassKept: map[string]string{}, PassTokens: map[string]passTokens{}, Groups: map[string][]string{},
 		Dossier: opts.dossier, Cache: cacheName, SpecRel: rel, CtxTool: onOff(opts.ctxTool), ContextFiles: onOff(opts.contextFiles)}
+	rec.CtxShell = "open"
 	if opts.ctxOnly {
 		rec.CtxShell = "ctx-only"
 	}
+	rec.ReviewPolicy = &gateReviewPolicy{Version: gateReviewPolicyVersion, CtxTool: rec.CtxTool, ContextFiles: rec.ContextFiles, CtxShell: rec.CtxShell, CtxProfile: opts.ctxProfile, Dossier: opts.dossier, Verdicts: opts.verdicts}
 	rec.CtxProfile = opts.ctxProfile
 	rec.BenchBuild = benchBuildNow()
 	v := opts.verdicts
@@ -1217,6 +1219,10 @@ func cmdGate(a *app, args []string) error {
 	if opts.guard != nil {
 		stamp = opts.guard.before
 		rec.BenchInputs.Commit = strings.TrimSpace(stamp.head)
+		rec.Subject, err = gateSubjectFromStamp(code, []byte(src), stamp)
+		if err != nil {
+			guardErr = err
+		}
 	}
 	if e := benchWriteGateSubject(runDir, code, filepath.Join(code, rel), src, a.now(), stamp, guardErr); e != nil {
 		rec.Notes = append(rec.Notes, "subject capture: "+e.Error())
@@ -1324,6 +1330,7 @@ func cmdGate(a *app, args []string) error {
 	if opts.guard != nil {
 		opts.guard.finish(rec)
 	}
+	finishGateSubject(rec, code, filepath.Join(code, rel))
 	blockers, unanswered := 0, 0
 	for _, f := range rec.Findings {
 		if f.Verified && f.Severity == "blocker" {
@@ -1336,7 +1343,7 @@ func cmdGate(a *app, args []string) error {
 		}
 	}
 	switch {
-	case len(rec.TreeChanged) > 0 || rec.TreeCheckError != "":
+	case len(rec.SubjectStale) > 0, len(rec.TreeChanged) > 0 || rec.TreeCheckError != "":
 		rec.Status = "unverified"
 	case experiment:
 		rec.Status = "experiment"
@@ -1977,6 +1984,7 @@ func writeGate(dir string, rec *gateRecord) error {
 		}
 		r.WriteString("\n")
 	}
+	section("Approval reasons", rec.Reasons)
 	section("Deterministic issues", rec.Deterministic)
 	var verified, unverified []string
 	for _, f := range rec.Findings {
