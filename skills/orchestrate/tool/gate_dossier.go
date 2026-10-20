@@ -15,14 +15,15 @@ import (
 // With `--dossier plan` a tool-less planner pass asks for further lookups,
 // which the layer's batch executor runs and which become section 5.
 
-const dossierTitle = "Facts gathered by code (exact; trust these, open files only to check what they do not cover)"
+const dossierTitle = "Evidence dossier: observations, unverified candidates, and unresolved work"
 
 // dossierSentence is added to the task of a group pass that has a dossier.
-const dossierSentence = " Use the facts gathered by code that follow the package text: they were computed by tools, so do not re-derive them. Section 3b lists files you may not edit because other packages own them, or nothing in the spec does: list one in will_change only when this package cannot meet its Builds without editing it, and not when its owner uses this package and wires it in. When existing code outside this package does most of an item's job, prefer extracting the shared piece (into this package's owns, or an existing shared package) to rewriting it, say where it should live, and name the owner if the extraction needs an edit there."
+const dossierSentence = " Use the evidence dossier after the package text. Observations report bounded tool execution, not semantic proof. Candidates require review; unresolved work and omitted bodies need targeted expansion. Section 3b lists files you may not edit because other packages own them, or nothing in the spec does: list one in will_change only when this package cannot meet its Builds without editing it, and not when its owner uses this package and wires it in. When existing code outside this package does most of an item's job, prefer extracting the shared piece (into this package's owns, or an existing shared package) to rewriting it, say where it should live, and name the owner if the extraction needs an edit there."
 
 // dossierSet holds the dossier of each package asked for.
 type dossierSet struct {
 	e        *ctxEnv
+	subject  *gateSubject
 	blocks   map[string]string
 	sp       *spec
 	docs     map[string]*ctxBrief
@@ -59,6 +60,7 @@ func (d *dossierSet) build(ids []string) {
 		d.items[in.ID] = items
 		if len(items) > 0 {
 			d.cands[in.ID] = d.e.reuseCandidates(items, p.owns, p.title)
+			d.docs[in.ID].ReuseItems = d.cands[in.ID]
 			d.docs[in.ID].Reuse = renderChecklist(d.cands[in.ID], nil)
 		}
 		d.docs[in.ID].Foreign = d.foreign(p)
@@ -136,7 +138,14 @@ func (s *dossierSet) write(dir string) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(dir, "checklist.json"), append(b, '\n'), 0o644)
+	if err := os.WriteFile(filepath.Join(dir, "checklist.json"), append(b, '\n'), 0o644); err != nil {
+		return err
+	}
+	b, err = json.MarshalIndent(s.manifest(nil), "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(dir, "dossier-manifest.json"), append(b, '\n'), 0o644)
 }
 
 // writeFiles saves each package's dossier as dir/<package>.md and returns the
@@ -209,7 +218,7 @@ func (s *dossierSet) runLookups(ids []string, lks []lookup) {
 	seen := map[string]bool{}
 	for _, l := range lks {
 		l.Kind = strings.ToLower(strings.TrimSpace(l.Kind))
-		k := fmt.Sprintf("%s\x00%s\x00%s\x00%s\x00%d\x00%d", l.Package, l.Kind, l.Query, l.Path, l.From, l.To)
+		k := l.Package + "\x00" + subjectJSONDigest(l.ctxLookup)
 		if _, ok := per[l.Package]; !ok || seen[k] || len(per[l.Package]) >= ctxPlanMax {
 			continue
 		}
@@ -229,22 +238,151 @@ func (s *dossierSet) runLookups(ids []string, lks []lookup) {
 			batch = append(batch, l.ctxLookup)
 		}
 	}
-	res := s.e.Batch(batch, func(i int) string { return root[items[i].id] }, ctxResultCaps)
+	// Keep structured status until after recording it. The old Batch string
+	// API could not distinguish failed, unknown and completed-empty lookups.
+	views := s.lookupViews(batch, func(i int) string { return root[items[i].id] })
 	for _, id := range ids {
 		d := s.docs[id]
 		if d == nil {
 			continue
 		}
 		d.Planned = []string{}
+		d.PlannedIDs = nil
+		d.plannedShown = map[string][]string{}
+		seenBodies := map[string]bool{}
+		for _, er := range d.Evidence {
+			seenBodies[er.ID] = true
+		}
+		for _, ic := range s.cands[id] {
+			for _, c := range ic.Cands {
+				seenBodies[c.EvidenceID] = true
+			}
+		}
 		for i, it := range items {
 			if it.id == id {
-				d.Planned = append(d.Planned, res[i].String())
+				v := views[i]
+				v.finishTruth()
+				lk := batch[i]
+				var runErr error
+				if v.Err != "" {
+					runErr = fmt.Errorf("%s", v.Err)
+				}
+				l := dossierLookup(orDefault(lk.Query, lk.Path), orDefault(lk.Path, "."), lk.Kind, v.Total, 0, runErr, "")
+				l.ID = "lookup-" + subjectJSONDigest([]any{lk, root[id], v.Status, v.CountKind, v.Total, v.Err})[:20]
+				l.Scope = string(mustDossierJSON(struct {
+					Lookup ctxLookup `json:"lookup"`
+					Root   string    `json:"project_root"`
+				}{lk, root[id]}))
+				l.Status = v.Status
+				l.CountKind = evidenceCountKind(v.CountKind)
+				if v.CountKind == "unknown" {
+					l.Counts.Total = nil
+				}
+				if v.Status == "partial" {
+					l.Completeness = evidencePartial
+				}
+				if l.CountKind != evidenceCountExact {
+					l.Completeness = evidencePartial
+					if l.Status == "empty" || l.Status == "ok" {
+						l.Status = "partial"
+					}
+				}
+				if v.Cut != "" {
+					l.Omissions = append(l.Omissions, v.Cut)
+				}
+				d.Lookups = append(d.Lookups, l)
+				d.PlannedIDs = append(d.PlannedIDs, l.ID)
+				for _, part := range v.Parts {
+					for fi := range part.Files {
+						file := &part.Files[fi]
+						if len(file.Lines) == 0 {
+							continue
+						}
+						start, end := file.Lines[0].N, file.Lines[len(file.Lines)-1].N
+						if start > 0 && end >= start {
+							er := dossierSource(s.e, file.Path, start, end)
+							er.LookupID = l.ID
+							d.Evidence = append(d.Evidence, er)
+							if seenBodies[er.ID] {
+								file.Lines = nil
+								file.Notes = append(file.Notes, "source "+er.ID+" referenced elsewhere or in omissions; expand: "+dossierRead(er.Path, start, end))
+							} else {
+								seenBodies[er.ID] = true
+								d.plannedShown[l.ID] = append(d.plannedShown[l.ID], er.ID)
+							}
+						}
+					}
+				}
+				var out strings.Builder
+				v.write(&out, ctxFmt{SchemaVersion: 2}, nil, 0, 0)
+				what := lk.Query
+				if lk.Kind == "read" {
+					what = fmt.Sprintf("%s:%d-%d", lk.Path, lk.From, lk.To)
+				}
+				d.Planned = append(d.Planned, fmt.Sprintf("- [%s] `%s` - %s\n%s\n%s", lk.Kind, what, lk.Why, lookupObservation(l), out.String()))
 			}
 		}
 		if len(d.Planned) == 0 {
 			d.Planned = append(d.Planned, "(the planner asked for nothing for this package)")
 		}
 	}
+}
+
+// ctxLookup contains only JSON value types. Keep the original selectors, not
+// a shortened prose query, on every expansion route.
+func mustDossierJSON(v any) []byte {
+	b, err := json.Marshal(v)
+	if err != nil {
+		panic(fmt.Errorf("internal dossier selector serialization: %w", err))
+	}
+	return b
+}
+
+func (s *dossierSet) lookupViews(batch []ctxLookup, root func(int) string) []*ctxView {
+	var names []string
+	var jobs []tsJob
+	for i, l := range batch {
+		if l.Kind == "symbol" && l.validate() == nil {
+			names = addUniq(names, l.Query, len(batch))
+			if r := root(i); r != "" && tsPlain.MatchString(l.Query) {
+				jobs = append(jobs, tsJob{r, l.Query})
+			}
+		}
+	}
+	goFacts, tsFacts := s.e.Symbols(names, jobs)
+	views := make([]*ctxView, len(batch))
+	f := ctxFmt{SchemaVersion: 2}
+	s.e.parallel(len(batch), func(i int) {
+		l := batch[i]
+		if err := l.validate(); err != nil {
+			views[i] = &ctxView{Kind: l.Kind, Query: l.Query, Err: err.Error()}
+			views[i].finishTruth()
+			return
+		}
+		switch l.Kind {
+		case "concept":
+			views[i] = s.e.conceptLookup(l, f)
+		case "text":
+			views[i] = s.e.textLookup(l, f)
+		case "read":
+			views[i] = s.e.readLookup(l, f)
+		case "symbol":
+			fact := goFacts[l.Query]
+			if fact == nil || len(fact.Defs) == 0 {
+				if t := tsFacts[tsJob{root(i), l.Query}]; t != nil {
+					fact = t
+				}
+			}
+			if fact == nil {
+				views[i] = &ctxView{Kind: "sym", Query: l.Query, Err: "symbol lookup unavailable or failed"}
+			} else {
+				views[i] = s.e.symView(*fact, l.symOpts(f))
+			}
+		}
+		views[i].Why = l.Why
+		views[i].finishTruth()
+	})
+	return views
 }
 
 func buildTexts(p *specPackage) []string {
@@ -374,4 +512,253 @@ func (d *dossierSet) foreign(pkg *specPackage) string {
 		b.WriteString("- " + label + ": " + strings.Join(ps, ", ") + more + "\n")
 	}
 	return b.String()
+}
+
+// dossierLookup preserves B1 execution and completeness independently. The
+// legacy semantic API has unknown global counts, even after execution completes.
+func dossierLookup(query, scope, unit string, n, limit int, err error, unavailable string) evidenceLookup {
+	zero, one := 0, 1
+	l := evidenceLookup{SchemaVersion: evidenceSchemaVersion, ID: "lookup-" + subjectJSONDigest([]any{query, scope, unit, n, fmt.Sprint(err), unavailable})[:20], Query: query, Scope: orDefault(scope, "."), Unit: unit, Exclusions: []string{"spec input excluded; candidate selection separately excludes tests, generated files and owns"}, CountKind: evidenceCountUnknown, Completeness: evidenceUnknown, ExecutionStatus: lookupNotRequested, Counts: lookupCounts{Requested: &zero}}
+	if unavailable != "" {
+		l.ExecutionStatus = lookupUnavailable
+		l.Counts.Requested = &one
+		l.Errors = []string{unavailable}
+		return l
+	}
+	l.Counts = lookupCounts{Requested: &one, Succeeded: &one, Failed: &zero, Total: &n}
+	l.CountKind = evidenceCountExact
+	l.Completeness = evidenceComplete
+	l.ExecutionStatus = lookupSucceeded
+	l.Status = "ok"
+	if n == 0 {
+		l.Status = "empty"
+	}
+	if limit > 0 && n >= limit {
+		l.CountKind = evidenceCountLowerBound
+		l.Completeness = evidencePartial
+		l.Status = "partial"
+		l.Omissions = []string{"bounded result page; narrow the same scope and retry"}
+	}
+	if unit == "concept" {
+		// The legacy semantic API returns a filtered index window, not an
+		// exhaustive repository count. Preserve A4's unknown completeness.
+		l.Status = "partial"
+		l.CountKind = evidenceCountUnknown
+		l.Completeness = evidencePartial
+		l.Counts.Total = nil
+		l.Omissions = []string{fmt.Sprintf("completed bounded window: %d visible candidate(s); candidates never establish absence; expand lookup kind=concept query=%q path=%q tests=none generated=none", n, query, orDefault(scope, "."))}
+	}
+	if err != nil {
+		l.ExecutionStatus = lookupFailed
+		l.Status = "failed"
+		l.Completeness = evidenceUnknown
+		l.CountKind = evidenceCountUnknown
+		l.Counts.Succeeded = &zero
+		l.Counts.Failed = &one
+		l.Counts.Total = nil
+		l.Errors = []string{err.Error()}
+	}
+	return l
+}
+
+func dossierSymbolLookup(query, scope string, f *symFact) evidenceLookup {
+	if f == nil {
+		return dossierLookup(query, scope, "symbol", 0, 0, nil, "symbol backend returned no execution record")
+	}
+	var err error
+	if len(f.Errors) > 0 {
+		err = fmt.Errorf("%s", strings.Join(f.Errors, "; "))
+	}
+	l := dossierLookup(query, scope, "symbol", len(f.Defs), 0, err, "")
+	l.ID = "lookup-" + subjectJSONDigest([]any{query, scope, "symbol", f})[:20]
+	if err == nil {
+		for _, d := range f.Defs {
+			if d.Match != "exact" || d.RefsUnknown || len(d.Errors) > 0 {
+				l.Status = "partial"
+				l.Completeness = evidencePartial
+				l.CountKind = evidenceCountLowerBound
+				l.Omissions = append(l.Omissions, "candidate identity or references remain unresolved; expand the same scoped symbol lookup")
+			}
+		}
+	}
+	return l
+}
+
+func dossierTextLookup(query, scope string, r rgResult, err error) evidenceLookup {
+	l := dossierLookup(query, scope, "text", r.Total, 0, err, "")
+	l.Scope = string(mustDossierJSON(map[string]any{"path": orDefault(scope, "."), "fixed": true, "case_sensitive": true, "per_file": 3, "all_files": true}))
+	if err == nil && (!r.Complete || r.Limited) {
+		l.Status = "partial"
+		l.Completeness = evidencePartial
+		l.CountKind = evidenceCountLowerBound
+		l.Omissions = []string{fmt.Sprintf("text retention/backend cap; expand lookup kind=text query=%q path=%q with the same case/word/glob selectors", query, orDefault(scope, "."))}
+	}
+	l.ID = "lookup-" + subjectJSONDigest([]any{query, scope, "text", r, fmt.Sprint(err)})[:20]
+	return l
+}
+
+func lookupObservation(l evidenceLookup) string {
+	count := "unknown"
+	if l.Counts.Total != nil {
+		count = fmt.Sprint(*l.Counts.Total)
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "  observation %s: %s status=%s completeness=%s count=%s (%s) query=%q scope=%s exclusions=%s", l.ID, l.ExecutionStatus, l.Status, l.Completeness, count, l.CountKind, l.Query, l.Scope, strings.Join(l.Exclusions, ", "))
+	for _, err := range l.Errors {
+		fmt.Fprintf(&b, "\n    search failure: %s", err)
+	}
+	for _, om := range l.Omissions {
+		fmt.Fprintf(&b, "\n    unresolved: %s", om)
+	}
+	return b.String()
+}
+
+func dossierSource(e *ctxEnv, path string, start, end int) evidenceRecord {
+	ls := e.Lines(path)
+	from := min(len(ls), max(0, start-1))
+	to := min(len(ls), max(from, end))
+	body := strings.Join(ls[from:to], "\n")
+	id := dossierSourceID(path, start, end, body)
+	valid := start >= 1 && end >= start && end <= len(ls)
+	complete := evidenceComplete
+	if !valid {
+		complete = evidenceUnknown
+	}
+	kind := evidenceSourceCode
+	if isTestPath(path) {
+		kind = evidenceSourceTest
+	} else if isDocPath(path) {
+		kind = evidenceSourceDocument
+	}
+	return evidenceRecord{SchemaVersion: evidenceSchemaVersion, ID: id, Completeness: complete, SourceKind: kind, Language: langIDOf(path), Path: path, Range: &evidenceRange{StartLine: start, EndLine: end}, ContentHash: subjectDigest([]byte(body)), LookupID: "lookup-" + id, Selected: &valid, LocatorValid: &valid}
+}
+
+func dossierSourceID(path string, start, end int, body string) string {
+	return "evidence-" + subjectJSONDigest([]any{path, start, end, subjectDigest([]byte(body))})[:20]
+}
+func dossierRead(path string, start, end int) string {
+	return fmt.Sprintf("Read path=%q offset=%d limit=%d", path, max(1, start), max(1, end-start+1))
+}
+
+type dossierOmission struct {
+	EvidenceID string `json:"evidence_id"`
+	Reason     string `json:"reason"`
+	Expansion  string `json:"expansion"`
+}
+type dossierRequirement struct {
+	ItemID      string   `json:"item_id"`
+	Revision    string   `json:"revision"`
+	EvidenceIDs []string `json:"evidence_ids"`
+	LookupIDs   []string `json:"lookup_ids"`
+}
+
+// Required is governed by the existing --verdicts switch, not by retrieval
+// availability. These are reducer inputs/relationships, never decisions.
+type dossierRequiredCheck struct {
+	ID           string   `json:"id"`
+	ItemID       string   `json:"item_id"`
+	ItemRevision string   `json:"item_revision"`
+	Kind         string   `json:"kind"`
+	Required     bool     `json:"required"`
+	LookupIDs    []string `json:"lookup_ids"`
+}
+type dossierManifest struct {
+	RequiredChecks []dossierRequiredCheck `json:"required_checks"`
+	evidencePacket
+	Budget       int                  `json:"budget_bytes"`
+	Requirements []dossierRequirement `json:"requirements"`
+	Omissions    []dossierOmission    `json:"omissions"`
+}
+
+func (s *dossierSet) manifest(subject *gateSubject) *dossierManifest {
+	if subject == nil {
+		subject = s.subject
+	}
+	m := &dossierManifest{evidencePacket: evidencePacket{evidenceEnvelope: evidenceEnvelope{SchemaVersion: evidenceSchemaVersion, Subject: subject, Completeness: evidencePartial}}, Budget: dossierTotal}
+	ids := make([]string, 0, len(s.docs))
+	for id := range s.docs {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	seen, lookups := map[string]int{}, map[string]bool{}
+	for _, id := range ids {
+		d := s.docs[id]
+		_ = s.text(id)
+		for _, l := range d.Lookups {
+			if !lookups[l.ID] {
+				lookups[l.ID] = true
+				m.Lookups = append(m.Lookups, l)
+			}
+		}
+		for _, ic := range s.cands[id] {
+			r := dossierRequirement{ItemID: ic.Item.ID, Revision: ic.Item.Revision}
+			for _, l := range ic.Lookups {
+				r.LookupIDs = append(r.LookupIDs, l.ID)
+				if !lookups[l.ID] {
+					lookups[l.ID] = true
+					m.Lookups = append(m.Lookups, l)
+				}
+			}
+			for _, c := range ic.Cands {
+				r.EvidenceIDs = append(r.EvidenceIDs, c.EvidenceID)
+				if n := seen[c.EvidenceID]; n > 0 {
+					if d.Shown[c.EvidenceID] {
+						yes := true
+						m.Evidence[n-1].Rendered = &yes
+					}
+					continue
+				}
+				er := dossierSource(s.e, c.Path, c.Start, c.End)
+				er.ID = c.EvidenceID
+				er.LookupID = "lookup-" + c.EvidenceID
+				// Source selection is not a claim that a reviewer read the body.
+				var readErr error
+				if !*er.LocatorValid {
+					readErr = fmt.Errorf("source path/range could not be read")
+				}
+				l := dossierLookup(dossierRead(c.Path, c.Start, c.End), c.Path, "source_read", 1, 0, readErr, "")
+				l.ID = er.LookupID
+				if !lookups[l.ID] {
+					lookups[l.ID] = true
+					m.Lookups = append(m.Lookups, l)
+				}
+				shown := d.Shown[c.EvidenceID]
+				er.Rendered = &shown
+				if c.Total > len(c.Lines) || c.Total > reuseShowLines {
+					er.Completeness = evidencePartial
+				}
+				if subject != nil {
+					er.SubjectID = subject.ID
+				}
+				seen[er.ID] = len(m.Evidence) + 1
+				m.Evidence = append(m.Evidence, er)
+			}
+			m.Requirements = append(m.Requirements, r)
+			m.RequiredChecks = append(m.RequiredChecks, dossierRequiredCheck{ID: "reuse:" + ic.Item.ID, ItemID: ic.Item.ID, ItemRevision: ic.Item.Revision, Kind: "reuse", Required: s.verdicts, LookupIDs: append([]string{}, r.LookupIDs...)})
+		}
+		for _, er := range d.Evidence {
+			if n := seen[er.ID]; n > 0 {
+				if d.Shown[er.ID] {
+					yes := true
+					m.Evidence[n-1].Rendered = &yes
+				}
+				continue
+			}
+			seen[er.ID] = len(m.Evidence) + 1
+			if subject != nil {
+				er.SubjectID = subject.ID
+			}
+			shown := d.Shown[er.ID]
+			er.Rendered = &shown
+			l := dossierLookup(dossierRead(er.Path, er.Range.StartLine, er.Range.EndLine), er.Path, "source_read", 1, 0, nil, "")
+			l.ID = er.LookupID
+			if !lookups[l.ID] {
+				lookups[l.ID] = true
+				m.Lookups = append(m.Lookups, l)
+			}
+			m.Evidence = append(m.Evidence, er)
+		}
+		m.Omissions = append(m.Omissions, d.Omissions...)
+	}
+	return m
 }

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -64,7 +65,37 @@ type specHint struct {
 	Text string
 }
 
+// gateQuestionPacket is supplied by the original reviewer, never a formatter.
+// Missing fields stay missing; routing advice does not grant authority.
+type gateQuestionPacket struct {
+	Goal           string             `json:"goal"`
+	KnownFacts     []string           `json:"known_facts"`
+	EvidenceIDs    []string           `json:"evidence_ids"`
+	Unknown        string             `json:"unknown"`
+	Options        []gatePacketOption `json:"options"`
+	Recommendation string             `json:"recommendation"`
+	Rationale      string             `json:"rationale"`
+	Authority      string             `json:"authority"`
+	NextAction     string             `json:"next_action"`
+}
+type gatePacketOption struct {
+	ID   string `json:"id"`
+	Text string `json:"text"`
+	Gain string `json:"gain"`
+	Cost string `json:"cost"`
+}
+type gateQuestionDelivery struct {
+	ID        string             `json:"id"`
+	Package   string             `json:"package"`
+	Packet    gateQuestionPacket `json:"packet"`
+	Readiness string             `json:"readiness"`
+	Missing   []string           `json:"missing,omitempty"`
+	Search    []evidenceLookup   `json:"search"`
+}
+
 type enrichedQuestion struct {
+	Readiness  cardReadiness
+	Search     []evidenceLookup
 	N          int // the question's card number in the gate
 	Record     int // one-based position in gate.json, stable for this gate run
 	Q          gateQuestion
@@ -281,11 +312,12 @@ func dedupeQuestions(items []enrichedQuestion) []enrichedQuestion {
 	type identity struct {
 		pkg, question, answer, archive string
 		decisive                       bool
+		packet                         string
 	}
 	seen := map[identity]int{}
 	var out []enrichedQuestion
 	for _, it := range items {
-		key := identity{it.Q.Package, flat(it.Q.Question), it.Q.AnsweredBy, it.Answer, it.Q.Decisive}
+		key := identity{it.Q.Package, flat(it.Q.Question), it.Q.AnsweredBy, it.Answer, it.Q.Decisive, subjectJSONDigest(it.Q.Packet)}
 		if i, ok := seen[key]; ok {
 			out[i].Merged = append(out[i].Merged, it.Q.Question)
 			out[i].Members = append(out[i].Members, it)
@@ -524,6 +556,7 @@ func enrichGate(dir, code, src, rel string, sp *spec) (*enrichResult, error) {
 	if why := env.jbMissing(); why != "" {
 		for i := range items {
 			items[i].CodeReview = "Code search did not run: " + why
+			items[i].Search = []evidenceLookup{dossierLookup(items[i].Q.Question, ".", "concept", 0, enrichMaxHints, nil, why)}
 		}
 		if env.NoJB {
 			res.Notes = append(res.Notes, why)
@@ -546,9 +579,11 @@ func enrichGate(dir, code, src, rel string, sp *spec) (*enrichResult, error) {
 				mu.Unlock()
 				if stop {
 					it.CodeReview = "Code search skipped after earlier search failures."
+					it.Search = []evidenceLookup{dossierLookup(it.Q.Question, ".", "concept", 0, enrichMaxHints, nil, "skipped after earlier failures")}
 					return
 				}
 				hits, err := env.Concept(short(strings.Join(strings.Fields(it.Q.Question), " "), enrichQueryChars), "", 3)
+				it.Search = []evidenceLookup{dossierLookup(short(flat(it.Q.Question), enrichQueryChars), ".", "concept", len(hits), enrichMaxHints, err, "")}
 				mu.Lock()
 				defer mu.Unlock()
 				if err != nil {
@@ -598,6 +633,9 @@ func enrichGate(dir, code, src, rel string, sp *spec) (*enrichResult, error) {
 			res.CodeHits++
 		}
 	}
+	for i := range items {
+		items[i].Readiness = checkCardReady(enrichedCard(items[i], rel))
+	}
 	res.Items, res.Minor = items, minor
 
 	if err := os.MkdirAll(qdir, 0o755); err != nil {
@@ -622,6 +660,30 @@ func enrichGate(dir, code, src, rel string, sp *spec) (*enrichResult, error) {
 			return nil, err
 		}
 	}
+	// One selected packet, two serializers. No inference or model request.
+	packets := make([]gateQuestionDelivery, 0, len(items))
+	for _, it := range items {
+		p := gateQuestionPacket{Unknown: it.Q.Question}
+		if it.Q.Packet != nil {
+			p = *it.Q.Packet
+			if p.Unknown == "" {
+				p.Unknown = it.Q.Question
+			}
+		}
+		packets = append(packets, gateQuestionDelivery{it.Card, it.Q.Package, p, it.Readiness.Status, it.Readiness.Missing, it.Search})
+	}
+	for _, out := range []struct {
+		name     string
+		audience outputAudience
+	}{{"packets.toon", outputAgent}, {"packets.json", outputHuman}} {
+		var buf bytes.Buffer
+		if err := writeOutput(&buf, out.audience, packets); err != nil {
+			return nil, err
+		}
+		if err := os.WriteFile(filepath.Join(qdir, out.name), buf.Bytes(), 0o644); err != nil {
+			return nil, err
+		}
+	}
 	if err := os.WriteFile(filepath.Join(qdir, "INDEX.md"), []byte(enrichedIndex(res, rel)), 0o644); err != nil {
 		return nil, err
 	}
@@ -637,7 +699,7 @@ func flat(s string) string { return strings.Join(strings.Fields(s), " ") }
 // claim a repo-wide absence that neither review nor enrichment established.
 func gateQuestionCard(q gateQuestion) string {
 	tag, _ := routeQuestion(q.Question, nil)
-	return questionCardText(q, tag, 0)
+	return enrichedCard(enrichedQuestion{Q: q, Tag: tag}, "")
 }
 
 func questionCardText(q gateQuestion, tag string, record int) string {
@@ -645,8 +707,49 @@ func questionCardText(q gateQuestion, tag string, record int) string {
 	if record != 0 {
 		identity = fmt.Sprintf("gate-question: %d\n", record)
 	}
-	return fmt.Sprintf("---\nquestion: %s\nroute: %s\nauthority: %s\naction: %s\n%s---\n## Context\nRaised by the spec gate for package `%s`. The review reported this question as unresolved. Hints do not establish an answer or prove that one is absent.\n",
-		flat(q.Question), tag, tag, questionAction(tag), identity, q.Package)
+	var b strings.Builder
+	fmt.Fprintf(&b, "---\nquestion: %s\nroute: %s\nauthority: %s\naction: %s\n%s", flat(q.Question), tag, tag, questionAction(tag), identity)
+	if p := q.Packet; p != nil && p.Recommendation != "" {
+		fmt.Fprintf(&b, "recommend: %s\n", flat(p.Recommendation))
+	}
+	b.WriteString("---\n## Context\n")
+	fmt.Fprintf(&b, "Raised by the spec gate for package `%s`. The review reported this question as unresolved. Hints do not establish an answer or prove that one is absent.\n", q.Package)
+	if p := q.Packet; p != nil {
+		if p.Goal != "" {
+			fmt.Fprintf(&b, "\nGoal: %s\n", p.Goal)
+		}
+		for _, fact := range p.KnownFacts {
+			fmt.Fprintf(&b, "- Known fact (reviewer): %s\n", fact)
+		}
+		for _, id := range p.EvidenceIDs {
+			fmt.Fprintf(&b, "- Evidence: %s\n", id)
+		}
+		if p.Unknown != "" {
+			fmt.Fprintf(&b, "\nExact unknown: %s\n", p.Unknown)
+		}
+		if p.Authority != "" {
+			fmt.Fprintf(&b, "\nReviewer authority basis (not a delegation): %s\n", p.Authority)
+		}
+		if len(p.Options) > 0 {
+			b.WriteString("\n## Options\n")
+		}
+		for _, o := range p.Options {
+			fmt.Fprintf(&b, "\n### %s: %s\n", o.ID, o.Text)
+			if o.Gain != "" {
+				fmt.Fprintf(&b, "Gain: %s\n", o.Gain)
+			}
+			if o.Cost != "" {
+				fmt.Fprintf(&b, "Cost: %s\n", o.Cost)
+			}
+			if o.ID == p.Recommendation && p.Rationale != "" {
+				fmt.Fprintf(&b, "\nRecommendation rationale: %s\n", p.Rationale)
+			}
+		}
+		if p.NextAction != "" {
+			fmt.Fprintf(&b, "\n## Next\n%s\n", p.NextAction)
+		}
+	}
+	return b.String()
 }
 
 func enrichedCard(it enrichedQuestion, rel string) string {
@@ -689,7 +792,17 @@ func enrichedCard(it enrichedQuestion, rel string) string {
 			fmt.Fprintf(&b, "- `%s:%d-%d`\n\n```\n%s\n```\n", h.Path, h.Start, h.End, strings.Join(h.Snippet, "\n"))
 		}
 	}
-	return b.String()
+	src := b.String()
+	ready := checkCardReady(src)
+	// A review packet also needs the goal, rationale and next action. D2's
+	// structural checker is necessary but cannot infer these missing facts.
+	if ready.Status == "ready" {
+		p := it.Q.Packet
+		if p == nil || !cardContent(p.Goal) || len(p.KnownFacts)+len(p.EvidenceIDs) == 0 || !cardContent(p.Rationale) || !cardContent(p.Authority) || !cardContent(p.NextAction) {
+			ready = cardReadiness{"missing_evidence", []string{"original review packet needs goal, known facts/evidence, recommendation rationale, authority and next action"}}
+		}
+	}
+	return strings.Replace(src, "---\n", "---\nready: "+ready.Status+"\n", 1)
 }
 
 func yesNo(b bool) string {
@@ -719,13 +832,13 @@ func enrichedIndex(res *enrichResult, rel string) string {
 	for _, p := range pkgs {
 		set := byPkg[p]
 		sort.SliceStable(set, func(i, j int) bool { return routeRank(set[i].Tag) < routeRank(set[j].Tag) })
-		fmt.Fprintf(&b, "## %s\n\n| card | tag | question | spec hint | code hits | go facts | action |\n|---|---|---|---|---|---|---|\n", p)
+		fmt.Fprintf(&b, "## %s\n\n| card | tag | question | spec hint | code hits | go facts | action | ready |\n|---|---|---|---|---|---|---|---|\n", p)
 		for _, it := range set {
 			q := short(flat(it.Q.Question), 100)
 			if len(it.Merged) > 0 {
 				q += fmt.Sprintf(" (+%d exact duplicates)", len(it.Merged))
 			}
-			fmt.Fprintf(&b, "| %s | %s | %s | %s | %s | %s | %s |\n", it.Card, it.Tag, cell(q), yesNo(len(it.Spec) > 0), yesNo(len(it.Code) > 0), yesNo(len(it.Facts) > 0), questionAction(it.Tag))
+			fmt.Fprintf(&b, "| %s | %s | %s | %s | %s | %s | %s | %s |\n", it.Card, it.Tag, cell(q), yesNo(len(it.Spec) > 0), yesNo(len(it.Code) > 0), yesNo(len(it.Facts) > 0), questionAction(it.Tag), it.Readiness.Status)
 		}
 		b.WriteString("\n")
 		for _, it := range set {
