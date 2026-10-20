@@ -1,8 +1,11 @@
 # Code facts with `orch ctx`
 
 `orch ctx` answers questions about a repository from tools, with no model and
-no run state. It works in any git repo. Use it before you read files, and read
-files only for what it does not tell you. Never re-read what you already read.
+no run state. It works in any git repo, subject to backend availability and
+trust. Use one `orch ctx batch` for independent lookups, then inspect source
+with native Read/read. Use a single lookup when only one question is ready.
+There is no blanket speed advantage over native tools. Never re-read what you
+already read.
 Agents read files with their native read tool (Pi `read`, Claude `Read`), using
 offset and limit for part of a file. orch ctx is for finding things, not for
 reading files; agents never use sed, cat, head or tail, the ctx read command,
@@ -12,13 +15,18 @@ repository root. When files are unknown, start with `ctx find`: it wraps
 jbcontext, so jbcontext remains the first discovery step.
 `orch ctx` alone shows the live state (index against HEAD, tools ready) and
 the commands; `orch ctx <subcommand> --help` shows flags and examples.
+`orch version`, `orch --version`, `-v` and `-V` print the bare build fingerprint
+without repo/config/backend initialization. Direct Go builds print `devel`.
+The launcher uses Go and `shasum` to check source, embedded-asset and toolchain
+content on each invocation; unchanged content reuses its worktree-scoped binary.
 
 ## Pick the cheapest lookup
 
 Start with the cheapest tool that can answer, and move up only when it cannot:
 
-1. `text` when you know a string, a name, a route, a message: exact, complete,
-   and it says plainly when there is nothing. Narrow it with `--glob`,
+1. `text` when you know a string, a name, a route, a message: regex or literal
+   matches in the reported scope, with status and exclusions. Narrow it with
+   `--glob`,
    `--word`, `--type` before you widen it.
 2. `sym` when you know the name of a function, type or method and want its
    definition, callers and implementers.
@@ -27,11 +35,11 @@ Start with the cheapest tool that can answer, and move up only when it cannot:
 
 | You need | Command | Why this one |
 |---|---|---|
-| An exact string, or that it does not exist | `orch ctx text <pattern> [--glob G] [--word] [--fixed] [--type T] [-l] [-c] [-C n]` | ripgrep: smart-case, skips lockfiles, minified, generated and vendored files; hits grouped by file, each with its enclosing function and 2 lines of context |
-| An exact symbol: where defined, who calls it, what implements it | `orch ctx sym <Name\|pkg.Name\|Type.Method> [--refs N] [--impl=false] [--kind K] [--in path]` | gopls (Go) or the TypeScript server: doc comment, body preview, callers with their enclosing function, implementers, where it is wired |
-| Where a concept lives ("how are refunds issued") | `orch ctx find "<concept>" [-p path] [--limit N]` | Semantic search (jbcontext): each chunk in full, the declarations in it, the size of its package |
+| String matches within a stated scope | `orch ctx text <pattern> [--glob G] [--word] [--fixed] [--type T] [-l] [-c] [-C n]` | ripgrep: smart-case, skips lockfiles, minified, generated and vendored files; hits grouped by file, each with its enclosing function and configurable context (default 6 lines) |
+| Exact or candidate-labelled definitions and available references | `orch ctx sym <Name\|pkg.Name\|Type.Method> [--refs N] [--impl=false] [--kind K] [--in path]` | gopls (Go) or the TypeScript server: doc comment, body preview, callers with their enclosing function, implementers, where it is wired |
+| Candidates for a concept ("how are refunds issued") | `orch ctx find "<concept>" [-p path] [--limit N]` | Semantic search (jbcontext): bounded current-checkout excerpts, declarations and package size; not evidence of absence |
 | Several of the above at once | `orch ctx batch <plan.json\|-> [-q "kind:query key=value"]` | One call, run in parallel, answered in plan order, a place shown once |
-| A starting picture for a piece of work | `orch ctx brief <file\|-> [--owns a,b,c]` | Ranked files, interface sheet, look-alikes outside the owns, names found nowhere |
+| A starting picture for a piece of work | `orch ctx brief <file\|-> [--owns a,b,c]` | Ranked files, interface sheet and look-alikes outside the owns; not an exhaustive inventory |
 | Judging what code does | native `read` / `Read`, with offset and limit | Read the files you located; never use a shell command or ctx read for this |
 
 ## Output format
@@ -56,7 +64,8 @@ sources: rg /opt/homebrew/bin/rg
   declaration that holds the match (read from the file, column-0 declarations;
   shown when it changes). Overlapping and adjacent ranges of a file are one hit.
 - An empty answer is a sentence, not a blank: `text: 0 matches found in the
-  whole repo`. A lookup that ran and found nothing is a result.
+  whole repo`. Negative text results also state `searched_scope` and `excluded`.
+  This is no match within that scope, not proof that behavior is absent.
 - Anything left out is named with the flag that shows it, see Pagination.
 - Test files are hidden by default and counted: `(+18 in tests;
   tests=include|only)`. `--tests only` lists only test files, `--tests include`
@@ -64,27 +73,41 @@ sources: rg /opt/homebrew/bin/rg
   `__tests__`, `testdata`, `fixtures`. Works on `find`, `sym`, `text` and, as
   `tests`, on every lookup of a batch.
 - `--compact` is the shortest answer (counts, signatures, first lines, no
-  context or caller lists); `--full` lifts the caps (line width 300, 12000
-  characters per answer, 1000 matches); `--fields src` tags each file with the
-  tool that found it.
-- Errors are on stdout: `error: ...` then `help: ...` listing the valid
-  subcommands, flags, kinds or values; exit 2 for a usage error, 0 for a
-  partial batch (a lookup that fails is a row with its error).
+  context or caller lists). `--full` raises finite display caps, not backend
+  limits: default 1000 text matches/page, 600 columns and about 48000 characters
+  per single answer or batch lookup, 280000 per batch. `--fields src` tags each
+  file with the tool that found it.
+- Each lookup has `status`: `ok` (usable result), `empty` (completed with no
+  visible results), `partial` (usable data plus errors/incompleteness), or
+  `failed` (no usable result). `count_kind` is `exact` (count completed within
+  the stated scope), `lower_bound` (at least the reported number), or `unknown`
+  (no authoritative total). An exact count need not mean all excerpts fit.
+  Semantic candidates always have unknown counts and never establish absence.
+- Errors are on stdout, structured under `--json`, with recovery hints. Usage
+  errors exit 2. A failed single lookup exits 1; a batch where all lookups fail
+  exits 1. A partial batch exits 0 with aggregate `status: partial` and retains
+  successful results and each lookup's errors. A partial single lookup exits 0.
+  Read status, count kind, notes, errors and cuts, not only the exit code.
 
 ### Pagination
 
 `find`, `text` and `sym` (callers and implementers) take `--limit N` (page size)
 and `--page P` (1-based); in a batch they are the per-lookup keys `limit` and
-`page` (`-q "text:foo limit=6 page=2"`). `--max` is an alias of `--limit`.
-Defaults: find 4, text 5 hits, callers 5 (`--refs N` still sets the callers
-page size), implementers 5. Pages are small on purpose: each hit is shown with
+`page` (`-q "text:foo limit=6 page=2"`). `--max` aliases `--limit` for find/text;
+`max` is also accepted for symbol batch lookups.
+Defaults: find 4, text 5 hits, callers 10 (`--refs N` still sets the callers
+page size), implementers 10. Pages are small on purpose: each hit is shown with
 more code around it, and the footer names what the page left out. `--limit` or `--page` below 1 is a usage error
-(exit 2).
+(exit 2). Explicit `limit`, `max` and `page` values above 2000 are also
+usage errors.
 
 Paging is stateless: page P is items `[(P-1)*N, P*N)` of a list sorted the same
 way every time (text: path then line; callers and implementers: file then line;
-find: jbcontext rank), so a page never depends on an earlier one. jbcontext has
-only a limit, so `find` page P asks it for P*N results and keeps the last N.
+find: jbcontext rank), so a page never depends on an earlier one. Semantic
+pages filter visible candidates before slicing, but retrieval is bounded to a
+2000 raw-rank window. Hidden or rejected candidates can consume that window;
+use a narrower `-p path` or native checkout reads instead of treating a short
+page as an exhaustive search.
 
 Every list with more says where it stands and which files it left out:
 `showing 5-8 of 40; next: --page 3; left out: a.go (9), b.go (7), +4 more files`
@@ -94,9 +117,20 @@ are looked up to name them). Inside a batch the hints use lookup keys:
 `in=/def_kind=/tests=`). Above 50 items narrowing comes first: `showing 1-5 of 80;
 75 more; narrow with --glob/--word/--tests/-p, or --page 2`; after page 3 only
 narrowing is suggested. A page after the end says `page 9 is past the end (40 hits, 8
-pages)`. Totals are exact for text, callers and implementers; `find` says `at
-least N` when the page is full. Callers keep at most 50 per definition, so a page
-past that says so. `--full` lifts the page size (1000 for text, every kept caller for sym).
+pages)`. Check `count_kind` before using a total: failures, candidates and
+unavailable references do not have exact counts. Callers retain bounded lists
+(up to 50 per definition in the existing reference tiers), and symbol display
+shows at most four definitions after path/kind filters. Narrow `--in` and
+`--kind` for ambiguous symbols. `--full` raises page size (1000 for text, every
+kept caller for sym), not the retained backend data.
+
+Text retains at most 2000 visible excerpts while counting independently. A
+completed count can still be exact beyond retention; an interrupted count can
+be lower-bound or unknown. Narrow `--glob`/`-p` (batch `glob`/`path`), or inspect
+the checkout with native Read/read. `--full` does not remove this retention cap.
+Backend safety guards also remain: 16 MiB semantic JSON or LSP frames, 8 MiB
+per rg record and 64 KiB diagnostics. A cut or failed backend requires a scoped
+retry or native inspection, not an inference of absence.
 
 ### Text (`orch ctx text`)
 
@@ -105,7 +139,9 @@ smart-case), `--glob` (repeatable; `!` excludes), `--type/-t`, `-l` files only,
 `-c` counts per file, `-C n` context lines (default 6; `-C 0` none),
 `--multiline/-U`, `--only-matching/-o`, `--per-file N`, `--limit N` hits per
 page (default 5; `--max` is the same), `--page P`, `--all` also lockfiles, generated, minified and vendored
-files. Leading whitespace is trimmed and a line is cut at 300 characters.
+files, but still honors gitignore and hidden-file rules. `--all` does not
+include tests unless `--tests include|only` is also set. Leading whitespace is
+trimmed and a line is cut at 300 characters (600 with `--full`).
 Lines that read the same in several files print once:
 `same line in 5 files: import x (a.ts:1, b.ts:2, c.ts:3, +2 more)`.
 
@@ -116,8 +152,14 @@ orch ctx text polar --glob 'internal/**' --word
 ### Symbols (`orch ctx sym`)
 
 One block per definition: a header with the name, kind and place, the doc
-comment, a body preview sized by kind, and one "used by" line that states the
-counts once. Paths are printed once: callers in the definition's file need none,
+comment, a body preview sized by kind, and reference information. Symbol facts
+distinguish exact identity from candidates. Candidate headings explicitly say
+`candidate (identity not verified)`; the JSON view retains the same heading in
+`parts`. Backend-verified definitions use exact identity; declaration scans,
+ambiguous bare methods and weaker name refinements remain candidates. Missing servers or failed references produce partial/failed results
+with location-qualified errors, not zero callers. By-name matches are observed
+name occurrences, not a call graph or proof of absence. Paths are printed once:
+callers in the definition's file need none,
 callers in other files sit under their path.
 
 ```
@@ -154,7 +196,8 @@ orch ctx sym StartCheckout --refs 3
 
 ### Concepts (`orch ctx find`)
 
-Each chunk is shown in full (up to 80 lines), merged per file, followed by
+Each chunk uses current-checkout code (up to 80 lines, 3 in compact mode),
+merged per file, followed by
 `declares ...` (the declarations in it) and the size of its package.
 
 ```
@@ -170,11 +213,14 @@ An agent plan is JSON, `{"lookups":[{"kind":"concept|symbol|text","query":"...",
 orch ctx batch -q "symbol:StartCheckout refs=3" -q "text:polar tests=none glob=internal/**"
 ```
 
-Options per lookup: `tests`, `max`, `why`; text: `fixed`, `word`,
-`ignore_case`, `glob` (repeatable), `type`, `files_only`, `count`, `context`,
-`multiline`, `only_matching`, `per_file`, `all`, `path`; symbol: `refs`, `impl`,
-`def_kind`, `in`. The script-only read kind is described below. `why` is a
-label echoed in the lookup's header and is not part of any cache key. Quote a
+Options are validated per lookup kind, including explicitly set false/zero
+values. Find: `path`, `tests`, `generated`, `max`, `limit`, `page`, `why`;
+text: `fixed`, `word`, `ignore_case`, `glob` (repeatable), `type`, `files_only`,
+`count`, `context`, `multiline`, `only_matching`, `per_file`, `all`, `path`,
+`tests`, `generated`, `max`, `limit`, `page`, `why`; symbol: `refs`, `impl`,
+`context`, `def_kind`, `in`, `tests`, `generated`, `max`, `limit`, `page`, `why`.
+`orch ctx batch --help` lists the accepted keys. The script-only read kind is
+described below. `why` is a label echoed in the lookup's header and is not part of any cache key. Quote a
 query word that contains `=`. At most 50 lookups.
 
 The batch removes redundancy across lookups:
@@ -186,8 +232,10 @@ The batch removes redundancy across lookups:
 - One `notes[]` block and one `sources:` line per batch.
 - Each answer is held to about 9000 characters and the batch to 70000; what was
   cut is said: `cut at about 9000 characters: 41 more lines (2 more files) not
-  shown; --full lifts the cap`, or `#6 ...: not shown, the batch budget of 70000
-  characters is spent`. Past about 8 lookups, add `limit=N` to the broad ones.
+  shown; --full raises the bounded cap, or narrow the lookup`, or `#6 ...: not
+  shown, the batch budget of 70000 characters is spent`. Add `limit=N` or scope
+  broad lookups; run a cut lookup alone when needed. `--full` raises per-lookup
+  and total budgets to about 48000 and 280000 characters, not unlimited output.
 
 ### How much of a definition `sym` shows
 
@@ -241,7 +289,11 @@ A symbol is answered by the best tier available, and `sources:` names it:
    of a language matches it (`def X`, `class X`, `func X`, `fn X`, ...). Callers
    are word matches outside the definition, printed `(by name)`: a pointer, not
    a call graph. A bare word that no declaration matches is not a symbol.
-3. Plain text (`orch ctx text`).
+3. Plain text (`orch ctx text`), as an explicit scoped fallback. A missing
+   language server does not become a successful empty symbol search: useful
+   declaration/name candidates can survive with partial status and errors;
+   without usable data the symbol lookup fails. Install the external server
+   named in the hint, narrow the lookup, or inspect source with native Read/read.
 
 Python servers are tried in order: Pyrefly, basedpyright, pyright, `ty server`,
 pylsp, then the declaration scan. Override with `ORCH_PYLS` (a command line).
@@ -316,20 +368,27 @@ ignore). jbcontext indexes a git revision (`index --revision`, default HEAD), so
 
 - To understand a function's behaviour, to decide anything, or to check a claim
   that depends on a condition the tools cannot see: read the code.
-- `find` is a guess ranked by similarity, not proof. A concept that `find`
-  does not return may still exist: confirm absence with `text` or `sym`.
-- `text` and `sym` are exact. A name they do not find is absent from the files
-  they searched (see Staleness).
+- `find` returns ranked semantic candidates, never proof of absence. A missing
+  hit can reflect ranking, filtering, a cap or stale/missing index data.
+- A successful empty `text` result means no pattern match in the stated scope
+  and exclusions. Check status and count kind, then broaden scope or inspect
+  source if the claim needs more evidence. Symbols can be candidates; missing
+  servers and reference failures are not evidence of zero callers.
+- No retrieval result alone establishes that a behavior does not exist.
 
 ## Staleness
 
 Every answer ends with a `sources:` line naming what answered: the jbcontext
 index revision against HEAD, the gopls or TypeScript server used, rg. A note
 `jbcontext index is at <sha7>, working tree is at <sha7>[ with uncommitted
-changes]: hits may be stale` means `find` may miss new code; `text` and `sym`
-read the working tree and are not affected. Results are cached per HEAD and per
-uncommitted change under `~/.cache/orchestrate/ctx/`, so a changed tree never
-gets an old answer. `orch ctx status` shows the index, the watch daemon and
+changes]: hits may be stale` means `find` may miss new code. Displayed semantic
+spans are validated or uniquely relocated against the checkout; ambiguous or
+invalid spans are rejected with partial/error status. Text reads the checkout;
+symbol coverage still depends on server readiness and the selected tier.
+Results are cached per HEAD and working-tree fingerprint under
+`~/.cache/orchestrate/ctx/`; incomplete/error results are not cached as
+successful search facts. This is not a guarantee of exhaustive server coverage.
+`orch ctx status` shows the index, the watch daemon and
 the tools; `orch ctx refresh` makes the index current. `orch ctx watch add`
 keeps an overlay for uncommitted changes (the daemon is never started by orch).
 
@@ -428,17 +487,29 @@ explicit `ORCH_TSLS` override because generic `tsc` is usually not an LSP.
 A skipped TypeScript server adds the note `ts server in the repo not run in
 read-only mode`, once per response.
 
-Normal mode permits a repo-local server in any git repository and in every
-linked worktree of it (they share a common Git directory). `ctx_deny` excludes
-a repository and so its worktrees, and wins over `ctx_trust`. `ctx_trust` adds
-paths outside that rule, such as a directory that is not a git repo. TypeScript
-auto-pick looks for the pnpm store in the checkout and in the other worktrees
-of its repository, so a fresh worktree needs no `ORCH_TSLS`. `orch doctor`
+Normal mode implicitly trusts only the repository containing the installed
+skill (`ORCH_SKILL_DIR`). Other git repositories need an explicit user-config
+opt-in:
+
+```toml
+ctx_trust = ["/absolute/repo"]
+```
+
+`ctx_deny` wins over every trust source. Git entries cover linked worktrees by
+the common Git directory. Non-git directory entries match directly, including
+symlink equivalence; trust is not recursive approval for unrelated child
+repositories. Read-only mode never runs repo-local servers, even in a trusted
+or installed-skill repository. In trusted normal mode, TypeScript auto-pick
+looks for the pnpm store in the checkout and other worktrees of its repository,
+so a fresh worktree can use that server without `ORCH_TSLS`. `orch doctor`
 reports `ts server found in the repo, not run (...)` when a server is skipped.
 This does not sandbox an external server or prevent it from running project
 plugins.
 
-## Config (user config, `~/.config/orchestrate/config.toml`)
+## Config (user config)
+
+Path: `$XDG_CONFIG_HOME/orchestrate/config.toml`, default
+`~/.config/orchestrate/config.toml`; `ORCH_CONFIG` overrides it.
 
 - `ctx_index`: `full` (default) builds a missing index (15 minutes at most; a
   one-line notice says so) and refreshes a stale one; `incremental` only
@@ -446,10 +517,10 @@ plugins.
 - `ctx_deny`: repos (paths) that never use jbcontext and never run repo-local
   language servers (their worktrees included). Tasks with `private: true` never
   use jbcontext either.
-- `ctx_trust`: paths outside a git repo that may run repo-local language
-  servers in normal mode, for example `ctx_trust = ["/absolute/dir"]`. Git
-  repos and their worktrees are trusted without it. Read-only mode never
-  permits these servers.
+- `ctx_trust`: explicit repository/directory opt-ins for repo-local language
+  servers in normal mode, for example `ctx_trust = ["/absolute/repo"]`. Only
+  the installed-skill repository is implicitly trusted. `ctx_deny` wins;
+  read-only mode never permits these servers.
 - Overrides for tests and odd installs: `ORCH_JBCONTEXT`, `ORCH_GOPLS`,
   `ORCH_TSLS` (the TypeScript 7 server, `tsc --lsp --stdio`), `ORCH_PYLS` (the
   Python server command), `ORCH_RG`,

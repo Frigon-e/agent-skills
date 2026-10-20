@@ -18,9 +18,14 @@ import (
 	"time"
 )
 
+// The launcher sets this to the source/toolchain fingerprint at build time.
+// Direct go builds still have a useful, dependency-free version response.
+var orchVersion = "devel"
+
 const usage = `orch - orchestrators, one Herdr pane per lead
 
 Orchestrator:
+  orch version | --version | -v | -V   (bare build fingerprint; no repo needed)
   orch new <id> --kind ship|scout --harness claude|pi --model M --effort E [--base B] [--depends a,b]
   orch plan <spec> [--dry-run]
   orch check <id>
@@ -131,6 +136,15 @@ func main() {
 }
 
 func (a *app) run(args []string) int {
+	// Answer probes before command dispatch, repo/config lookup or backends.
+	if len(args) > 0 && (args[0] == "version" || args[0] == "--version" || args[0] == "-v" || args[0] == "-V") {
+		if len(args) != 1 {
+			fmt.Fprintln(a.errw, "orch: usage: orch version | --version | -v | -V")
+			return 2
+		}
+		fmt.Fprintln(a.out, orchVersion)
+		return 0
+	}
 	if len(args) == 0 || args[0] == "-h" || args[0] == "--help" || args[0] == "help" {
 		fmt.Fprint(a.out, usage)
 		return 0

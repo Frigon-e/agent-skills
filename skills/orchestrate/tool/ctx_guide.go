@@ -6,11 +6,19 @@ import "strings"
 // `orch ctx find --help`, the home view, a tip under a weak `find` answer, the
 // planner prompt and the docs. Queries agents type are never rewritten.
 
+// Shared by the embedded review notice and concept help so retrieval limits
+// and recovery advice cannot drift between those entry points.
+const ctxResultGuide = `DEFAULT TO BATCH. Put independent lookups in ONE call with orch ctx batch; inspect source with native Read/read, not retrieval snippets. A single lookup is fine for one question. No blanket speed advantage is assumed.
+RESULTS. Check status (ok, empty, partial, failed), count_kind (exact, lower_bound, unknown), scope, exclusions, errors, cuts and sources. An exact count can exceed retained excerpts. Semantic candidates never establish absence; empty text means no pattern match only within its reported scope. Symbols distinguish exact identity from labelled candidates; by-name matches are not a call graph.
+FAILURES. A failed single lookup or all-failed batch exits 1; a partial batch exits 0 with status: partial and preserves usable results. Usage errors exit 2. Missing servers or failed references are partial/failed data, not zero callers. Use the named external-server install hint, scoped text/native search, or native reads.
+CAPS. Text retains 2000 excerpts; semantic retrieval is bounded to 2000 raw ranks; symbols display four definitions after filters. Narrow glob/path/in/kind or read the checkout when capped. --full raises finite display caps (default 1000 text hits/page, 600 columns, 48000 characters/lookup, 280000/batch), not backend limits. --all broadens text globs but keeps gitignore/hidden rules and the tests filter.
+TRUST. Repo-local servers need user-config ctx_trust = ["/absolute/repo"] outside the installed-skill repo; ctx_deny wins. Read-only mode never runs repo-local servers, even if trusted.`
+
 const ctxQueryGuide = "guide: When you do not know where code lives, search one behavior at a time in plain language:\n" +
 	"  `Code that <action> on <entity>, when <trigger>, producing <result>`. Include only what you know.\n" +
 	"  Do not invent symbols, frameworks or paths. Read the best hits, adopt the repo's own names, then use `sym` / `text` for exact lookups.\n" +
 	"  Weak: `authentication`, `upload service controller queue`. Better: `Code that checks a user's credentials and establishes a signed-in session.`\n" +
-	"  Read files with your native read tool (offset and limit for part of a file); orch ctx is for finding things, not for reading them; never use sed, cat, head or tail."
+	"  Read files with your native read tool (offset and limit for part of a file); orch ctx is for finding things, not for reading them; never use sed, cat, head or tail.\n" + ctxResultGuide
 
 // conceptQueryRule is the sentence of the plan-arm planner prompt.
 const conceptQueryRule = " A concept lookup's query must describe one behavior in the form `Code that <action> <entity>, when <trigger>, producing <result>`, with only what you know, and must not contain invented identifiers, frameworks or paths: use only names that appear in the spec or the dossier."

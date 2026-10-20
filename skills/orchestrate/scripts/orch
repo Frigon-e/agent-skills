@@ -1,17 +1,53 @@
 #!/usr/bin/env bash
-# Builds the orch tool from ../tool on first use or after its source changes,
-# then runs it. Agents and hooks always call this wrapper, never the cached
-# binary, so ORCH_SELF and ORCH_SKILL_DIR point back at the skill.
+# Content-address the build inputs, including every go:embed asset. Agents and
+# hooks call this wrapper so ORCH_SELF and ORCH_SKILL_DIR point at the skill.
 set -eo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 skill="$(dirname "$here")"
 src="$skill/tool"
-bin="${XDG_CACHE_HOME:-$HOME/.cache}/orchestrate/orch"
-if [ ! -x "$bin" ] || [ -n "$(find "$src" -newer "$bin" \( -name '*.go' -o -name go.mod -o -name go.sum -o -name '*.tmpl' \) ! -name '*_test.go' -print -quit)" ]; then
-  command -v go >/dev/null || { echo "orch: building $src needs Go (https://go.dev/dl/)" >&2; exit 1; }
+command -v go >/dev/null || { echo "orch: building/checking $src needs Go (https://go.dev/dl/)" >&2; exit 1; }
+command -v shasum >/dev/null || { echo "orch: checking build inputs needs shasum (SHA-256)" >&2; exit 1; }
+
+# Ask Go for the selected source set, rather than guessing embedded extensions.
+# A changed build tag, deleted source or newly added embedded file changes it.
+template=''
+for field in GoFiles CgoFiles CFiles CXXFiles MFiles HFiles FFiles SFiles SwigFiles SwigCXXFiles SysoFiles EmbedFiles; do
+  template+="{{range .$field}}{{printf \"%s/%s\\n\" \$.Dir .}}{{end}}"
+done
+sources="$(cd "$src" && go list -f "$template" ./...)"
+sources+=$'\n'"$src/go.mod"$'\n'"$here/orch"
+if [ -f "$src/go.sum" ]; then sources+=$'\n'"$src/go.sum"; fi
+# Workspaces can alter dependency selection without changing tool/go.mod.
+workspace="$(cd "$src" && go env GOWORK)"
+if [ -n "$workspace" ] && [ "$workspace" != off ]; then
+  sources+=$'\n'"$workspace"
+  if [ -f "$workspace.sum" ]; then sources+=$'\n'"$workspace.sum"; fi
+fi
+sources="$(printf '%s\n' "$sources" | LC_ALL=C sort -u)"
+source_files=()
+while IFS= read -r path; do
+  [ -z "$path" ] || source_files+=("$path")
+done <<< "$sources"
+# One hash process for the whole set, not one Perl startup per source file.
+source_hashes="$(shasum -a 256 -- "${source_files[@]}")"
+# Do not hash all of go env: GOGCCFLAGS contains a fresh temp path each call.
+toolchain="$(cd "$src" && command -v go && go version && go env -json \
+  GOVERSION GOTOOLCHAIN GOROOT GOOS GOARCH GOAMD64 GOARM GOARM64 GO386 \
+  GOMIPS GOMIPS64 GOPPC64 GORISCV64 GOWASM CGO_ENABLED CC CXX \
+  CGO_CFLAGS CGO_CPPFLAGS CGO_CXXFLAGS CGO_FFLAGS CGO_LDFLAGS GOFLAGS GOEXPERIMENT GOWORK)"
+fingerprint="$(printf '%s\n' "$toolchain" "$source_hashes" | shasum -a 256)"
+fingerprint="${fingerprint%% *}"
+
+# Isolate worktrees/installations so their concurrent rebuilds cannot replace
+# each other's binary. The binary carries its fingerprint: no sidecar can drift.
+source_key="$(printf '%s' "$src" | shasum -a 256)"
+bin="${XDG_CACHE_HOME:-$HOME/.cache}/orchestrate/${source_key%% *}/orch"
+if [ ! -x "$bin" ] || [ "$("$bin" --version 2>/dev/null || true)" != "$fingerprint" ]; then
   mkdir -p "$(dirname "$bin")"
-  (cd "$src" && go build -trimpath -o "$bin.$$" .) >&2
-  mv -f "$bin.$$" "$bin"
+  tmp="$bin.$$"
+  trap 'rm -f "$tmp"' EXIT
+  (cd "$src" && go build -trimpath -ldflags "-X main.orchVersion=$fingerprint" -o "$tmp" .) >&2
+  mv -f "$tmp" "$bin"
 fi
 export ORCH_SELF="$here/orch" ORCH_SKILL_DIR="$skill"
 exec "$bin" "$@"

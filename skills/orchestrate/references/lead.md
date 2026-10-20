@@ -45,12 +45,20 @@ crowds out what matters. Route by context as well as by model (`route-work`,
   sites and a size guess (`Mode: scope`) instead of reading code to find out.
 - **Delegate single-use output:** wide reads, log digging, searches.
 - **Search with `orch ctx` first** (`references/context.md`), cheapest option
-  first: `text` with `--glob` and `--word` for a name or string you know (and
-  for its absence), `sym` for an exact symbol with its callers, `find` for a
-  concept only when you have no name to search (write it as one behavior, `Code that <action> <entity>, when <trigger>, producing <result>`; see "Writing a concept query" in `references/context.md`). Put two or more independent
+  first: `text` with `--glob` and `--word` for scoped pattern matches,
+  `sym` for exact or candidate-labelled definitions and available references,
+  `find` for a concept only when you have no name to search (write it as one behavior, `Code that <action> <entity>, when <trigger>, producing <result>`; see "Writing a concept query" in `references/context.md`). Put two or more independent
   lookups in one `batch` (`-q "kind:query key=value"`). Tests are hidden and
-  counted; add `--tests include|only` when you need them. Read files only
-  after, for what the tools do not tell you, and never re-read a file or the
+  counted; add `--tests include|only` when you need them. Inspect source with
+  native Read/read and offset/limit after locating it. No blanket speed or
+  absence guarantee: check `status`, `count_kind`, scope, exclusions, errors,
+  caps and staleness. Semantic candidates never establish absence; missing
+  servers are not zero callers. Narrow path/glob scope or use native reads
+  when bounded `--full` is insufficient; `--all` still honors gitignore/hidden
+  rules and the tests filter. A failed single lookup or all-failed batch exits
+  1; partial batches exit 0 with `status: partial`. Repo-local servers require
+  user-config `ctx_trust = ["/absolute/repo"]` outside the installed-skill repo;
+  `ctx_deny` wins and read-only mode never runs them. Never re-read a file or
   spec you already read.
 
 **Full context and new work.** When `orch inbox` prints a `context:` line,

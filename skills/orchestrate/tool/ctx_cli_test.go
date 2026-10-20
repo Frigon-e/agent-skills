@@ -86,6 +86,44 @@ func TestCtxCLIShimNoticeAndTools(t *testing.T) {
 	}
 }
 
+func TestCtxCLIGuidanceTruth(t *testing.T) {
+	for name, guide := range map[string]string{"review notice": ctxCLINotice, "concept help": ctxQueryGuide} {
+		for _, claim := range []string{"proof that something does not exist", "Confirm absence with text", "confirm absence with text", "faster and shows more", "--full lifts the cap"} {
+			if strings.Contains(guide, claim) {
+				t.Errorf("%s retains misleading claim %q", name, claim)
+			}
+		}
+		for _, advice := range []string{
+			"independent lookups in ONE call with orch ctx batch", "native Read/read",
+			"ok, empty, partial, failed", "exact, lower_bound, unknown",
+			"Semantic candidates never establish absence", "exact identity from labelled candidates",
+			"all-failed batch exits 1", "partial batch exits 0 with status: partial",
+			"not zero callers", "2000 excerpts", "2000 raw ranks", "four definitions after filters",
+			"--full raises finite display caps", "gitignore/hidden rules and the tests filter",
+			`ctx_trust = ["/absolute/repo"]`, "ctx_deny wins", "Read-only mode never runs repo-local servers",
+		} {
+			if !strings.Contains(guide, advice) {
+				t.Errorf("%s missing advice %q", name, advice)
+			}
+		}
+	}
+	// Assert the actual help command includes the shared advice, not only a
+	// constant that the command might stop using in a future refactor.
+	c := newCtxHarness(t)
+	help := c.must("ctx", "find", "--help")
+	for _, advice := range []string{"independent lookups in ONE call with orch ctx batch", "native Read/read", "status: partial", "count_kind"} {
+		if !strings.Contains(help, advice) {
+			t.Errorf("find help missing %q", advice)
+		}
+	}
+	if strings.Contains(help, "confirm absence") || strings.Contains(help, "faster and shows more") {
+		t.Errorf("find help retains misleading advice: %s", help)
+	}
+	if sym := c.must("ctx", "sym", "--help"); !strings.Contains(sym, "Exact or candidate-labelled definitions") || strings.Contains(sym, "An exact symbol:") {
+		t.Errorf("symbol help misstates identity guarantees: %s", sym)
+	}
+}
+
 func TestCtxCLICommandsOnly(t *testing.T) {
 	for _, name := range ctxSubcommands {
 		if name == "mcp" {
