@@ -191,7 +191,7 @@ func TestClaudeOnlyGateRecordsRunnerAndReadOnlyTools(t *testing.T) {
 	h := setup(t)
 	gdir := h.gateRepo(1)
 	log := filepath.Join(h.tmp, "claude-args")
-	reply, _ := json.Marshal(map[string]any{"type": "result", "result": `{"packages":[{"id":"api","claims":[],"questions":[],"will_change":[]}],"findings":[]}`})
+	reply, _ := json.Marshal(map[string]any{"type": "result", "result": `{"packages":[{"id":"api","claims":[],"questions":[],"will_change":[],"reuse":[]}],"findings":[]}`})
 	bin := fakeRunner(t, "claude", fmt.Sprintf("printf '%%s\\n' \"$@\" > %q.$$.args\nprintf '%%s\\n' '%s'", log, reply))
 	readArgs := func() string {
 		files, err := filepath.Glob(log + ".*.args")
@@ -276,7 +276,7 @@ func TestGateProviderFailureFallsBackToFakeClaude(t *testing.T) {
 	gdir := h.gateRepo(1)
 	t.Setenv("HERDR_ENV", "")
 	t.Setenv("ORCH_PI", fakeRunner(t, "pi", "echo 'HTTP 429 rate limit' >&2; exit 1"))
-	reply, _ := json.Marshal(map[string]any{"type": "result", "result": `{"packages":[{"id":"api","claims":[],"questions":[]}],"findings":[]}`})
+	reply, _ := json.Marshal(map[string]any{"type": "result", "result": `{"packages":[{"id":"api","claims":[],"questions":[],"will_change":[],"reuse":[]}],"findings":[]}`})
 	t.Setenv("ORCH_CLAUDE", fakeRunner(t, "claude", fmt.Sprintf("printf '%%s\\n' '%s'", reply)))
 	h.must("gate", "spec.md")
 	rec := readRecord(t, gdir)

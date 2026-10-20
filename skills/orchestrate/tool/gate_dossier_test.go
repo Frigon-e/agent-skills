@@ -59,6 +59,16 @@ func TestDossierRanksFilesAndFindsWhatExistsAndWhatDoesNot(t *testing.T) {
 	code, src := dossierRepo(t)
 	jb, _, _ := fakeJbcontext(t)
 	t.Setenv("ORCH_JBCONTEXT", jb)
+	// The indexed Put chunk does not exist in this checkout. It must not
+	// contribute semantic ranking points to the real SendTransfer text hit.
+	stale := buildDossier(t, code, src, t.TempDir()).text("api")
+	wantContains(t, stale, "`internal/store.go` (score 1: text): text `SendTransfer`",
+		"- `internal/store.go` (lines 3, 4) in func SendTransfer via text `SendTransfer`; text `POST /api/transfers`\n    func SendTransfer() {}")
+	if strings.Contains(stale, "concept search") {
+		t.Fatalf("a stale semantic hit contributed ranking evidence:\n%s", stale)
+	}
+	// A truthful semantic anchor still gets the original cross-tool bonus.
+	fakeJbResults(t, [][3]string{{"internal/store.go", "2", `\nfunc SendTransfer() {}`}})
 	text := buildDossier(t, code, src, t.TempDir()).text("api")
 
 	wantContains(t, text,
@@ -68,7 +78,7 @@ func TestDossierRanksFilesAndFindsWhatExistsAndWhatDoesNot(t *testing.T) {
 		// a concept hit (2) and a rare rg hit (1) in the same file, plus 2 for two kinds agreeing
 		"`internal/store.go` (score 5: jb+text): concept search; text `SendTransfer`",
 		// outside the owns, with the line and a snippet
-		"- `internal/store.go` (lines 3, 4) in func SendTransfer via text `SendTransfer`; text `POST /api/transfers`\n    func SendTransfer() {}",
+		"- `internal/store.go` (lines 3, 4) in func SendTransfer via concept \"SendTransfer Nonexistent transfer_rows queue api\"; concept \"code queues transfer serves post api transfers\"; concept \"internal queue\"\n    func SendTransfer() {}",
 		// names that exist nowhere, and a pointer to a file that does not exist
 		"- `Nonexistent`", "- `transfer_rows`", "- `internal/gone.go`")
 	if strings.Contains(text, "`internal/queue/queue.go:") {
@@ -88,7 +98,7 @@ func TestDossierIsDeterministicCachedAndCapped(t *testing.T) {
 	if first != second {
 		t.Errorf("a rebuild from the cache differs:\n%s\n---\n%s", first, second)
 	}
-	if entries, _ := filepath.Glob(filepath.Join(cache, "rg-*.json")); len(entries) == 0 {
+	if entries, _ := filepath.Glob(filepath.Join(cache, "rg3-*.json")); len(entries) == 0 {
 		t.Error("rg results were not cached")
 	}
 

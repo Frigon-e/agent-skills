@@ -183,16 +183,16 @@ func TestCtxFindSymTextBatchAndBriefOutsideAnyRunState(t *testing.T) {
 	c := newCtxHarness(t)
 
 	find := c.must("ctx", "find", "checkout gateway", "-p", "pay", "--limit", "2")
-	wantContains(t, find, "find: 1 of 1 hits for \"checkout gateway\" in 1 file (path pay)", "pay/pay.go\n", "  4: type Gateway interface {", "  5:  StartCheckout(ctx int) error", "  declares type Gateway", "  package pay declares 3 exported symbols in 1 file")
+	wantContains(t, find, "find: 1 of 1 hits for \"checkout gateway\" in 1 file (path pay)", "pay/pay.go\n", "  3: type Gateway interface {", "  4:  StartCheckout(ctx int) error", "  declares type Gateway", "  package pay declares 3 exported symbols in 1 file")
 	wantContains(t, c.log(c.jbCalls), "--limit 10", "--path-filter pay", "--revision "+c.head)
 	if !strings.HasPrefix(lastOutLine(find), "sources: jbcontext index "+sha7(c.head)) {
 		t.Errorf("find sources: %q", lastOutLine(find))
 	}
 
 	sym := c.must("ctx", "sym", "StartCheckout")
-	wantContains(t, sym, `sym: 2 definitions of "StartCheckout"`, "StartCheckout  method  pay/pay.go:4\n", "\n   StartCheckout(ctx int) error\n", "used by 8, +1 in tests:\n",
+	wantContains(t, sym, `sym: 2 definitions of "StartCheckout"`, "StartCheckout  method  pay/pay.go:4  candidate (identity not verified)\n", "\n   StartCheckout(ctx int) error\n", "used by 8, +1 in tests:\n",
 		"  svc/svc.go\n", "    5  // Handle starts a checkout.\n", "showing 1-5 of 8; next: --page 2; left out: svc/svc.go (3)", "implemented by 1:\n  7  func (s *Stripe) StartCheckout(ctx int) error { return nil }\n",
-		"StartCheckout  method  pay/pay.go:7\n", "used by 1, none in tests\n")
+		"StartCheckout  method  pay/pay.go:7  candidate (identity not verified)\n", "used by 1, none in tests\n")
 	if strings.Contains(sym, "pay_test.go") {
 		t.Errorf("default sym listed test references:\n%s", sym)
 	}
@@ -213,7 +213,7 @@ func TestCtxFindSymTextBatchAndBriefOutsideAnyRunState(t *testing.T) {
 	}
 	wantContains(t, c.must("ctx", "text", "zzzNone"), "text: 0 matches found in the whole repo")
 	code, out := c.run("ctx", "text", "x", "-p", "../outside")
-	if code != 0 || !strings.Contains(out, "error: path ../outside is outside the repo") {
+	if code != 1 || !strings.Contains(out, "error: path ../outside is outside the repo") {
 		t.Errorf("a path outside the repo: %d %s", code, out)
 	}
 
@@ -271,7 +271,10 @@ func TestCtxPrivateTaskNeverUsesJbcontext(t *testing.T) {
 	dir := t.TempDir()
 	os.WriteFile(filepath.Join(dir, "task.md"), []byte("---\nid: p\nprivate: true\n---\nbody\n"), 0o644)
 	t.Setenv("ORCH_TASK_DIR", dir)
-	out := c.must("ctx", "find", "checkout")
+	code, out := c.run("ctx", "find", "checkout")
+	if code != 1 {
+		t.Fatalf("private find exit %d, want 1: %s", code, out)
+	}
 	wantContains(t, out, "find: error: jbcontext is not used for private work")
 	if c.log(c.jbCalls) != "" {
 		t.Errorf("a private task reached jbcontext: %s", c.log(c.jbCalls))

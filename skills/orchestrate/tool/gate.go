@@ -1542,6 +1542,11 @@ func runGatePasses(dir, code, model string, passes []gatePass, rec *gateRecord, 
 							return out, "", err
 						})
 					})
+					// The shared wall cap can expire in any runner operation.
+					// Keep its diagnostic stable without hiding checkout cancellation.
+					if err != nil && errors.Is(passCtx.Err(), context.DeadlineExceeded) && opts.guard.ctx.Err() == nil {
+						err = &passLimit{fmt.Sprintf("timed out after %s", gateTimeout)}
+					}
 					mu.Lock()
 					if used.Harness != "" {
 						rec.PassRunners[q.name] = used.String()

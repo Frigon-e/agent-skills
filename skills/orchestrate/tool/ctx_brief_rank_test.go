@@ -214,29 +214,32 @@ func likeBrief(code string) *ctxBrief {
 }
 
 func TestLookAlikesMergeEveryChunkOfAFileIntoOneEntry(t *testing.T) {
-	code := rankRepo(t, map[string]string{"svc/own.go": "package svc\n", "svc/other.go": "package svc\n"})
+	code := rankRepo(t, map[string]string{
+		"svc/own.go":   "package svc\n",
+		"svc/other.go": "package svc\n\nfunc SvcThing() {}\n// body\n\nfunc SvcSecond() {}\n// body\n\nfunc SvcThird() {}\n",
+	})
 	fakeJbResults(t, [][3]string{
-		{"svc/other.go", "2", `\nfunc SvcThing() {}\nbody`},
-		{"svc/other.go", "30", `\nfunc SvcSecond() {}\nbody`},
-		{"svc/other.go", "50", `\nfunc SvcThird() {}`},
+		{"svc/other.go", "2", `\nfunc SvcThing() {}\n// body`},
+		{"svc/other.go", "5", `\nfunc SvcSecond() {}\n// body`},
+		{"svc/other.go", "8", `\nfunc SvcThird() {}`},
 	})
 	b := likeBrief(code)
 	like := strings.Join(b.Like, "\n")
 	if strings.Count(like, "svc/other.go") != 1 || len(b.LikeRows) != 1 {
 		t.Fatalf("a file must be one entry:\n%s", like)
 	}
-	wantContains(t, like, "(lines 3-4, 31-32, 51)", "in func SvcThing, func SvcSecond, func SvcThird", "func SvcThing() {}")
+	wantContains(t, like, "(lines 3-4, 6-7, 9)", "in func SvcThing, func SvcSecond, func SvcThird", "func SvcThing() {}")
 }
 
 func TestLookAlikesHaveAQuotaPerTreeAndTheOwnsTreeComesFirst(t *testing.T) {
 	files := map[string]string{"svc/own.go": "package svc\n", "web/a.ts": "x\n", "svc/z.go": "package svc\n"}
 	var chunks [][3]string
 	for i := 0; i < 6; i++ { // the web results come first and are more numerous
-		files[fmt.Sprintf("web/p%d.ts", i)] = "x\n"
+		files[fmt.Sprintf("web/p%d.ts", i)] = fmt.Sprintf("// svc helpers\n\nexport function svcThing%d() {}\n", i)
 		chunks = append(chunks, [3]string{fmt.Sprintf("web/p%d.ts", i), "2", fmt.Sprintf(`\nexport function svcThing%d() {}`, i)})
 	}
 	for i := 0; i < 6; i++ {
-		files[fmt.Sprintf("svc/q%d.go", i)] = "package svc\n"
+		files[fmt.Sprintf("svc/q%d.go", i)] = fmt.Sprintf("package svc\n\nfunc SvcThing%d() {}\n", i)
 		chunks = append(chunks, [3]string{fmt.Sprintf("svc/q%d.go", i), "2", fmt.Sprintf(`\nfunc SvcThing%d() {}`, i)})
 	}
 	code := rankRepo(t, files)
@@ -264,7 +267,12 @@ func TestLookAlikesHaveAQuotaPerTreeAndTheOwnsTreeComesFirst(t *testing.T) {
 }
 
 func TestLookAlikesNeedAWordInCommonWithThePackageAndEmptyTreesAreSaid(t *testing.T) {
-	code := rankRepo(t, map[string]string{"svc/own.go": "package svc\n", "svc/near.go": "package svc\n", "svc/far.go": "package svc\n", "web/a.ts": "x\n"})
+	code := rankRepo(t, map[string]string{
+		"svc/own.go":  "package svc\n",
+		"svc/near.go": "package svc\n\nfunc NewSvcClient() {}\n",
+		"svc/far.go":  "package svc\n\nfunc BananaSplit() {}\n",
+		"web/a.ts":    "// fruit\n\nexport const banana = 1\n",
+	})
 	fakeJbResults(t, [][3]string{
 		{"svc/near.go", "2", `\nfunc NewSvcClient() {}`},
 		{"svc/far.go", "2", `\nfunc BananaSplit() {}`},

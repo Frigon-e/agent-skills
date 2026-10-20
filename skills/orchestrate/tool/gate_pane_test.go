@@ -449,6 +449,11 @@ func TestGateTimedOutPassGetsCtrlCAndDoesNotStallTheOthers(t *testing.T) {
 		t.Fatalf("gate took %s with a 3s pass timeout", time.Since(start))
 	}
 	wantContains(t, out, "gate: unverified", "pass_failed: adversary-a - timed out after 3s")
+	failure := readRecord(t, gdir).PassErrors["adversary-a"]
+	if failure != "timed out after 3s" {
+		t.Fatalf("recorded timeout = %q, want clear wall-cap diagnostic", failure)
+	}
+	t.Logf("timeout diagnostic: %s", failure)
 	if n := strings.Count(out, "pass_failed:"); n != 1 {
 		t.Fatalf("%d passes failed, want only the timed-out one:\n%s", n, out)
 	}

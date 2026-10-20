@@ -603,6 +603,14 @@ esac
 
 func TestGoplsFactsSplitCallSitesFromTestsAndListImplementations(t *testing.T) {
 	code, calls, bin := goplsFixture(t)
+	if err := os.MkdirAll(filepath.Join(code, "other"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFiles(t, code, map[string]string{
+		"pay/b.go":   "package pay\n\nfunc Build() {}\n",
+		"other/b.go": "package other\n\nfunc Build() {}\n",
+		"other/o.go": "package other\ntype Other struct{}\nfunc (Other) StartCheckout() {}\n",
+	})
 	t.Setenv("ORCH_GOPLS", bin)
 	t.Setenv("ORCH_JBCONTEXT", filepath.Join(t.TempDir(), "absent"))
 	qs := []gateQuestion{
@@ -626,13 +634,15 @@ func TestGoplsFactsSplitCallSitesFromTestsAndListImplementations(t *testing.T) {
 			t.Errorf("the facts hold %q:\n%s", not, card)
 		}
 	}
-	// The bare name matches every exact definition: the interface method and the implementation, not the test or the lookalike.
+	// A bare method name returns candidates with unverified receiver identity,
+	// while preserving each definition's callers, tests and implementations.
 	card2 := string(mustRead(t, filepath.Join(dir, "questions", "q2-api.md")))
-	wantContains(t, card2, "`StartCheckout` (go Method) is defined at `pay/pay.go:4`", "`StartCheckout` (go Method) is defined at `pay/pay.go:7`; 1 callers outside tests: `svc/svc.go:30`; 0 test references")
+	wantContains(t, card2, "`StartCheckout` (go Method) is defined at `pay/pay.go:4` (candidate, identity not verified); 2 callers outside tests: `svc/svc.go:10`, `svc/svc.go:20`; 1 test references; implemented at `pay/pay.go:7`", "`StartCheckout` (go Method) is defined at `pay/pay.go:7` (candidate, identity not verified); 1 callers outside tests: `svc/svc.go:30`; 0 test references")
 	wantContains(t, string(mustRead(t, filepath.Join(dir, "questions", "INDEX.md"))), "| go facts |", "| yes |")
 	wantContains(t, res.summary(), "symbol facts 2")
 
-	// A lowercase first part is a package: only definitions in a directory of that name count.
+	// A lowercase first part is a package: only definitions with that actual
+	// package clause count.
 	pkgDir, _, _, _ := enrichFixture(t, []gateQuestion{{Package: "api", Question: "Does pay.Build set the field?", Decisive: true}})
 	if _, err := enrichGate(pkgDir, code, src, "spec.md", sp); err != nil {
 		t.Fatal(err)
