@@ -46,10 +46,19 @@ func TestBenchCompareKeeps29BehaviorsWithSharedRanges(t *testing.T) {
 		rec.Review.Checks = append(rec.Review.Checks, reviewCheck{Item: reviewItem{SchemaVersion: 1, ID: id, Revision: revision, Package: "api", Requirement: fmt.Sprintf("Behavior %d", i), Checks: []string{"reuse"}}, ID: "reuse", Required: true, Actor: "fixture", Assessors: []string{"fixture"}})
 		recordGateAnswer(&rec, id, "reuse", "fixture", "explicit supported judgment", judgment, "implements this behavior", "matching behavior", "")
 		if judgment == reviewJudgmentNew {
-			lookup := &rec.Review.Policy.Packet.Lookups[len(rec.Review.Policy.Packet.Lookups)-1]
-			lookup.Unit = "matches"
-			lookup.Query = "Code that implements " + id
-			lookup.Scope = "src/"
+			// C3 requires real search coverage bound to the behavior and the
+			// check's repository-wide scope, not a relabeled reviewer reply.
+			lookupID := "search-" + id
+			rec.Review.Policy.Packet.Lookups = append(rec.Review.Policy.Packet.Lookups, evidenceLookup{
+				SchemaVersion: evidenceSchemaVersion, ID: lookupID, Query: "Code that implements " + items[len(items)-1].Text,
+				Scope: ".", Unit: "matches", ExecutionStatus: lookupSucceeded, Status: "empty", CountKind: evidenceCountExact,
+				Counts: lookupCounts{Requested: evidenceTestPtr(1), Succeeded: evidenceTestPtr(1), Failed: evidenceTestPtr(0), Total: evidenceTestPtr(0)},
+			})
+			answer := &rec.Review.Answers[len(rec.Review.Answers)-1]
+			answer.LookupIDs = []string{lookupID}
+			answer.EvidenceIDs, answer.Support.EvidenceIDs = nil, nil
+			answer.Rationale = "The complete repository-wide search found no implementation of this behavior"
+			answer.Support.Rationale = answer.Rationale
 		}
 		answerID := rec.Review.Answers[len(rec.Review.Answers)-1].ID
 		rec.Items = append(rec.Items, gateItemResult{ID: id, Package: "api", Revision: revision, AnswerID: answerID, Verdict: string(judgment), Candidate: loc, Verified: true})
