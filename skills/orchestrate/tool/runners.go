@@ -17,12 +17,14 @@ import (
 	"time"
 )
 
-var modelRoles = []string{"gate", "spec_queries", "shadow_flash", "decider", "gate_adjudicator"}
+var modelRoles = []string{"gate", "spec_queries", "shadow_flash", "decider", "gate_adjudicator", "question_classifier"}
 
 type modelRole struct {
-	Enabled *bool               `toml:"enabled"`
-	Use     []profile           `toml:"use"`
-	Budget  *adjudicationLimits `toml:"budget"`
+	Enabled          *bool               `toml:"enabled"`
+	Use              []profile           `toml:"use"`
+	Budget           *adjudicationLimits `toml:"budget"`
+	Promote          bool                `toml:"promote"`
+	ClassifierLimits *classifierLimits   `toml:"classifier_limits"`
 }
 
 func runnerBinary(h string) string {
@@ -47,6 +49,12 @@ func (s site) role(name string) modelRole {
 		return r
 	}
 	var r modelRole
+	if name == "question_classifier" {
+		// Inherit the connector list, not triage's enabled switch or behavior.
+		// Explicit classifier configuration always wins over this default.
+		r.Use = append([]profile(nil), s.role("decider").Use...)
+		return r
+	}
 	if name == "gate_adjudicator" {
 		disabled := false
 		r.Enabled = &disabled
