@@ -91,6 +91,7 @@ type gateQuestion struct {
 func (q gateQuestion) blocks() bool { return q.Decisive && q.AnsweredBy == "" }
 
 type gateRecord struct {
+	historicalGateResult
 	DossierManifest   *dossierManifest             `json:"dossier_manifest,omitempty"`
 	Budget            *RunBudget                   `json:"budget,omitempty"`
 	SchemaVersion     int                          `json:"schema_version,omitempty"`
@@ -109,7 +110,6 @@ type gateRecord struct {
 	Spec              string                       `json:"spec"`
 	Hash              string                       `json:"hash"`
 	At                int64                        `json:"at"`
-	Status            string                       `json:"status"`            // pass, fail or unverified
 	Reasons           []string                     `json:"reasons,omitempty"` // incomplete review or execution failures
 	CtxTool           string                       `json:"ctx_tool"`
 	ContextFiles      string                       `json:"context_files"`
@@ -1383,7 +1383,7 @@ func cmdGate(a *app, args []string) (retErr error) {
 			unanswered++
 		}
 	}
-	// Status is derived only by ReduceReview. Keep legacy execution diagnostics.
+	// State is derived only by ReduceReview. Keep execution diagnostics.
 	var failedPasses []string
 	for name := range rec.PassErrors {
 		failedPasses = append(failedPasses, name)
@@ -1410,7 +1410,7 @@ func cmdGate(a *app, args []string) (retErr error) {
 		}
 	}
 
-	view := gateInformation{Budget: rec.Budget, SchemaVersion: rec.SchemaVersion, State: rec.State, Status: rec.Status, Completion: rec.Completion, Reasons: rec.Reduction.Reasons, NextActors: rec.NextActors, NextActions: rec.NextActions, Failures: rec.Reduction.Failures, Gate: rec.Status, Spec: pos[0] + " (version " + hash + ")", Report: filepath.Join(runDir, "report.md"), Bench: benchID, Warning: treeWarning(rec), Cache: opts.cache, Tokens: rec.tokenSummary(), Notes: append([]string{}, rec.Notes...), PassErrors: rec.PassErrors}
+	view := gateInformation{Budget: rec.Budget, SchemaVersion: rec.SchemaVersion, State: rec.State, Completion: rec.Completion, Reasons: rec.Reduction.Reasons, NextActors: rec.NextActors, NextActions: rec.NextActions, Failures: rec.Reduction.Failures, Gate: rec.State, Spec: pos[0] + " (version " + hash + ")", Report: filepath.Join(runDir, "report.md"), Bench: benchID, Warning: treeWarning(rec), Cache: opts.cache, Tokens: rec.tokenSummary(), Notes: append([]string{}, rec.Notes...), PassErrors: rec.PassErrors}
 	if experiment {
 		view.Experiment = *expF + " (dossier " + opts.dossier + ", cache " + cacheName + ", groups " + strings.Join(onlyList, ", ") + ")"
 	}
@@ -1468,7 +1468,7 @@ func cmdGate(a *app, args []string) (retErr error) {
 		if experiment {
 			fmt.Fprintf(a.out, "experiment: %s\nreport: %s\n", view.Experiment, view.Report)
 		} else {
-			fmt.Fprintf(a.out, "gate: %s\nspec: %s (version %s)\nreport: %s\n", rec.Status, legacyGateValue(pos[0]), hash, view.Report)
+			fmt.Fprintf(a.out, "gate: %s\nspec: %s (version %s)\nreport: %s\n", legacyGateOutputStatus(rec), legacyGateValue(pos[0]), hash, view.Report)
 		}
 		fmt.Fprintf(a.out, "deterministic: %s\nblockers: %s\nconcerns: %s\nquestions: %s\ndropped: %s\n", view.Deterministic, view.Blockers, view.Concerns, view.Questions, view.Dropped)
 		if view.Dossier != "" {
@@ -1513,7 +1513,7 @@ func cmdGate(a *app, args []string) (retErr error) {
 		}
 		return nil
 	}
-	if rec.Status != gateStatePass {
+	if rec.State != gateStatePass {
 		return &exitError{code: 1}
 	}
 	return nil
@@ -2106,9 +2106,11 @@ func writeGate(dir string, rec *gateRecord) error {
 	if warning := treeWarning(rec); warning != "" {
 		fmt.Fprintf(&r, "%s\n\n", warning)
 	}
-	fmt.Fprintf(&r, "# Gate report: %s\n\nStatus: **%s** (spec version %s)\n\n", rec.Spec, rec.Status, rec.Hash)
+	fmt.Fprintf(&r, "# Gate report: %s (spec version %s)\n\n", rec.Spec, rec.Hash)
 	if rec.SchemaVersion == gateStatusSchemaVersion {
 		fmt.Fprintf(&r, "Review state: **%s** (schema %d)\n\nCompletion: %d/%d required checks complete; %d incomplete; %d optional.\n\n", rec.State, rec.SchemaVersion, rec.Completion.Completed, rec.Completion.Required, rec.Completion.Incomplete, rec.Completion.Optional)
+	} else if label := storedGateResultLabel(rec); label != "" {
+		fmt.Fprintf(&r, "Historical result: **%s** (legacy record, not a v2 state)\n\n", label)
 	}
 	fmt.Fprintf(&r, "ctx_tool: %s; context_files: %s; ctx_shell: %s; ctx_profile: %s\n\n", orDefault(rec.CtxTool, "off (legacy)"), orDefault(rec.ContextFiles, "off (legacy)"), orDefault(rec.CtxShell, "open"), orDefault(rec.CtxProfile, "default"))
 	if t := rec.tokenSummary(); t != "" {

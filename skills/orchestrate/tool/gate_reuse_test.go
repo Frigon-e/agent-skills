@@ -599,7 +599,7 @@ func TestGateCompareCommandReadsItemsShadowRowsAndReference(t *testing.T) {
 	for i, name := range []string{"e1", "e2"} {
 		dir := filepath.Join(gdir, "experiments", name)
 		os.MkdirAll(dir, 0o755)
-		rec := gateRecord{Spec: "spec.md", Experiment: name, Status: "experiment", PassSeconds: map[string]int{}, PassTokens: map[string]passTokens{}}
+		rec := gateRecord{Spec: "spec.md", Experiment: name, State: "experiment", PassSeconds: map[string]int{}, PassTokens: map[string]passTokens{}}
 		if i == 0 {
 			rec.Items = []gateItemResult{{ID: "api#1", Package: "api", Text: "Build api.", Verdict: "reuse", Candidate: "internal/store.go:3", Verified: true}, {ID: "api#2", Package: "api", Text: items[1].Text, Verdict: "extend", Candidate: "internal/store.go:3", Verified: true}}
 		}

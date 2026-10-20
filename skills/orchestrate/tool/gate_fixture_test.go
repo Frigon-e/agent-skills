@@ -158,7 +158,7 @@ func TestFixtureGateModelReplies(t *testing.T) {
 				if err := json.Unmarshal(mustRead(t, filepath.Join(gateDir(h.a.siteRoot(t), specHash(src)), "gate.json")), &rec); err != nil {
 					t.Fatal(err)
 				}
-				if wantCode != 0 && (rec.Status == "pass" || len(rec.Reasons) == 0) {
+				if wantCode != 0 && (rec.State != "incomplete" || len(rec.Reasons) == 0) {
 					t.Fatalf("missing incomplete diagnostic: %+v", rec)
 				}
 			})

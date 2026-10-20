@@ -79,7 +79,6 @@ type gateInformation struct {
 	Budget        *RunBudget         `json:"budget,omitempty"`
 	SchemaVersion int                `json:"schema_version"`
 	State         string             `json:"state"`
-	Status        string             `json:"status"`
 	Completion    reviewCompletion   `json:"completion"`
 	Reasons       []reviewNextAction `json:"reasons"`
 	NextActors    []string           `json:"next_actors"`

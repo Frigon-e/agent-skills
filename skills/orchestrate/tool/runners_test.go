@@ -269,8 +269,8 @@ func TestClaudeOnlyGateRecordsRunnerAndReadOnlyTools(t *testing.T) {
 	t.Setenv("HERDR_ENV", "")
 	out := h.must("gate", "spec.md", "--ctx-tool", "off")
 	rec := readRecord(t, gdir)
-	if rec.Status != "pass" || len(rec.PassRunners) != 3 {
-		t.Fatalf("%s: %s %v", out, rec.Status, rec.PassRunners)
+	if rec.State != "pass" || len(rec.PassRunners) != 3 {
+		t.Fatalf("%s: %s %v", out, rec.State, rec.PassRunners)
 	}
 	for _, runner := range rec.PassRunners {
 		if runner != "claude haiku low" {
@@ -309,7 +309,7 @@ func TestClaudePaneGateUsesClaudeKindAndTranscript(t *testing.T) {
 	t.Setenv("ORCH_CLAUDE", fakeRunner(t, "claude", "exit 0"))
 	out := h.must("gate", "spec.md", "--runner", "claude:haiku:low")
 	rec := readRecord(t, gdir)
-	if rec.Status != "pass" {
+	if rec.State != "pass" {
 		t.Fatalf("%s: %v", out, rec.PassErrors)
 	}
 	calls := h.gateCalls("agent", "start")
@@ -386,7 +386,7 @@ func TestGateWithoutRunnersStillWritesDossier(t *testing.T) {
 	t.Setenv("HERDR_ENV", "")
 	_, out := h.run("gate", "spec.md")
 	rec := readRecord(t, gdir)
-	if rec.Status != "unverified" || !strings.Contains(rec.PassErrors["all"], "not available") {
+	if rec.State != "incomplete" || !strings.Contains(rec.PassErrors["all"], "not available") {
 		t.Fatalf("%s: %#v", out, rec)
 	}
 	if _, err := os.Stat(filepath.Join(gdir, "dossier", "api.md")); err != nil {

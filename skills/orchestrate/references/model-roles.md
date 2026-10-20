@@ -251,7 +251,8 @@ one retry on the next usable connector. The exact manual hint is printed:
 and keep the existing pass-limit retry behavior.
 
 With no usable gate runner, deterministic checks, dossiers, items and the gate
-record are still written; a normal gate run is unverified. `pass_runners`, the
+record are still written; a normal gate run has state `incomplete` when its
+subject and required system records are valid. `pass_runners`, the
 report, and compare output show actual pass runners.
 
 When the Decider is off, `orch spawn <id> --auto` prints one guidance message,
@@ -299,8 +300,9 @@ including every non-ignored untracked file), the diff against HEAD, HEAD
 identity, and content hashes of dirty/untracked paths. After every runner
 attempt, including planner/coverage retries and shadow Flash, it compares
 against the same baseline. A changed checkout discards model findings,
-questions and item verdicts, cancels remaining passes, forces unverified, and
-warns on the first stdout/report line. `tree_changed` lists paths;
+questions and item verdicts, cancels remaining passes, sets state to `stale`,
+and warns in stdout/report. An unidentifiable subject or corrupt required
+system data takes precedence as `error`. `tree_changed` lists paths;
 `tree_changed_passes` lists passes in flight, not a proven writer. Failure to
 compute the check also fails closed. No files are automatically reverted.
 A checkout already dirty before the baseline is allowed if unchanged.

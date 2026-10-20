@@ -127,7 +127,7 @@ func TestGateCheckoutMutationDiscardsAndStops(t *testing.T) {
 					if kind == "untracked" {
 						want = "new.txt"
 					}
-					if len(rec.TreeChanged) != 1 || rec.TreeChanged[0] != want || len(rec.TreeChangedPasses) == 0 || len(rec.Findings) != 0 || rec.Status != "" || rec.PassErrors["all"] == "" {
+					if len(rec.TreeChanged) != 1 || rec.TreeChanged[0] != want || len(rec.TreeChangedPasses) == 0 || len(rec.Findings) != 0 || rec.State != "" || rec.PassErrors["all"] == "" {
 						t.Fatalf("mutation not rejected: %+v", rec)
 					}
 					if len(rec.PassSeconds) >= 12 {
@@ -174,7 +174,7 @@ func TestGatePaneCheckoutMutation(t *testing.T) {
 						t.Fatalf("%d %s", code, out)
 					}
 					rec := readRecord(t, gdir)
-					if rec.Status != "unverified" || len(rec.TreeChanged) != 1 || len(rec.Findings) > 0 || len(rec.TreeChangedPasses) == 0 {
+					if rec.State != "stale" || len(rec.TreeChanged) != 1 || len(rec.Findings) > 0 || len(rec.TreeChangedPasses) == 0 {
 						t.Fatalf("%+v", rec)
 					}
 					if len(h.gateCalls("agent", "start")) >= 3 {
@@ -233,7 +233,7 @@ printf '{}'`))
 		t.Fatalf("%d %s", code, out)
 	}
 	rec := readRecord(t, gdir)
-	if rec.Status != "unverified" || rec.CtxTool != "off" || rec.ContextFiles != "on" || len(rec.Findings) != 0 {
+	if rec.State != "stale" || rec.CtxTool != "off" || rec.ContextFiles != "on" || len(rec.Findings) != 0 {
 		t.Fatalf("%+v", rec)
 	}
 	report := string(mustRead(t, filepath.Join(gdir, "report.md")))

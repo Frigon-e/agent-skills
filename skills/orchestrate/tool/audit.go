@@ -110,8 +110,9 @@ func gateEvents(root string) []auditEvent {
 		if json.Unmarshal(b, &r) != nil {
 			continue
 		}
+		label := storedGateResultLabel(&r)
 		res := "problem"
-		if r.Status == gateStatePass {
+		if label == gateStatePass {
 			res = "ok"
 		}
 		blockers := 0
@@ -121,7 +122,7 @@ func gateEvents(root string) []auditEvent {
 			}
 		}
 		out = append(out, auditEvent{At: r.At, System: "gate", Result: res,
-			Text: fmt.Sprintf("%s %s (spec version %s): %d blocker(s), %d deterministic issue(s)", r.Spec, r.Status, r.Hash, blockers, len(r.Deterministic))})
+			Text: fmt.Sprintf("%s %s (spec version %s): %d blocker(s), %d deterministic issue(s)", r.Spec, label, r.Hash, blockers, len(r.Deterministic))})
 	}
 	return out
 }

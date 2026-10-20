@@ -83,6 +83,7 @@ type benchMetric struct {
 	Better string  `json:"better"`
 }
 type benchRun struct {
+	historicalGateResult
 	SchemaVersion  int                    `json:"schema_version"`
 	ID             string                 `json:"id"`
 	Label          string                 `json:"label"`
@@ -108,7 +109,7 @@ type benchRun struct {
 	WallSeconds    benchWall              `json:"wall_seconds"`
 	SubjectHistory []benchSubjectMove     `json:"subject_history,omitempty"`
 	Kind           string                 `json:"kind,omitempty"`
-	Status         string                 `json:"status,omitempty"`
+	State          string                 `json:"state,omitempty"`
 	Note           string                 `json:"note,omitempty"`
 	Warnings       []string               `json:"warnings,omitempty"`
 	SnapshotHash   string                 `json:"snapshot_hash,omitempty"`
@@ -371,7 +372,7 @@ func benchRecordWith(a *app, source, suite, label, arm string, opts benchRecordO
 			return nil, fail("gate record has no spec hash; supply --spec-text")
 		}
 	}
-	if rec.Status == "" || rec.At == 0 {
+	if storedGateResultLabel(&rec) == "" || rec.At == 0 {
 		return nil, fail("source is not a finished gate run")
 	}
 	if label == "" {
@@ -426,7 +427,8 @@ func benchRecordWith(a *app, source, suite, label, arm string, opts benchRecordO
 			id = benchPrefix(base, 64-len(suffix)) + suffix
 		}
 		r := &benchRun{SchemaVersion: 2, SnapshotHash: snapshotHash, ID: id, Label: label, Suite: suite, Arm: arm, CreatedAt: at, Build: rec.BenchBuild, Inputs: rec.BenchInputs, Config: rec.BenchConfig, Groups: map[string]benchGroup{}, Scores: map[string]benchScore{}, Raw: map[string]string{"gate": filepath.Join(dir, "gate.json"), "sessions": filepath.Join(dir, "sessions"), "dossiers": filepath.Join(dir, "dossier")}, Metrics: map[string]benchMetric{}, SourceHash: hash}
-		r.Kind, r.Status = "gate-run", rec.Status
+		r.Kind, r.State = "gate-run", rec.State
+		retainHistoricalGateResult(r, &rec)
 		if rec.Experiment != "" {
 			r.Kind = "experiment"
 		}

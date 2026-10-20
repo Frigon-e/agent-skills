@@ -134,8 +134,8 @@ func TestGatePlanArmRunsAToolLessPlannerThenTheLookups(t *testing.T) {
 			if rec.PassTokens["plan:group:api+1"].Input == 0 {
 				t.Errorf("no planner tokens: %v", rec.PassTokens)
 			}
-			if rec.Status != "pass" {
-				t.Errorf("status %s: %v", rec.Status, rec.PassErrors)
+			if rec.State != "pass" {
+				t.Errorf("state %s: %v", rec.State, rec.PassErrors)
 			}
 			wantContains(t, out, "dossier: plan,")
 			if b := mustRead(t, filepath.Join(gdir, "dossier", "p1.md")); !strings.Contains(string(b), "### 5.") {
@@ -190,7 +190,7 @@ func TestGateExperimentIsolatedAndCompared(t *testing.T) {
 	}
 	exp := filepath.Join(gdir, "experiments", "e1")
 	rec := readRecord(t, exp)
-	if rec.Experiment != "e1" || rec.Status != "experiment" || len(rec.Only) != 1 || len(rec.Questions) != 1 || len(rec.Findings) != 1 || rec.Findings[0].Source != "reuse" {
+	if rec.Experiment != "e1" || rec.State != "experiment" || len(rec.Only) != 1 || len(rec.Questions) != 1 || len(rec.Findings) != 1 || rec.Findings[0].Source != "reuse" {
 		t.Errorf("experiment record: %+v", rec)
 	}
 	for _, p := range []string{"report.md", "dossier/api.md", "sessions/group-api+2"} {
@@ -421,8 +421,8 @@ func TestGateInsideHerdrNeedsItsTabAndHeadlessIsExplicit(t *testing.T) {
 	if exists(filepath.Join(h.tmp, "fakepi", "calls.log")) {
 		t.Error("a pass ran headless after the tab failed")
 	}
-	if rec := readRecord(t, gdir); rec.Status != "unverified" {
-		t.Errorf("status %s", rec.Status)
+	if rec := readRecord(t, gdir); rec.State != "incomplete" {
+		t.Errorf("state %s", rec.State)
 	}
 	// An explicit choice runs headless, inside herdr as well.
 	for _, via := range []string{"flag", "env"} {

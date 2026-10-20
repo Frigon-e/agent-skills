@@ -100,7 +100,7 @@ func TestReduceExperimentRetainsNonApprovalDetails(t *testing.T) {
 		if mask&8 != 0 {
 			want = "error"
 		}
-		if r.State != want || r.Status == "pass" {
+		if r.State != want || r.State == "pass" {
 			t.Fatalf("experiment acquired approval: %+v", r)
 		}
 		if len(r.Findings) != len(fs) || len(r.ActiveBlockers) != len(fs) {
@@ -355,7 +355,7 @@ func TestReduceNotApplicableAndDecisionAuthority(t *testing.T) {
 	q := reviewQuestion{SchemaVersion: evidenceSchemaVersion, ID: "overwrite", ItemID: cs[0].Item.ID, ItemRevision: cs[0].Item.Revision, CheckID: cs[0].ID, Question: "May export overwrite an existing file?", Authority: reviewAuthority{Owner: "owner", Basis: "Public CLI behavior"}, Options: []reviewQuestionOption{{"yes", "Overwrite", "Existing file is replaced"}, {"no", "Refuse", "Existing file remains"}}, Answer: "yes", AnsweringActor: "reviewer"}
 	p.Questions = []reviewQuestion{q}
 	r := ReduceReview(s, cs, as, nil, p)
-	if r.State != "incomplete" || r.Status != "fail" || r.Reasons[0].Actor != "owner" {
+	if r.State != "incomplete" || r.Reasons[0].Reason != reviewAwaitingDecision || r.Reasons[0].Actor != "owner" {
 		t.Fatalf("unauthorized decision passed: %+v", r)
 	}
 	p.Questions[0].AnsweringActor = "owner"
@@ -476,7 +476,7 @@ func TestGateStateLocatorIsNotSemanticSupport(t *testing.T) {
 			if len(rec.Findings) != 1 {
 				t.Fatal("finding disappeared")
 			}
-			if kind == "unsupported" && (rec.Findings[0].Accepted || rec.Status != "unverified") {
+			if kind == "unsupported" && (rec.Findings[0].Accepted || rec.State != "incomplete") {
 				t.Fatal("a valid locator accepted an unsupported interpretation")
 			}
 		})
@@ -565,7 +565,7 @@ func TestGateStateOutputAudiencesShareV2Selection(t *testing.T) {
 				}
 				decoded := decodedOutput(t, []byte(out), audience.kind)
 				view := decoded.(map[string]any)
-				if view["schema_version"] != float64(2) || view["state"] != wantState || view["status"] != wantStatus || view["gate"] != wantStatus {
+				if view["schema_version"] != float64(2) || view["state"] != wantState || view["status"] != nil || view["gate"] != wantState {
 					t.Fatalf("wrong public state: %+v", view)
 				}
 				completion := view["completion"].(map[string]any)
@@ -681,18 +681,25 @@ func TestGateStateExecutionFailuresHaveTypedReasons(t *testing.T) {
 	}
 }
 
-func TestGateStateLegacyMapping(t *testing.T) {
+func TestGateStateSerializationHasNoLegacyStatus(t *testing.T) {
 	for _, state := range []string{"error", "stale", "fail", "incomplete", "pass", "experiment"} {
-		want := state
-		if state == "error" || state == "stale" || state == "incomplete" {
-			want = "unverified"
+		for _, value := range []any{
+			reviewResult{SchemaVersion: 2, State: state},
+			gateRecord{SchemaVersion: 2, State: state, Reduction: &reviewResult{SchemaVersion: 2, State: state}},
+			benchRun{SchemaVersion: 2, State: state},
+		} {
+			b, err := json.Marshal(value)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var fields map[string]json.RawMessage
+			if err := json.Unmarshal(b, &fields); err != nil {
+				t.Fatal(err)
+			}
+			if string(fields["state"]) != `"`+state+`"` || fields["status"] != nil || fields["historical_status"] != nil {
+				t.Fatalf("new %T retained a legacy result: %s", value, b)
+			}
 		}
-		if got := legacyReviewStatus(state, nil); got != want {
-			t.Fatalf("%s -> %s", state, got)
-		}
-	}
-	if legacyReviewStatus("incomplete", []reviewNextAction{{Reason: reviewAwaitingDecision}}) != "fail" {
-		t.Fatal("blocking question legacy mapping changed")
 	}
 }
 
@@ -711,8 +718,8 @@ func TestGateStateFindingsSurviveFinish(t *testing.T) {
 	if len(rec.Findings) != 1 || len(rec.Questions) != 1 || len(rec.Items) != 1 || len(rec.TreeChanged) == 0 {
 		t.Fatalf("finish erased records: %+v", rec)
 	}
-	if rec.Status != "" {
-		t.Fatal("finish decided status outside reducer")
+	if rec.State != "" {
+		t.Fatal("finish decided state outside reducer")
 	}
 }
 

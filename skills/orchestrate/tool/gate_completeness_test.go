@@ -190,10 +190,10 @@ func TestGateSchemaRepairSharesCoverageSlot(t *testing.T) {
 				t.Fatalf("repair added a third attempt: %s", calls)
 			}
 			rec := readRecord(t, gdir)
-			if complete && rec.Status != "pass" {
+			if complete && rec.State != "pass" {
 				t.Fatalf("repaired record: %+v", rec)
 			}
-			if !complete && (rec.Status != "unverified" || len(rec.Reasons) == 0) {
+			if !complete && (rec.State != "incomplete" || len(rec.Reasons) == 0) {
 				t.Fatalf("incomplete record: %+v", rec)
 			}
 		})

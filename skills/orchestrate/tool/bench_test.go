@@ -29,9 +29,9 @@ func benchFixture(t *testing.T, h *harness, label string, seconds int, captured 
 		}
 	}
 	text := string(mustRead(t, filepath.Join(h.repo, "spec.md")))
-	rec := gateRecord{Spec: "spec.md", SpecRel: "spec.md", Hash: specHash([]byte(text)), At: h.now.Unix(), Status: "experiment", Experiment: label, Groups: map[string][]string{"group:api": {"api"}}, PassSeconds: map[string]int{"group:api": seconds}, PassTokens: map[string]passTokens{"group:api": {Requests: 13, Input: 100, Output: 20, CacheRead: 800000, MaxContext: 107000, Cost: .023}}, Findings: []gateFinding{{Where: "package api", Claim: "Save a record", Source: "reuse", Evidence: "internal/store.go:3", Verified: true}}, BenchInputs: benchInputs{Repo: h.repo, SpecPath: "spec.md", SpecHash: benchHash([]byte(text))}}
+	rec := gateRecord{Spec: "spec.md", SpecRel: "spec.md", Hash: specHash([]byte(text)), At: h.now.Unix(), SchemaVersion: 2, State: "experiment", Experiment: label, Groups: map[string][]string{"group:api": {"api"}}, PassSeconds: map[string]int{"group:api": seconds}, PassTokens: map[string]passTokens{"group:api": {Requests: 13, Input: 100, Output: 20, CacheRead: 800000, MaxContext: 107000, Cost: .023}}, Findings: []gateFinding{{Where: "package api", Claim: "Save a record", Source: "reuse", Evidence: "internal/store.go:3", Verified: true}}, BenchInputs: benchInputs{Repo: h.repo, SpecPath: "spec.md", SpecHash: benchHash([]byte(text))}}
 	b, _ := json.Marshal(rec)
-	writeFiles(t, dir, map[string]string{"gate.json": string(b), "report.md": "# Gate\nStatus: experiment\n", "passes/group-api.prompt": "Exact prompt\n", "dossier/api.md": "A durable dossier\n", "items.json": `[{"id":"api#1","package":"api","text":"Save a record","kind":"builds"}]`, "checklist.json": `{}`})
+	writeFiles(t, dir, map[string]string{"gate.json": string(b), "report.md": "# Gate\nReview state: **experiment** (schema 2)\n", "passes/group-api.prompt": "Exact prompt\n", "dossier/api.md": "A durable dossier\n", "items.json": `[{"id":"api#1","package":"api","text":"Save a record","kind":"builds"}]`, "checklist.json": `{}`})
 	if captured {
 		if e := benchWriteGateSubject(dir, h.repo, filepath.Join(h.repo, "spec.md"), text, h.now, mustBenchStamp(t, h.repo), nil); e != nil {
 			t.Fatal(e)
