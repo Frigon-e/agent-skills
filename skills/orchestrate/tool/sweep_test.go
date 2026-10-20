@@ -1,9 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -26,15 +29,111 @@ func sweepCard(t *testing.T, topic, key, area string, options ...string) {
 	if err := os.WriteFile(filepath.Join(dir, key+".md"), []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	var manifest sweepManifest
+	path := filepath.Join(topic, "manifest.json")
+	if b, err := os.ReadFile(path); err == nil {
+		if err := json.Unmarshal(b, &manifest); err != nil {
+			t.Fatal(err)
+		}
+	} else {
+		manifest = sweepManifest{SchemaVersion: 1, Questions: []sweepSourceQuestion{}}
+	}
+	found := false
+	for _, q := range manifest.Questions {
+		found = found || q.ID == key
+	}
+	if !found {
+		manifest.Questions = append(manifest.Questions, sweepSourceQuestion{ID: key, Question: "Which way for " + key + "?", Card: key})
+	}
+	sweepJSON(t, path, manifest)
+	if _, err := os.Stat(filepath.Join(topic, "dropped.json")); os.IsNotExist(err) {
+		sweepJSON(t, filepath.Join(topic, "dropped.json"), []sweepDropped{})
+	}
 }
 
-func sweepPassFile(t *testing.T, topic, pass, key, json string) {
+func sweepJSON(t *testing.T, path string, v any) {
+	t.Helper()
+	b, err := json.MarshalIndent(v, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, b, 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func sweepExtraSources(t *testing.T, topic string, questions ...string) {
+	t.Helper()
+	var manifest sweepManifest
+	path := filepath.Join(topic, "manifest.json")
+	if err := json.Unmarshal(mustRead(t, path), &manifest); err != nil {
+		t.Fatal(err)
+	}
+	for _, q := range questions {
+		manifest.Questions = append(manifest.Questions, sweepSourceQuestion{ID: q, Question: q})
+	}
+	sweepJSON(t, path, manifest)
+}
+
+func sweepPassFile(t *testing.T, topic, pass, key, raw string) {
 	t.Helper()
 	dir := filepath.Join(topic, "passes", pass)
 	os.MkdirAll(dir, 0o755)
-	if err := os.WriteFile(filepath.Join(dir, key+".json"), []byte(json), 0o644); err != nil {
+	var fixture struct {
+		sweepAnswer
+		WithSupport bool `json:"fixture_support"`
+	}
+	if err := json.Unmarshal([]byte(raw), &fixture); err != nil {
 		t.Fatal(err)
 	}
+	repo := filepath.Join(filepath.Dir(topic), "repo")
+	card := mustRead(t, filepath.Join(topic, "questions", key+".md"))
+	subject, err := captureGateSubject(repo, card)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.CardRev, fixture.Subject = subjectDigest(card), subject
+	if fixture.WithSupport {
+		fixture.Support = &claimSupport{SchemaVersion: 1, State: claimSupported, Assessor: pass, Method: "model", Rationale: "The quoted behavior supports this option.", FailureScenario: "Choosing the other option would leave the documented behavior unavailable."}
+		for i, pointer := range fixture.Evidence {
+			e := evidenceRecord{SchemaVersion: 1, ID: fmt.Sprintf("ev-%d", i), SubjectID: subject.ID, SourceKind: evidenceSourceDocument, LookupID: "fixture-lookup"}
+			valid := true
+			e.LocatorValid = &valid
+			var content []byte
+			if strings.HasPrefix(pointer, "https://") {
+				e.Path, content = pointer, []byte("Quoted documentation.")
+			} else {
+				m := pointerRe.FindStringSubmatch(pointer)
+				if m == nil || m[4] != "" {
+					continue
+				}
+				e.Path = m[1]
+				start, _ := strconv.Atoi(m[2])
+				end := start
+				if m[3] != "" {
+					end, _ = strconv.Atoi(m[3])
+				}
+				e.Range = &evidenceRange{StartLine: start, EndLine: end}
+				path := filepath.Join(repo, e.Path)
+				if strings.HasPrefix(e.Path, "polar/") {
+					path = filepath.Join(filepath.Dir(topic), e.Path)
+				}
+				b := mustRead(t, path)
+				lines := bytes.SplitAfter(b, []byte("\n"))
+				if start < 1 || end > len(lines) {
+					continue
+				}
+				content = bytes.Join(lines[start-1:end], nil)
+			}
+			e.ContentHash = subjectDigest(content)
+			fixture.EvidenceRecords = append(fixture.EvidenceRecords, e)
+			fixture.Support.EvidenceIDs = append(fixture.Support.EvidenceIDs, e.ID)
+			if fixture.Support.Excerpt == "" {
+				fixture.Support.Excerpt = strings.TrimSuffix(string(content), "\n")
+			}
+		}
+	}
+	sweepJSON(t, filepath.Join(dir, key+".json"), fixture.sweepAnswer)
 }
 
 func ans(choice string, evidence ...string) string {
@@ -42,7 +141,7 @@ func ans(choice string, evidence ...string) string {
 	if len(evidence) == 0 {
 		ev = ""
 	}
-	return `{"choice":"` + choice + `","confidence":0.8,"reason":"because","evidence":[` + ev + `]}`
+	return `{"fixture_support":true,"choice":"` + choice + `","confidence":0.8,"reason":"because","evidence":[` + ev + `]}`
 }
 
 func TestSweepSettlesOnlyWhatIsProved(t *testing.T) {
@@ -78,12 +177,16 @@ func TestSweepSettlesOnlyWhatIsProved(t *testing.T) {
 	sweepPassFile(t, topic, "flash", "owned", ans("a", "adr/1.md:2"))
 	sweepPassFile(t, topic, "sonnet", "owned", `{"choice":"a","confidence":0.9,"reason":"tax","evidence":["adr/1.md:2"],"owner":"accountant"}`)
 	os.WriteFile(filepath.Join(topic, "dropped.json"), []byte(`[
-{"question":"same as agree","reason":"duplicate","duplicate_of":"agree"},
-{"question":"ghost","reason":"duplicate","duplicate_of":"nope"},
-{"question":"vanished","reason":"gone"},
-{"question":"decided","reason":"adr","answered_by":"adr/1.md:99"}]`), 0o644)
+{"source_id":"same as agree","question":"same as agree","reason":"duplicate","duplicate_of":"agree"},
+{"source_id":"ghost","question":"ghost","reason":"duplicate","duplicate_of":"nope"},
+{"source_id":"vanished","question":"vanished","reason":"gone"},
+{"source_id":"decided","question":"decided","reason":"adr","answered_by":"adr/1.md:99"}]`), 0o644)
+	sweepExtraSources(t, topic, "same as agree", "ghost", "vanished", "decided")
 
-	out := h.must("sweep", topic, "--roots", "polar="+polar)
+	code, out := h.run("sweep", topic, "--roots", "polar="+polar)
+	if code == 0 {
+		t.Fatal("invalid dropped entries must fail the command")
+	}
 	section := func(title string) string {
 		i := strings.Index(out, title)
 		if i < 0 {
@@ -116,7 +219,7 @@ func TestSweepSettlesOnlyWhatIsProved(t *testing.T) {
 	}
 	check("settled: the passes agree", []string{"agree -> a", "outside -> a"}, []string{"fake", "url-only", "money"})
 	check("disagree:", []string{"differ (flash=a, sonnet=b)"}, nil)
-	check("recheck:", []string{"fake", "does not resolve", "short", "1 of 2 passes", "bad-choice", "not an option", "url-only", "no evidence"}, []string{"differ", "agree"})
+	check("recheck:", []string{"fake", "does not resolve", "short", "1 of 2 passes", "bad-choice", "not an option", "url-only", "--accept-urls"}, []string{"differ", "agree"})
 	check("user:", []string{"money (area billing is human-only)", "free", "owned (pass sonnet says the owner is accountant)"}, []string{"agree ->"})
 	wantContains(t, out, "dropped: \"ghost\" is marked a duplicate of \"nope\"", "dropped: \"vanished\" was dropped with no duplicate_of", "dropped: \"decided\" says adr/1.md:99 answers it")
 	if strings.Contains(out, "same as agree") {
@@ -139,11 +242,38 @@ func TestSweepSettlesOnlyWhatIsProved(t *testing.T) {
 
 	// A final pass breaks the tie, but only with real evidence; URLs count on request.
 	sweepPassFile(t, topic, "settle", "differ", ans("b", "adr/1.md:3"))
-	out = h.must("sweep", topic, "--roots", "polar="+polar, "--accept-urls")
+	_, out = h.run("sweep", topic, "--roots", "polar="+polar, "--accept-urls")
 	wantContains(t, out, "differ -> b (final pass settle)", "url-only -> a")
 	sweepPassFile(t, topic, "settle", "differ", ans("b", "adr/1.md:99"))
-	if out := h.must("sweep", topic); !strings.Contains(out, "differ (flash=a, sonnet=b)") {
+	if _, out := h.run("sweep", topic); !strings.Contains(out, "differ (flash=a, sonnet=b)") {
 		t.Errorf("a final pass without evidence settled the question:\n%s", out)
+	}
+}
+
+func TestSweepCitationWithoutAssessmentRechecks(t *testing.T) {
+	h := setup(t)
+	os.WriteFile(filepath.Join(h.repo, "unrelated.md"), []byte("Unrelated text.\n"), 0o644)
+	topic := filepath.Join(h.tmp, "topic")
+	sweepCard(t, topic, "q", "", "a", "b")
+	os.WriteFile(filepath.Join(topic, "dropped.json"), []byte(`[]`), 0o644)
+	os.WriteFile(filepath.Join(topic, "manifest.json"), []byte(`{"schema_version":1,"questions":[{"id":"q","question":"Which way for q?","card":"q"}]}`), 0o644)
+	for _, p := range []string{"flash", "sonnet"} {
+		sweepPassFile(t, topic, p, "q", `{"choice":"a","evidence":["unrelated.md:1"]}`)
+	}
+	out := h.must("sweep", topic)
+	if strings.Contains(out, "q -> a") {
+		t.Fatalf("an irrelevant resolving citation settled the card:\n%s", out)
+	}
+	wantContains(t, out, "recheck:")
+}
+
+func TestSweepAccountingRequired(t *testing.T) {
+	h := setup(t)
+	topic := filepath.Join(h.tmp, "topic")
+	sweepCard(t, topic, "q", "", "a", "b")
+	os.Remove(filepath.Join(topic, "dropped.json"))
+	if code, out := h.run("sweep", topic); code == 0 {
+		t.Fatalf("missing accounting files succeeded:\n%s", out)
 	}
 }
 
@@ -197,16 +327,315 @@ func TestSweepDroppedUrlsNeedAcceptURLs(t *testing.T) {
 	h := setup(t)
 	topic := filepath.Join(h.tmp, "topic")
 	sweepCard(t, topic, "q", "", "a", "b")
-	os.WriteFile(filepath.Join(topic, "dropped.json"), []byte(`[{"question":"old","reason":"docs say so","answered_by":"https://example.com/docs"}]`), 0o644)
-	wantContains(t, h.must("sweep", topic), "dropped: \"old\" says https://example.com/docs answers it")
+	sweepExtraSources(t, topic, "old")
+	manifest := mustRead(t, filepath.Join(topic, "manifest.json"))
+	subject, err := captureGateSubject(h.repo, manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	valid := true
+	excerpt := "Quoted documentation."
+	dropped := []sweepDropped{{SourceID: "old", Question: "old", Reason: "docs say so", AnsweredBy: "https://example.com/docs", Subject: subject,
+		EvidenceRecords: []evidenceRecord{{SchemaVersion: 1, ID: "doc", SubjectID: subject.ID, SourceKind: evidenceSourceDocument, Path: "https://example.com/docs", LookupID: "docs", ContentHash: subjectDigest([]byte(excerpt)), LocatorValid: &valid}},
+		Support:         &claimSupport{SchemaVersion: 1, State: claimSupported, Assessor: "reviewer", Method: "model", EvidenceIDs: []string{"doc"}, Rationale: "Documentation explicitly answers the question.", Excerpt: excerpt}}}
+	sweepJSON(t, filepath.Join(topic, "dropped.json"), dropped)
+	code, out := h.run("sweep", topic)
+	if code == 0 {
+		t.Fatal("a URL without opt-in must fail accounting")
+	}
+	wantContains(t, out, "dropped: \"old\" says https://example.com/docs answers it")
 	if out := h.must("sweep", topic, "--accept-urls"); strings.Contains(out, "dropped:") {
-		t.Fatalf("--accept-urls did not count the link:\n%s", out)
+		t.Fatalf("--accept-urls did not count the explicitly assessed link:\n%s", out)
+	}
+	// Opt-in never turns a resolving URL alone into claim support.
+	dropped[0].Support = nil
+	sweepJSON(t, filepath.Join(topic, "dropped.json"), dropped)
+	if code, out := h.run("sweep", topic, "--accept-urls"); code == 0 {
+		t.Fatalf("an unassessed link justified dropping a question:\n%s", out)
 	}
 }
 
 func jsonString(s string) string {
 	b, _ := json.Marshal(s)
 	return string(b)
+}
+
+func sweepReadAnswer(t *testing.T, topic, pass, key string) sweepAnswer {
+	t.Helper()
+	var answer sweepAnswer
+	if err := json.Unmarshal(mustRead(t, filepath.Join(topic, "passes", pass, key+".json")), &answer); err != nil {
+		t.Fatal(err)
+	}
+	return answer
+}
+
+func TestSweepCardRevisionInvalidatesSameKey(t *testing.T) {
+	for _, change := range []struct{ name, from, to string }{
+		{"question", "Which way for q?", "Which behavior for q?"},
+		{"option label", "a: option a", "a: a different design"},
+		{"option meaning", "Gain: x", "Gain: a different guarantee"},
+		{"area", "area: infra", "area: storage"},
+		{"context", "We must choose.", "Our requirements changed."},
+	} {
+		t.Run(change.name, func(t *testing.T) {
+			h := setup(t)
+			os.WriteFile(filepath.Join(h.repo, "decision.md"), []byte("Use a.\n"), 0o644)
+			topic := filepath.Join(h.tmp, "topic")
+			sweepCard(t, topic, "q", "infra", "a", "b")
+			for _, pass := range []string{"flash", "sonnet"} {
+				sweepPassFile(t, topic, pass, "q", ans("a", "decision.md:1"))
+			}
+			wantContains(t, h.must("sweep", topic), "q -> a")
+			path := filepath.Join(topic, "questions", "q.md")
+			src := mustRead(t, path)
+			os.WriteFile(path, bytes.ReplaceAll(src, []byte(change.from), []byte(change.to)), 0o644)
+			out := h.must("sweep", topic)
+			wantContains(t, out, "recheck:", "card_rev or code subject changed")
+			if strings.Contains(out, "q -> a") {
+				t.Fatalf("an old answer settled changed options under the same key:\n%s", out)
+			}
+		})
+	}
+}
+
+func TestSweepCodeStateInvalidatesAnswers(t *testing.T) {
+	h := setup(t)
+	os.WriteFile(filepath.Join(h.repo, "decision.md"), []byte("Use a.\n"), 0o644)
+	topic := filepath.Join(h.tmp, "topic")
+	sweepCard(t, topic, "q", "", "a", "b")
+	for _, pass := range []string{"flash", "sonnet"} {
+		sweepPassFile(t, topic, pass, "q", ans("a", "decision.md:1"))
+	}
+	wantContains(t, h.must("sweep", topic), "q -> a")
+	// The citation is unchanged. Any change elsewhere in the A2 subject invalidates.
+	os.WriteFile(filepath.Join(h.repo, "new-code.go"), []byte("package example\n"), 0o644)
+	out := h.must("sweep", topic)
+	wantContains(t, out, "recheck:", "code subject changed")
+	if strings.Contains(out, "q -> a") {
+		t.Fatalf("old answers survived a code-state change:\n%s", out)
+	}
+}
+
+func TestSweepExternalEvidenceChangeInvalidatesSupport(t *testing.T) {
+	h := setup(t)
+	polar := filepath.Join(h.tmp, "polar")
+	os.MkdirAll(polar, 0o755)
+	path := filepath.Join(polar, "decision.md")
+	os.WriteFile(path, []byte("Use a.\n"), 0o644)
+	topic := filepath.Join(h.tmp, "topic")
+	sweepCard(t, topic, "q", "", "a", "b")
+	for _, pass := range []string{"flash", "sonnet"} {
+		sweepPassFile(t, topic, pass, "q", ans("a", "polar/decision.md:1"))
+	}
+	wantContains(t, h.must("sweep", topic, "--roots", "polar="+polar), "q -> a")
+	os.WriteFile(path, []byte("Use b.\n"), 0o644)
+	out := h.must("sweep", topic, "--roots", "polar="+polar)
+	wantContains(t, out, "recheck:", "content changed")
+	if strings.Contains(out, "q -> a") {
+		t.Fatal("a still-resolving external pointer hid changed evidence")
+	}
+}
+
+func TestSweepSupportAssessmentIsRequired(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		mutate func(*sweepAnswer)
+		want   string
+	}{
+		{"citation only", func(a *sweepAnswer) { a.Support = nil }, "no claim_support assessment"},
+		{"unsupported", func(a *sweepAnswer) { a.Support.State = claimUnsupported }, "claim_support is unsupported"},
+		{"conflicting", func(a *sweepAnswer) { a.Support.State = claimSupportConflicting }, "claim_support is conflicting"},
+		{"unknown", func(a *sweepAnswer) { a.Support.State = claimSupportUnknown }, "claim_support is unknown"},
+		{"assessor", func(a *sweepAnswer) { a.Support.Assessor = "" }, "requires assessor"},
+		{"method", func(a *sweepAnswer) { a.Support.Method = "confidence" }, "assessment method"},
+		{"rationale", func(a *sweepAnswer) { a.Support.Rationale = "" }, "requires assessor and rationale"},
+		{"excerpt", func(a *sweepAnswer) { a.Support.Excerpt = "" }, "quoted excerpt"},
+		{"fabricated excerpt", func(a *sweepAnswer) { a.Support.Excerpt = "It says the opposite." }, "excerpt is not in"},
+		{"scenario", func(a *sweepAnswer) {
+			a.EvidenceRecords[0].SourceKind = evidenceSourceCode
+			a.Support.FailureScenario = ""
+		}, "concrete failure scenario"},
+		{"evidence ids", func(a *sweepAnswer) { a.Support.EvidenceIDs = []string{"missing"} }, "unknown evidence ID"},
+		{"content hash", func(a *sweepAnswer) { a.EvidenceRecords[0].ContentHash = "old" }, "content changed"},
+		{"evidence subject", func(a *sweepAnswer) { a.EvidenceRecords[0].SubjectID = "old" }, "stale or incomplete"},
+		{"locator", func(a *sweepAnswer) { a.EvidenceRecords[0].LocatorValid = nil }, "valid locator observation"},
+		{"range", func(a *sweepAnswer) { a.EvidenceRecords[0].Range.EndLine = 99 }, "range does not resolve"},
+		{"legacy answer", func(a *sweepAnswer) { a.CardRev = ""; a.Subject = nil }, "changed or is unbound"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := setup(t)
+			os.WriteFile(filepath.Join(h.repo, "decision.md"), []byte("Use a.\n"), 0o644)
+			topic := filepath.Join(h.tmp, "topic")
+			sweepCard(t, topic, "q", "", "a", "b")
+			for _, pass := range []string{"flash", "sonnet"} {
+				sweepPassFile(t, topic, pass, "q", ans("a", "decision.md:1"))
+				answer := sweepReadAnswer(t, topic, pass, "q")
+				answer.Confidence = 1 // A score cannot replace support.
+				tc.mutate(&answer)
+				sweepJSON(t, filepath.Join(topic, "passes", pass, "q.json"), answer)
+			}
+			out := h.must("sweep", topic)
+			wantContains(t, out, "recheck:", tc.want)
+			if strings.Contains(out, "q -> a") {
+				t.Fatalf("invalid support settled the card:\n%s", out)
+			}
+			var record struct {
+				Questions map[string]sweepResolution `json:"questions"`
+			}
+			if err := json.Unmarshal(mustRead(t, filepath.Join(topic, "sweep", "results.json")), &record); err != nil {
+				t.Fatal(err)
+			}
+			if tc.name == "citation only" && (!record.Questions["q"].Passes[0].CitationValid || record.Questions["q"].Passes[0].ClaimSupport != nil) {
+				t.Fatalf("citation validity and claim support were conflated: %+v", record)
+			}
+		})
+	}
+}
+
+func TestSweepSupplementalURLDoesNotBlockLocalSupport(t *testing.T) {
+	h := setup(t)
+	os.WriteFile(filepath.Join(h.repo, "decision.md"), []byte("Use a.\n"), 0o644)
+	topic := filepath.Join(h.tmp, "topic")
+	sweepCard(t, topic, "q", "", "a", "b")
+	for _, pass := range []string{"flash", "sonnet"} {
+		sweepPassFile(t, topic, pass, "q", ans("a", "decision.md:1"))
+		answer := sweepReadAnswer(t, topic, pass, "q")
+		// As before, an optional link does not negate local evidence. The link
+		// is not being used as support and is not a fetched/verified source.
+		answer.Evidence = append(answer.Evidence, "https://example.com/background")
+		sweepJSON(t, filepath.Join(topic, "passes", pass, "q.json"), answer)
+	}
+	wantContains(t, h.must("sweep", topic), "q -> a")
+}
+
+func TestSweepHumanOnlyWinsOverStaleAgreement(t *testing.T) {
+	h := setup(t)
+	os.MkdirAll(filepath.Join(h.repo, ".agents"), 0o755)
+	os.WriteFile(filepath.Join(h.repo, ".agents", "orchestrate.toml"), []byte("human_only = [\"billing\"]\n"), 0o644)
+	os.WriteFile(filepath.Join(h.repo, "decision.md"), []byte("Use a.\n"), 0o644)
+	topic := filepath.Join(h.tmp, "topic")
+	sweepCard(t, topic, "q", "billing", "a", "b")
+	for _, pass := range []string{"flash", "sonnet"} {
+		sweepPassFile(t, topic, pass, "q", ans("a", "decision.md:1"))
+	}
+	os.WriteFile(filepath.Join(h.repo, "other-code.go"), []byte("package example\n"), 0o644)
+	out := h.must("sweep", topic)
+	wantContains(t, out, "q (area billing is human-only)")
+	if strings.Contains(out, "q -> a") {
+		t.Fatal("stale model agreement settled a human-only question")
+	}
+	card := string(mustRead(t, filepath.Join(topic, "sweep", "for-user", "q.md")))
+	wantContains(t, card, "Current binding: false", "Unresolved claim support:")
+}
+
+func TestSweepStaleFinalCannotSettleOrOverrideAgreement(t *testing.T) {
+	h := setup(t)
+	os.WriteFile(filepath.Join(h.repo, "decision.md"), []byte("Use a.\n"), 0o644)
+	topic := filepath.Join(h.tmp, "topic")
+	sweepCard(t, topic, "q", "", "a", "b")
+	for _, pass := range []string{"flash", "sonnet", "settle"} {
+		sweepPassFile(t, topic, pass, "q", ans("a", "decision.md:1"))
+	}
+	answer := sweepReadAnswer(t, topic, "settle", "q")
+	answer.CardRev = "old"
+	sweepJSON(t, filepath.Join(topic, "passes", "settle", "q.json"), answer)
+	out := h.must("sweep", topic)
+	wantContains(t, out, "recheck:", "settle: card_rev")
+	if strings.Contains(out, "q -> a") {
+		t.Fatal("agreement bypassed a stale final answer")
+	}
+}
+
+func TestSweepAccountingErrorsFailCommand(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		change func(t *testing.T, topic string)
+		want   string
+	}{
+		{"missing", func(t *testing.T, p string) { os.Remove(filepath.Join(p, "dropped.json")) }, "dropped.json is missing or unreadable"},
+		{"unreadable", func(t *testing.T, p string) {
+			os.Remove(filepath.Join(p, "dropped.json"))
+			os.Mkdir(filepath.Join(p, "dropped.json"), 0o755)
+		}, "dropped.json is missing or unreadable"},
+		{"bad JSON", func(t *testing.T, p string) { os.WriteFile(filepath.Join(p, "dropped.json"), []byte("["), 0o644) }, "not a JSON list"},
+		{"null", func(t *testing.T, p string) { os.WriteFile(filepath.Join(p, "dropped.json"), []byte("null"), 0o644) }, "not a JSON list"},
+		{"empty entry", func(t *testing.T, p string) { sweepJSON(t, filepath.Join(p, "dropped.json"), []sweepDropped{{}}) }, "matching source_id/question"},
+		{"unaccounted", func(t *testing.T, p string) { sweepExtraSources(t, p, "lost") }, "source \"lost\" is unaccounted"},
+		{"missing manifest", func(t *testing.T, p string) { os.Remove(filepath.Join(p, "manifest.json")) }, "manifest.json is missing or unreadable"},
+		{"invalid manifest", func(t *testing.T, p string) { os.WriteFile(filepath.Join(p, "manifest.json"), []byte("{}"), 0o644) }, "schema_version 1"},
+		{"empty reason", func(t *testing.T, p string) {
+			sweepExtraSources(t, p, "old")
+			sweepJSON(t, filepath.Join(p, "dropped.json"), []sweepDropped{{SourceID: "old", Question: "old", Disposition: "out of scope"}})
+		}, "nonempty reason"},
+		{"ambiguous entry", func(t *testing.T, p string) {
+			sweepExtraSources(t, p, "old")
+			sweepJSON(t, filepath.Join(p, "dropped.json"), []sweepDropped{{SourceID: "old", Question: "old", Reason: "old", DuplicateOf: "q", Disposition: "out of scope"}})
+		}, "exactly one"},
+		{"duplicate accounting", func(t *testing.T, p string) {
+			sweepJSON(t, filepath.Join(p, "dropped.json"), []sweepDropped{{SourceID: "q", Question: "Which way for q?", Reason: "already mapped", DuplicateOf: "q"}})
+		}, "more than once"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := setup(t)
+			topic := filepath.Join(h.tmp, "topic")
+			sweepCard(t, topic, "q", "", "a", "b")
+			tc.change(t, topic)
+			code, out := h.run("sweep", topic)
+			if code == 0 {
+				t.Fatalf("bad accounting succeeded:\n%s", out)
+			}
+			wantContains(t, out, tc.want, "sweep accounting failed")
+		})
+	}
+}
+
+func TestSweepRecordsEverySourceOutcome(t *testing.T) {
+	h := setup(t)
+	os.WriteFile(filepath.Join(h.repo, "decision.md"), []byte("Use a.\n"), 0o644)
+	topic := filepath.Join(h.tmp, "topic")
+	sweepCard(t, topic, "q", "", "a", "b")
+	sweepCard(t, topic, "open", "", "a", "b")
+	sweepExtraSources(t, topic, "duplicate", "resolved", "out of scope")
+	for _, pass := range []string{"flash", "sonnet"} {
+		sweepPassFile(t, topic, pass, "q", ans("a", "decision.md:1"))
+	}
+	// First comparison publishes bindings, even when accounting is incomplete.
+	if code, _ := h.run("sweep", topic); code == 0 {
+		t.Fatal("unaccounted sources succeeded")
+	}
+	var published struct {
+		ManifestSubject *gateSubject `json:"manifest_subject"`
+	}
+	if err := json.Unmarshal(mustRead(t, filepath.Join(topic, "sweep", "results.json")), &published); err != nil || !published.ManifestSubject.valid() {
+		t.Fatalf("no valid manifest binding: %v", err)
+	}
+	answer := sweepReadAnswer(t, topic, "flash", "q")
+	for i := range answer.EvidenceRecords {
+		answer.EvidenceRecords[i].SubjectID = published.ManifestSubject.ID
+	}
+	dropped := []sweepDropped{
+		{SourceID: "duplicate", Question: "duplicate", Reason: "Same decision and options as q.", DuplicateOf: "q"},
+		{SourceID: "resolved", Question: "resolved", Reason: "The current ADR records the answer.", AnsweredBy: "decision.md:1", Subject: published.ManifestSubject, Support: answer.Support, EvidenceRecords: answer.EvidenceRecords},
+		{SourceID: "out of scope", Question: "out of scope", Reason: "The abandoned product is not shipped.", Disposition: "not applicable"},
+	}
+	sweepJSON(t, filepath.Join(topic, "dropped.json"), dropped)
+	wantContains(t, h.must("sweep", topic), "q -> a", "open (0 of 2 passes answered)")
+	var record struct {
+		AccountingOK bool                       `json:"accounting_ok"`
+		Questions    map[string]sweepResolution `json:"questions"`
+	}
+	if err := json.Unmarshal(mustRead(t, filepath.Join(topic, "sweep", "results.json")), &record); err != nil {
+		t.Fatal(err)
+	}
+	if !record.AccountingOK || record.Questions["q"].Choice != "a" || record.Questions["open"].Status != "recheck" {
+		t.Fatalf("source outcomes were not recorded: %+v", record)
+	}
+	// A valid pointer cannot support a different answered_by resolution.
+	dropped[1].AnsweredBy = "decision.md:1-1"
+	sweepJSON(t, filepath.Join(topic, "dropped.json"), dropped)
+	if code, out := h.run("sweep", topic); code == 0 || !strings.Contains(out, "not cited by its support assessment") {
+		t.Fatalf("unrelated support was attached to a resolution:\n%s", out)
+	}
 }
 
 // One resolving citation must not hide an unresolved one in the same pass.
