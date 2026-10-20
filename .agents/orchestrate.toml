@@ -1,0 +1,7 @@
+base_branch = "wip/ctx-gate-base"
+check = "cd skills/orchestrate/tool && go vet ./... && go test -p 2 ./..."
+lead_skills = ["route-work"]
+stall_minutes = 25
+
+[locks]
+cpu = "while running go test ./... or go vet ./... or any -race run"
