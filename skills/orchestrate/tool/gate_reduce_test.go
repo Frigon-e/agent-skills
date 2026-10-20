@@ -580,8 +580,27 @@ func TestGateStateOutputAudiencesShareV2Selection(t *testing.T) {
 						t.Fatal("incomplete output lost reason/actor/action")
 					}
 				}
+				// E1 adds per-execution timing, so compare the complete budget to
+				// this execution's persisted facts before comparing stable selections.
+				budgetJSON, err := json.Marshal(readRecord(t, dir).Budget)
+				if err != nil {
+					t.Fatal(err)
+				}
+				expectedBudget := decodedOutput(t, budgetJSON, outputJSON)
+				if !reflect.DeepEqual(view["budget"], expectedBudget) {
+					t.Fatalf("%s budget differs from its recorded run: %#v != %#v", audience.flag, view["budget"], expectedBudget)
+				}
+				// Exact snapshot serialization is also checked by
+				// TestGateRunBudgetV2OutputEquality; distinct runs have distinct clocks.
+				stableBudget := view["budget"].(map[string]any)
+				for _, key := range []string{"started", "elapsed_seconds", "attempt_seconds"} {
+					delete(stableBudget, key)
+				}
+				delete(stableBudget["remaining"].(map[string]any), "seconds")
+				// Concurrent passes may finish in a different order. Keep every note.
+				slices.SortFunc(view["notes"].([]any), func(a, b any) int { return strings.Compare(a.(string), b.(string)) })
 				if selected != nil && !reflect.DeepEqual(selected, decoded) {
-					t.Fatalf("audiences selected different facts: %#v != %#v", selected, decoded)
+					t.Fatalf("audiences selected different stable facts: %#v != %#v", selected, decoded)
 				}
 				selected = decoded
 			}
