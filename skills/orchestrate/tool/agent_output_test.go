@@ -308,6 +308,52 @@ func TestAgentOutputLegacyJSONBytes(t *testing.T) {
 	}
 }
 
+func TestAgentOutputV2BatchConceptTipOnceWithoutMutatingViews(t *testing.T) {
+	views := []*ctxView{
+		{Kind: "text", Query: "StartCheckout", Total: 1, Shown: 1},
+		{Kind: "find", Query: "checkout gateway", Total: 1, Shown: 1, Tip: conceptTipText},
+		{Kind: "find", Query: "payment gateway", Total: 1, Shown: 1, Tip: conceptTipText},
+	}
+	legacy := func() string {
+		var b bytes.Buffer
+		a := &app{out: &b}
+		if err := a.ctxEmit(&ctxEnv{}, true, "", views); err != nil {
+			t.Fatal(err)
+		}
+		return b.String()
+	}
+	before := legacy()
+	var selected any
+	for _, audience := range []outputAudience{outputAgent, outputHuman, outputJSON} {
+		var b bytes.Buffer
+		a := &app{out: ctxV2Output{&b, audience}}
+		if err := a.ctxEmitV2(&ctxEnv{}, views, ctxFmt{SchemaVersion: 2}, 1000); err != nil {
+			t.Fatal(err)
+		}
+		decoded := decodedOutput(t, b.Bytes(), audience)
+		results := decoded.(map[string]any)["result"].([]any)
+		tips := 0
+		for i, result := range results {
+			if tip, ok := result.(map[string]any)["tip"]; ok {
+				tips++
+				if i != 1 || tip != conceptTipText {
+					t.Fatalf("tip changed or moved from first concept lookup: %#v", results)
+				}
+			}
+		}
+		if tips != 1 {
+			t.Errorf("audience %v emitted %d tips, want exactly one", audience, tips)
+		}
+		if selected != nil && !reflect.DeepEqual(selected, decoded) {
+			t.Errorf("audiences selected different batch facts: %#v != %#v", selected, decoded)
+		}
+		selected = decoded
+		if views[1].Tip != conceptTipText || views[2].Tip != conceptTipText || legacy() != before {
+			t.Fatal("v2 selection mutated cached views or legacy JSON bytes")
+		}
+	}
+}
+
 func TestAgentOutputV2BudgetAndSource(t *testing.T) {
 	c := newCtxHarness(t)
 	python := "def greet(name):\n\tif name == \"世界\":\n\t\treturn 'a,b: [x]'  \n\n"

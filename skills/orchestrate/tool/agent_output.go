@@ -430,11 +430,16 @@ func (a *app) ctxEmitV2(e *ctxEnv, data any, f ctxFmt, budget int) error {
 		}
 		sort.Slice(selection.Common, func(i, j int) bool { return selection.Common[i].Path < selection.Common[j].Path })
 		views := make([]*ctxView, 0, len(v))
+		tipShown := false
 		for _, view := range v {
 			out, err := selectView(view)
 			if err != nil {
 				return err
 			}
+			if tipShown {
+				out.Tip = ""
+			}
+			tipShown = tipShown || out.Tip != ""
 			views = append(views, out)
 		}
 		selection.Status, selection.Result = ctxBatchStatus(views), views
