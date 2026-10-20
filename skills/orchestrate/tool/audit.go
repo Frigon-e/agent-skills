@@ -66,6 +66,7 @@ func statusEvents(id string, entries []entry) []auditEvent {
 	frozen := ""
 	for i, e := range entries {
 		switch {
+		// Classify preliminary passes too: their suffix is "(not integrated)".
 		case e.By == "orch" && strings.HasPrefix(e.Text, "verify pass"):
 			add(e, "verify", "ok", e.Text)
 		case e.By == "orch" && strings.HasPrefix(e.Text, "verify fail"):

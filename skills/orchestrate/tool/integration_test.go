@@ -152,12 +152,17 @@ func TestIntegrationVerifyMergesAndIsIdempotent(t *testing.T) {
 		t.Fatal("alpha is not on the integration branch only")
 	}
 	head := h.branchTip("orch/alpha")
-	if got := strings.TrimSpace(string(mustRead(t, filepath.Join(h.dir("alpha"), "integrated")))); got != head {
-		t.Errorf("integrated = %q, want %q", got, head)
+	wantMarker := "candidate " + head + "\nmerge " + h.branchTip(intBranch) + "\n"
+	if got := string(mustRead(t, filepath.Join(h.dir("alpha"), "integrated"))); got != wantMarker {
+		t.Errorf("integrated = %q, want %q", got, wantMarker)
 	}
 	wantContains(t, string(mustRead(t, filepath.Join(h.dir("alpha"), "status.log"))), "merged into "+intBranch+" at ")
 	tip := h.branchTip(intBranch)
-	wantContains(t, h.must("verify", "alpha"), "integration: already merged")
+	wantContains(t, h.must("verify", "alpha"), "integration: already merged", "no post-merge check ran")
+	wantContains(t, string(mustRead(t, filepath.Join(h.dir("alpha"), "status.log"))), "no post-merge check ran")
+	if got := string(mustRead(t, filepath.Join(h.dir("alpha"), "integrated"))); got != wantMarker {
+		t.Errorf("already-merged marker = %q, want %q", got, wantMarker)
+	}
 	if h.branchTip(intBranch) != tip {
 		t.Error("second verify moved the branch")
 	}
@@ -165,13 +170,141 @@ func TestIntegrationVerifyMergesAndIsIdempotent(t *testing.T) {
 
 func TestIntegrationNoMergeFlagAndNonIntegrationTask(t *testing.T) {
 	h := planInt(t)
-	h.leadWork("alpha", map[string]string{"alpha/f": "a\n"})
+	wt := h.leadWork("alpha", map[string]string{"alpha/f": "a\n"})
+	writeFiles(t, wt, map[string]string{"alpha/untracked": "work in progress\n"})
+	writeFiles(t, wt, map[string]string{"alpha/f": "uncommitted work\n"})
 	out := h.must("verify", "alpha", "--no-merge")
+	wantContains(t, out, "verify: pass (not integrated)", "2 changed")
+	wantContains(t, string(mustRead(t, filepath.Join(h.dir("alpha"), "status.log"))), "verify pass (not integrated)")
 	if strings.Contains(out, "integration:") || h.branchHas(intBranch, "alpha/f") {
 		t.Errorf("--no-merge merged:\n%s", out)
 	}
 	if _, err := os.Stat(filepath.Join(h.dir("alpha"), "integrated")); err == nil {
 		t.Error("--no-merge wrote the integrated marker")
+	}
+}
+
+func TestIntegrationVerifyRejectsUntrackedImplementation(t *testing.T) {
+	h := planInt(t)
+	wt := h.leadWork("alpha", map[string]string{"alpha/f": "a\n"})
+	writeFiles(t, wt, map[string]string{"alpha/implementation": "required implementation\n"})
+	tip := h.branchTip(intBranch)
+	code, out := h.run("verify", "alpha")
+	if code != 1 {
+		t.Fatalf("untracked implementation silently omitted: exit %d\n%s", code, out)
+	}
+	wantContains(t, out, "candidate is not clean", "--no-merge")
+	if h.branchTip(intBranch) != tip || exists(filepath.Join(h.dir("alpha"), "integrated")) {
+		t.Fatal("dirty candidate was integrated")
+	}
+}
+
+func TestIntegrationVerifyRejectsDirtyTrackedCandidate(t *testing.T) {
+	for _, staged := range []bool{false, true} {
+		name := "unstaged"
+		if staged {
+			name = "staged"
+		}
+		t.Run(name, func(t *testing.T) {
+			h := planInt(t)
+			wt := h.leadWork("alpha", map[string]string{"alpha/f": "a\n"})
+			writeFiles(t, wt, map[string]string{"alpha/f": "changed\n"})
+			if staged {
+				h.gitIn(wt, "add", "alpha/f")
+			}
+			tip := h.branchTip(intBranch)
+			if code, out := h.run("verify", "alpha"); code != 1 || !strings.Contains(out, "candidate is not clean") {
+				t.Fatalf("dirty candidate: exit %d\n%s", code, out)
+			}
+			if h.branchTip(intBranch) != tip || exists(filepath.Join(h.dir("alpha"), "integrated")) {
+				t.Fatal("dirty candidate integrated")
+			}
+		})
+	}
+}
+
+func TestIntegrationVerifyRejectsCheckMutation(t *testing.T) {
+	for _, tc := range []struct{ name, check, message string }{
+		{"tracked source", "echo changed > alpha/f", "non-ignored working-tree changes"},
+		{"untracked source", "echo implementation > alpha/new", "non-ignored working-tree changes"},
+		{"advanced HEAD", "git -c core.hooksPath=/dev/null commit --allow-empty -qm advanced", "HEAD moved"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := planInt(t)
+			h.leadWork("alpha", map[string]string{"alpha/f": "a\n"})
+			h.setCheck(tc.check)
+			tip := h.branchTip(intBranch)
+			code, out := h.run("verify", "alpha")
+			if code != 1 {
+				t.Fatalf("mutating check: exit %d\n%s", code, out)
+			}
+			wantContains(t, out, "verify: fail", "candidate: changed after checks", tc.message, "integration refused")
+			if h.branchTip(intBranch) != tip || exists(filepath.Join(h.dir("alpha"), "integrated")) {
+				t.Fatal("mutating check authorized integration")
+			}
+		})
+	}
+}
+
+func TestIntegrationVerifyAllowsIgnoredCheckOutputs(t *testing.T) {
+	h := planInt(t)
+	wt := h.leadWork("alpha", map[string]string{"alpha/f": "a\n", "alpha/.gitignore": "*.log\n"})
+	writeFiles(t, wt, map[string]string{"alpha/before.log": "ignored\n"})
+	h.setCheck("echo output > alpha/check.log")
+	wantContains(t, h.must("verify", "alpha"), "verify: pass", "integration: merged into "+intBranch)
+	h.must("integration", "remove", "spec")
+}
+
+func TestIntegrationPostMergeCheckMutationRecovers(t *testing.T) {
+	for _, tc := range []struct{ name, check string }{
+		{"passing dirty check", "echo changed > alpha/f; echo output > check-output"},
+		{"failing dirty check", "echo changed > alpha/f; echo output > check-output; exit 1"},
+		{"advanced HEAD", "git -c core.hooksPath=/dev/null commit --allow-empty -qm advanced"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := planInt(t)
+			h.leadWork("alpha", map[string]string{"alpha/f": "a\n"})
+			h.setCheck(`case \"$PWD\" in */integration/*) ` + tc.check + `;; esac`)
+			tip := h.branchTip(intBranch)
+			code, out := h.run("verify", "alpha")
+			if code != 1 {
+				t.Fatalf("post-merge check: exit %d\n%s", code, out)
+			}
+			wantContains(t, out, "integration: check failed", "post-merge check changed the merge result", "reset merge and cleaned non-ignored check outputs")
+			if h.branchTip(intBranch) != tip || exists(filepath.Join(h.dir("alpha"), "integrated")) {
+				t.Fatal("mutating post-merge check authorized integration")
+			}
+			iwt := filepath.Join(h.tmp, "state", "repo", "integration", "spec", "wt")
+			if status, err := git(iwt, "status", "--porcelain"); err != nil || status != "" {
+				t.Fatalf("rollback left dirty worktree: %v\n%s", err, status)
+			}
+			h.must("integration", "remove", "spec")
+		})
+	}
+}
+
+func TestIntegrationDependentAcceptsLegacyMarker(t *testing.T) {
+	h := planInt(t)
+	h.leadWork("alpha", map[string]string{"alpha/f": "a\n"})
+	h.done("alpha")
+	h.must("verify", "alpha")
+	writeFiles(t, h.dir("alpha"), map[string]string{"integrated": h.branchTip("orch/alpha") + "\n"})
+	wantContains(t, h.must("spawn", "beta"), "spawned")
+}
+
+func TestIntegrationDependentRejectsInvalidMarker(t *testing.T) {
+	for _, marker := range []string{"candidate %s\nmerge invalid\n", "candidate %s\nmerge %s\nextra\n"} {
+		t.Run(marker, func(t *testing.T) {
+			h := planInt(t)
+			h.leadWork("alpha", map[string]string{"alpha/f": "a\n"})
+			h.done("alpha")
+			h.must("verify", "alpha")
+			sha := h.branchTip("orch/alpha")
+			writeFiles(t, h.dir("alpha"), map[string]string{"integrated": strings.ReplaceAll(marker, "%s", sha)})
+			if code, out := h.run("spawn", "beta"); code != 1 || !strings.Contains(out, "not merged into") {
+				t.Fatalf("malformed marker authorized dependency: exit %d\n%s", code, out)
+			}
+		})
 	}
 }
 

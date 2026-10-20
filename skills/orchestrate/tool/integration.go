@@ -72,33 +72,36 @@ func ensureIntegrationBranch(repo, branch, base string) error {
 }
 
 // integrate merges a verified ship package into its integration branch, in
-// the merge worktree, under the branch's lock. The merged sha is the lead's
-// worktree HEAD, never a name from task.md. A conflict is aborted and a
-// failing repo check is reset, so the branch only ever moves to a green tip.
-func (a *app) integrate(s site, dir, id string, fm map[string]string) error {
+// the merge worktree, under the branch's lock. The merged sha is the clean
+// candidate pinned before verification, never a fresh HEAD or task.md ref.
+// A conflict is aborted and a failing repo check is reset.
+func (a *app) integrate(s site, dir, id string, fm map[string]string, candidate string) error {
 	branch := fm["integration"]
 	slug, ok := integrationSlug(branch)
 	if !ok {
 		return fail("task.md integration %q is not an orch integration branch; verify will not pass it to git", branch)
 	}
-	head, err := git(worktreePath(dir, id), "rev-parse", "HEAD")
-	if err != nil || !baseSHARe.MatchString(head) {
-		return fail("cannot read HEAD of the worktree of %s", id)
+	if !baseSHARe.MatchString(candidate) {
+		return fail("candidate %q is not a commit sha", candidate)
 	}
 	idir := integrationDir(s.root, slug)
 	if err := os.MkdirAll(idir, 0o755); err != nil {
 		return err
 	}
 	return withFlock(filepath.Join(idir, "lock"), func() error {
+		if err := unchangedCandidate(worktreePath(dir, id), candidate); err != nil {
+			return fail("candidate changed before integration: %v", err)
+		}
 		tip, err := integrationTip(s.repo, branch)
 		if err != nil {
 			return err
 		}
-		if isAncestor(s.repo, head, tip) {
-			if err := os.WriteFile(filepath.Join(dir, "integrated"), []byte(head+"\n"), 0o644); err != nil {
+		if isAncestor(s.repo, candidate, tip) {
+			if err := writeIntegrated(dir, candidate, tip); err != nil {
 				return err
 			}
-			fmt.Fprintf(a.out, "integration: already merged into %s\n", branch)
+			_ = a.appendStatus(dir, "note", fmt.Sprintf("already merged into %s at %s; no post-merge check ran", branch, tip[:12]), "", "orch")
+			fmt.Fprintf(a.out, "integration: already merged into %s (no post-merge check ran)\n", branch)
 			return nil
 		}
 		iwt := filepath.Join(idir, "wt")
@@ -109,14 +112,14 @@ func (a *app) integrate(s site, dir, id string, fm map[string]string) error {
 		} else if cur, _ := git(iwt, "symbolic-ref", "--short", "HEAD"); cur != branch {
 			return fail("merge worktree %s is on %q, not %s", iwt, cur, branch)
 		}
-		before, err := git(iwt, "rev-parse", "HEAD")
-		if err != nil {
-			return err
+		before := tip
+		if err := unchangedCandidate(iwt, before); err != nil {
+			return fail("merge worktree is not clean: %v; clean it up first", err)
 		}
 		msg := fmt.Sprintf("orch: merge %s into %s", id, branch)
 		// No hooks: with a tracked hooks directory, the lead's own branch could
 		// otherwise run its code in this merge.
-		if out, err := gitOutput(iwt, "-c", "core.hooksPath=/dev/null", "merge", "--no-ff", "--no-edit", "-m", msg, head); err != nil {
+		if out, err := gitOutput(iwt, "-c", "core.hooksPath=/dev/null", "merge", "--no-ff", "--no-edit", "-m", msg, candidate); err != nil {
 			conflicts, _ := git(iwt, "diff", "--name-only", "--diff-filter=U")
 			_, _ = git(iwt, "merge", "--abort")
 			if conflicts == "" {
@@ -130,24 +133,60 @@ func (a *app) integrate(s site, dir, id string, fm map[string]string) error {
 			_ = a.appendStatus(dir, "note", fmt.Sprintf("merge into %s conflicted in %d files; left unmerged", branch, len(files)), "", "orch")
 			return &exitError{code: 1}
 		}
+		merged, err := git(iwt, "rev-parse", "HEAD")
+		if err != nil || !baseSHARe.MatchString(merged) {
+			return fail("cannot read merge result for %s", id)
+		}
 		if s.cfg.Check != "" {
-			if code, out := runCheck(iwt, s.cfg.Check); code != 0 {
+			code, out := runCheck(iwt, s.cfg.Check)
+			stateErr := unchangedCandidate(iwt, merged)
+			if code != 0 || stateErr != nil {
 				if rout, err := gitOutput(iwt, "reset", "--hard", before); err != nil {
 					return fail("check failed after merging %s and the reset to %s failed: %s", id, before, rout)
 				}
+				// The merge worktree was clean before the check. Remove only its
+				// non-ignored outputs, so a failed check cannot block removal.
+				if cout, err := gitOutput(iwt, "clean", "-fd"); err != nil {
+					return fail("check failed after merging %s; reset to %s, but cleaning check outputs failed: %s", id, before, cout)
+				}
 				fmt.Fprintf(a.out, "integration: check failed\noutput (last lines):\n%s\n", out)
-				_ = a.appendStatus(dir, "note", fmt.Sprintf("merge into %s failed the repo check; reset to %s", branch, before[:12]), "", "orch")
+				if stateErr != nil {
+					fmt.Fprintf(a.out, "candidate: post-merge check changed the merge result: %v\n", stateErr)
+				}
+				fmt.Fprintln(a.out, "recovery: reset merge and cleaned non-ignored check outputs")
+				_ = a.appendStatus(dir, "note", fmt.Sprintf("merge into %s failed the repo check; reset to %s; cleaned non-ignored check outputs", branch, before[:12]), "", "orch")
 				return &exitError{code: 1}
 			}
 		}
-		if err := os.WriteFile(filepath.Join(dir, "integrated"), []byte(head+"\n"), 0o644); err != nil {
+		if err := writeIntegrated(dir, candidate, merged); err != nil {
 			return err
 		}
-		now, _ := git(iwt, "rev-parse", "--short=12", "HEAD")
+		now := merged[:12]
 		_ = a.appendStatus(dir, "note", fmt.Sprintf("merged into %s at %s", branch, now), "", "orch")
 		fmt.Fprintf(a.out, "integration: merged into %s (%s)\n", branch, now)
 		return nil
 	})
+}
+
+func writeIntegrated(dir, candidate, merged string) error {
+	return os.WriteFile(filepath.Join(dir, "integrated"), []byte("candidate "+candidate+"\nmerge "+merged+"\n"), 0o644)
+}
+
+// integratedCommits reads the current marker and the legacy single-candidate SHA.
+func integratedCommits(text string) (candidate, merged string) {
+	text = strings.TrimSpace(text)
+	if baseSHARe.MatchString(text) {
+		return text, text
+	}
+	lines := strings.Split(text, "\n")
+	if len(lines) == 2 && strings.HasPrefix(lines[0], "candidate ") && strings.HasPrefix(lines[1], "merge ") {
+		candidate = strings.TrimPrefix(lines[0], "candidate ")
+		merged = strings.TrimPrefix(lines[1], "merge ")
+		if baseSHARe.MatchString(candidate) && baseSHARe.MatchString(merged) {
+			return candidate, merged
+		}
+	}
+	return "", ""
 }
 
 // requireMerged refuses a dependent whose prerequisites are not in the
@@ -176,8 +215,8 @@ func requireMerged(s site, dir, id string, fm map[string]string) error {
 			continue
 		}
 		b, _ := os.ReadFile(filepath.Join(depDir, "integrated"))
-		merged := strings.TrimSpace(string(b))
-		if !baseSHARe.MatchString(merged) || !isAncestor(s.repo, merged, tip) {
+		candidate, merged := integratedCommits(string(b))
+		if candidate == "" || !isAncestor(s.repo, candidate, merged) || !isAncestor(s.repo, merged, tip) {
 			return fail("dependency %s is done but not merged into %s: run orch verify %s", dep, branch, dep)
 		}
 	}

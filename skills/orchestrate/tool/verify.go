@@ -61,6 +61,18 @@ func cmdVerify(a *app, args []string) error {
 		return fail("task.md base %q is not a commit sha; verify will not pass it to git", fm["base"])
 	}
 
+	integrating := fm["integration"] != "" && !*noMerge
+	candidate := ""
+	if integrating {
+		candidate, err = git(wt, "rev-parse", "HEAD")
+		if err != nil || !baseSHARe.MatchString(candidate) {
+			return fail("cannot read candidate HEAD of %s", id)
+		}
+		if err := unchangedCandidate(wt, candidate); err != nil {
+			return fail("candidate is not clean: %v; commit the work first, or use orch verify %s --no-merge for preliminary working-tree validation", err, id)
+		}
+	}
+
 	files, err := changedFiles(wt, base)
 	if err != nil {
 		return err
@@ -87,8 +99,22 @@ func cmdVerify(a *app, args []string) error {
 	if len(outside) > 0 {
 		result = "fail"
 	}
+	var candidateErr error
+	if integrating {
+		candidateErr = unchangedCandidate(wt, candidate)
+		if candidateErr != nil {
+			result = "fail"
+		}
+	}
 
-	fmt.Fprintf(a.out, "verify: %s\ncheck: %s\nfiles: %d changed, %d lines\n", result, toonValue(checkLine), len(files), lines)
+	wording := result
+	if result == "pass" && !integrating {
+		wording += " (not integrated)"
+	}
+	fmt.Fprintf(a.out, "verify: %s\ncheck: %s\nfiles: %d changed, %d lines\n", wording, toonValue(checkLine), len(files), lines)
+	if candidateErr != nil {
+		fmt.Fprintf(a.out, "candidate: changed after checks: %v; integration refused\n", candidateErr)
+	}
 	switch {
 	case len(owns) == 0:
 		fmt.Fprintln(a.out, "scope: not checked (the task has no `owns:` front matter)")
@@ -103,13 +129,34 @@ func cmdVerify(a *app, args []string) error {
 	if tail != "" {
 		fmt.Fprintf(a.out, "output (last lines):\n%s\n", tail)
 	}
-	note := fmt.Sprintf("verify %s: check %s; %d files, %d outside owns", result, checkLine, len(files), len(outside))
+	note := fmt.Sprintf("verify %s: check %s; %d files, %d outside owns", wording, checkLine, len(files), len(outside))
 	_ = a.appendStatus(dir, "note", note, "", "orch")
 	if result != "pass" {
 		return &exitError{code: 1, msg: ""}
 	}
-	if fm["integration"] != "" && !*noMerge {
-		return a.integrate(s, dir, id, fm)
+	if integrating {
+		return a.integrate(s, dir, id, fm, candidate)
+	}
+	return nil
+}
+
+// unchangedCandidate excludes ignored build outputs, but never tracked changes or
+// untracked implementation files. HEAD is compared with the commit pinned before
+// scope and acceptance checks, not read afresh as the commit to integrate.
+func unchangedCandidate(wt, candidate string) error {
+	head, err := git(wt, "rev-parse", "HEAD")
+	if err != nil {
+		return fail("cannot read HEAD in %s", wt)
+	}
+	if head != candidate {
+		return fail("HEAD moved from %s to %s", candidate, head)
+	}
+	dirty, err := git(wt, "status", "--porcelain", "--untracked-files=all", "--ignore-submodules=none")
+	if err != nil {
+		return fail("cannot read working-tree state in %s", wt)
+	}
+	if dirty != "" {
+		return fail("non-ignored working-tree changes in %s:\n%s", wt, dirty)
 	}
 	return nil
 }
