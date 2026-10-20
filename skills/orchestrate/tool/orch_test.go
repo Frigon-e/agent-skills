@@ -721,7 +721,10 @@ func TestGateEvidenceDecidesTheVerdict(t *testing.T) {
 	if code != 1 {
 		t.Fatalf("unsupported blocking claim passed: %d %s", code, out)
 	}
-	wantContains(t, out, "gate: unverified", "blockers: 0 verified", "concerns: 0 verified, 1 unverified", "dropped: 1 claim(s)")
+	view := wantGateState(t, out, "incomplete")
+	if view.Blockers != "0 verified" || view.Concerns != "0 verified, 1 unverified" || view.Dropped != "1 claim(s) without real evidence" {
+		t.Fatalf("incorrect finding accounting: %+v", view)
+	}
 	gdir := gateDir(h.a.siteRoot(t), specHash(mustRead(t, filepath.Join(h.repo, "spec.md"))))
 	rec := readRecord(t, gdir)
 	if rec.State != "incomplete" || len(rec.Reduction.Reasons) == 0 || rec.Reduction.Reasons[0].Reason != reviewUnsupportedClaim {
@@ -740,7 +743,9 @@ func TestGateEvidenceDecidesTheVerdict(t *testing.T) {
 	if code != 1 {
 		t.Fatalf("a verified blocker passed the gate: %d %s", code, out)
 	}
-	wantContains(t, out, "gate: fail", "blockers: 1 verified")
+	if view := wantGateState(t, out, "fail"); view.Blockers != "1 verified" {
+		t.Fatalf("missing accepted blocker count: %+v", view)
+	}
 	wantContains(t, string(mustRead(t, filepath.Join(filepath.Dir(h.dir("x")), "gate", specHash(mustRead(t, filepath.Join(h.repo, "spec.md"))), "report.md"))), "Put ignores errors")
 }
 
@@ -769,41 +774,48 @@ func TestGateQuestionsScopeAndFailures(t *testing.T) {
 	if code != 1 {
 		t.Fatalf("an open question passed the gate: %d %s", code, out)
 	}
-	wantContains(t, out, "gate: fail", "questions: 1 need a decision", "orch ask --cards")
+	view := wantGateState(t, out, "incomplete")
+	if view.Questions != "1 need a decision" || len(view.Help) != 1 || view.Help[0] != "orch ask --cards "+filepath.Join(gdir, "questions") {
+		t.Fatalf("missing question or next action: %+v", view)
+	}
 	wantContains(t, h.must("ask", "--cards", filepath.Join(gdir, "questions")), "questions: 1")
 
 	// A question whose answer changes nothing visible does not block.
 	h.fakePi(gatePasses(map[string]string{"package-api": `{"id":"api","will_change":[],"claims":[],"reuse":[],"questions":[{"package":"api","question":"Where does sub go?","answered_by":"","changes_result":false}]}`}))
-	wantContains(t, h.must("gate", "spec.md"), "gate: pass", "questions: 0 need a decision")
+	if view := wantGateState(t, h.must("gate", "spec.md"), "pass"); view.Questions != "0 need a decision" {
+		t.Fatalf("nondecisive question blocked: %+v", view)
+	}
 
 	// An answer that cites a line the repo does not have is no answer.
 	h.fakePi(gatePasses(map[string]string{"package-api": `{"id":"api","will_change":[],"claims":[],"reuse":[],"questions":[{"package":"api","question":"Which table?","answered_by":"internal/store.go:99","changes_result":true}]}`}))
-	if code, out := h.run("gate", "spec.md"); code != 1 || !strings.Contains(out, "questions: 1 need a decision") {
+	if code, out := h.run("gate", "spec.md"); code != 1 || gateView(t, out).Questions != "1 need a decision" {
 		t.Fatalf("a fake answer counted: %d %s", code, out)
 	}
 
 	// A package that must change a file another package owns is a blocker.
 	h.fakePi(gatePasses(map[string]string{"package-api": `{"id":"api","will_change":["internal/store.go"],"claims":[],"questions":[],"reuse":[]}`}))
-	if code, out := h.run("gate", "spec.md"); code != 1 || !strings.Contains(out, "blockers: 1 verified") {
+	if code, out := h.run("gate", "spec.md"); code != 1 || gateView(t, out).Blockers != "1 verified" {
 		t.Fatalf("ownership conflict passed: %d %s", code, out)
 	}
 
-	// A pass that fails to run leaves the gate unverified, never passed.
+	// A pass that fails to run leaves required review incomplete, never passed.
 	h.fakePi(gatePasses(map[string]string{"adv-a": "FAIL"}))
 	code, out = h.run("gate", "spec.md")
 	if code != 1 {
 		t.Fatalf("a failed pass passed the gate: %d %s", code, out)
 	}
-	wantContains(t, out, "gate: unverified", "pass_failed: adversary-a")
+	if view := wantGateState(t, out, "incomplete"); view.PassErrors["adversary-a"] == "" {
+		t.Fatalf("missing pass failure: %+v", view)
+	}
 	if code, _ := h.run("plan", "spec.md"); code != 1 {
-		t.Fatal("plan accepted an unverified gate")
+		t.Fatal("plan accepted an incomplete gate")
 	}
 
 	// With only a pi choice and pi limited, no model pass runs.
 	dir := h.fakePi(gatePasses(nil))
 	h.must("health", "set", "pi", "limited")
 	code, out = h.run("gate", "spec.md", "--runner", "pi:"+gateModelDef)
-	if code != 1 || !strings.Contains(out, "gate: unverified") {
+	if code != 1 || gateView(t, out).State != "incomplete" {
 		t.Fatalf("gate with pi limited: %d %s", code, out)
 	}
 	if _, err := os.Stat(filepath.Join(dir, "calls.log")); err == nil {
@@ -823,7 +835,9 @@ func TestGateDeterministicChecks(t *testing.T) {
 	if code != 1 {
 		t.Fatalf("a spec with a missing command and pointer passed: %d %s", code, out)
 	}
-	wantContains(t, out, "gate: fail", "deterministic: 3 issue(s)")
+	if view := wantGateState(t, out, "fail"); view.Deterministic != "3 issue(s)" {
+		t.Fatalf("incorrect deterministic count: %+v", view)
+	}
 	hash := specHash(mustRead(t, filepath.Join(h.repo, "spec.md")))
 	report := string(mustRead(t, filepath.Join(filepath.Dir(h.dir("x")), "gate", hash, "report.md")))
 	wantContains(t, report, `acceptance command "scripts/missing-check" is not in the repo`, "pointer internal/ghost.go:12 does not resolve")
@@ -1156,7 +1170,7 @@ func TestAllowedModels(t *testing.T) {
 	// So the gate model.
 	t.Setenv("ORCH_GATE_MODEL", "weird/model")
 	h.commitSpec(threePkgSpec())
-	if code, out := h.run("gate", "spec.md"); code != 1 || !strings.Contains(out, "gate: unverified") || !strings.Contains(out, "not on the allowed list") {
+	if code, out := h.run("gate", "spec.md"); code != 1 || gateView(t, out).State != "incomplete" || !strings.Contains(gateView(t, out).PassErrors["all"], "not on the allowed list") {
 		t.Fatalf("gate ran a disallowed model: %d %s", code, out)
 	}
 

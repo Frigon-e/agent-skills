@@ -126,7 +126,9 @@ func TestGateFutureFileOwnershipBlocksApproval(t *testing.T) {
 	if code != 1 {
 		t.Fatalf("future-file ownership collision passed: %s", out)
 	}
-	wantContains(t, out, "gate: fail", "blockers: 1 verified")
+	if view := wantGateState(t, out, "fail"); view.Blockers != "1 verified" {
+		t.Fatalf("future ownership blocker missing: %+v", view)
+	}
 }
 
 func TestGateSalvagedFindingsRemainDiagnostic(t *testing.T) {
@@ -203,11 +205,11 @@ func TestGateSchemaRepairSharesCoverageSlot(t *testing.T) {
 // Exercise the public gate with a fake reviewer, not just the decoder.
 func TestGateReviewCompleteness(t *testing.T) {
 	for _, tc := range []struct {
-		name, reply, status string
-		code                int
+		name, reply, state string
+		code               int
 	}{
-		{"empty object", `{}`, "unverified", 1},
-		{"package ID only", `{"packages":[{"id":"api"}]}`, "unverified", 1},
+		{"empty object", `{}`, "incomplete", 1},
+		{"package ID only", `{"packages":[{"id":"api"}]}`, "incomplete", 1},
 		{"explicit clean review", `{"findings":[]}`, "pass", 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -221,7 +223,7 @@ func TestGateReviewCompleteness(t *testing.T) {
 			if code != tc.code {
 				t.Fatalf("exit %d, want %d:\n%s", code, tc.code, out)
 			}
-			wantContains(t, out, "gate: "+tc.status)
+			wantGateState(t, out, tc.state)
 			rec := readRecord(t, gdir)
 			if tc.code != 0 && len(rec.Reasons) == 0 {
 				t.Fatal("incomplete review has no reasons")

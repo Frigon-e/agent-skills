@@ -9,6 +9,36 @@ import (
 	"testing"
 )
 
+// gateView checks the public default selection, not its TOON spelling.
+func gateView(t *testing.T, out string) gateInformation {
+	t.Helper()
+	fields := decodedOutput(t, []byte(out), outputAgent).(map[string]any)
+	if fields["schema_version"] != float64(2) || fields["status"] != nil {
+		t.Fatalf("not a state-only v2 gate view: %#v", fields)
+	}
+	b, err := json.Marshal(fields)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var view gateInformation
+	if err := json.Unmarshal(b, &view); err != nil {
+		t.Fatal(err)
+	}
+	if view.Gate != view.State {
+		t.Fatalf("gate alias differs from state: %+v", view)
+	}
+	return view
+}
+
+func wantGateState(t *testing.T, out, state string) gateInformation {
+	t.Helper()
+	view := gateView(t, out)
+	if view.State != state {
+		t.Fatalf("state %q, want %q: %s", view.State, state, out)
+	}
+	return view
+}
+
 func reducerFixture(language string) (*gateSubject, []reviewCheck, []reviewAnswer, []reviewFinding, reviewPolicy) {
 	p := evidenceTestPacket(language)
 	if language == "go" {
@@ -521,15 +551,53 @@ func TestGateStateSupportingRepairCompletesTheSameClaim(t *testing.T) {
 	}
 }
 
-func TestGateStateLegacyQuoting(t *testing.T) {
-	for _, tc := range []struct{ value, want string }{
-		{"plain words", "plain words"}, {"true", "true"}, {"null", "null"}, {"", `""`},
-		{"group:api", `"group:api"`}, {" left ", `" left "`}, {"a,b", `"a,b"`},
-		{"line\nnext", `"line\nnext"`}, {`a"b\c`, `"a\"b\\c"`},
-	} {
-		if got := legacyGateValue(tc.value); got != tc.want {
-			t.Errorf("legacy quoting %q: %q != %q", tc.value, got, tc.want)
+func TestGateStateOutputQuoting(t *testing.T) {
+	values := []string{"plain words", "true", "null", "", "group:api", " left ", "a,b", "line\nnext", `a"b\c`}
+	for _, audience := range []outputAudience{outputAgent, outputHuman, outputJSON} {
+		var out strings.Builder
+		if err := writeOutput(&out, audience, gateInformation{SchemaVersion: 2, State: "incomplete", Gate: "incomplete", Notes: values}); err != nil {
+			t.Fatal(err)
 		}
+		view := decodedOutput(t, []byte(out.String()), audience).(map[string]any)
+		for i, value := range values {
+			if got := view["notes"].([]any)[i]; got != value {
+				t.Fatalf("audience %d changed string %q to %#v", audience, value, got)
+			}
+		}
+	}
+}
+
+func TestGateStateRetiresSchemaOneBeforeExecution(t *testing.T) {
+	h := setup(t)
+	h.gateRepo(1)
+	dir := h.fakePi(gatePasses(nil))
+	for _, flag := range []string{"", "--human", "--json"} {
+		args := []string{"gate", "spec.md", "--schema-version", "1"}
+		if flag != "" {
+			args = append(args, flag)
+		}
+		code, out := h.run(args...)
+		if code == 0 {
+			t.Fatalf("retired schema accepted: %s", out)
+		}
+		fields := decodedOutput(t, []byte(out), explicitAudience(args)).(map[string]any)
+		if fields["status"] != "failed" || !strings.Contains(fields["error"].(string), "--schema-version 1 is retired; use --schema-version 2") {
+			t.Fatalf("missing migration hint: %#v", fields)
+		}
+	}
+	if exists(dir + "/calls.log") {
+		t.Fatal("retired schema invoked a reviewer")
+	}
+	code, out := h.run("gate", "spec.md", "--schema-version", "3")
+	if code == 0 || !strings.Contains(out, "--schema-version is 2, not 3") {
+		t.Fatalf("unknown schema accepted: %s", out)
+	}
+	for _, args := range [][]string{{"gate", "--help"}, {"gate", "--schema-version", "2", "--help"}, {"gate", "--human", "--help"}, {"gate", "--json", "--help"}} {
+		code, help := h.run(args...)
+		if code != 0 || strings.Contains(help, "help requested") || strings.Contains(help, "status: failed") {
+			t.Fatalf("help became a failure for %v: exit %d\n%s", args, code, help)
+		}
+		wantContains(t, help, "2 (default)", "error|stale|fail|incomplete|pass", "only a current reducer pass authorizes plan")
 	}
 }
 
@@ -539,22 +607,17 @@ func TestGateStateOutputAudiencesShareV2Selection(t *testing.T) {
 			h := setup(t)
 			dir := h.gateRepo(1)
 			over := map[string]string{}
-			wantState, wantStatus, wantCode := "pass", "pass", 0
+			wantState, wantCode := "pass", 0
 			if incomplete {
 				over["adv-a"] = `{"findings":[{"severity":"blocker","where":"Design","claim":"Unsupported interpretation","evidence":"missing.py:1"}]}`
-				wantState, wantStatus, wantCode = "incomplete", "unverified", 1
+				wantState, wantCode = "incomplete", 1
 			}
 			h.fakePi(gatePasses(over))
-			legacyCode, legacyOut := h.run("gate", "spec.md")
-			if legacyCode != wantCode || !strings.HasPrefix(legacyOut, "gate: "+wantStatus+"\nspec: spec.md (version ") || strings.Contains(legacyOut, "schema_version:") {
-				t.Fatalf("default legacy gate protocol changed: %s", legacyOut)
-			}
-			wantContains(t, legacyOut, "blockers: 0 verified", "concerns: 0 verified, ")
 			var selected any
 			for _, audience := range []struct {
 				flag string
 				kind outputAudience
-			}{{"--schema-version=2", outputAgent}, {"--human", outputHuman}, {"--json", outputJSON}} {
+			}{{"", outputAgent}, {"--schema-version=2", outputAgent}, {"--human", outputHuman}, {"--json", outputJSON}} {
 				args := []string{"gate", "spec.md"}
 				if audience.flag != "" {
 					args = append(args, audience.flag)
@@ -567,6 +630,9 @@ func TestGateStateOutputAudiencesShareV2Selection(t *testing.T) {
 				view := decoded.(map[string]any)
 				if view["schema_version"] != float64(2) || view["state"] != wantState || view["status"] != nil || view["gate"] != wantState {
 					t.Fatalf("wrong public state: %+v", view)
+				}
+				if view["blockers"] != "0 verified" || !strings.HasPrefix(view["concerns"].(string), "0 verified, ") || !strings.HasPrefix(view["spec"].(string), "spec.md (version ") {
+					t.Fatalf("public counts/spec changed: %#v", view)
 				}
 				completion := view["completion"].(map[string]any)
 				if completion["required"].(float64) <= 0 {

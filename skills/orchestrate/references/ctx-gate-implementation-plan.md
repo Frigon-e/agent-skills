@@ -23,9 +23,10 @@ Example: a Python CSV exporter has three required checks. Ownership is valid. A 
 ### Overall state and detail
 
 The public v2 `state` is the sole result model for new gate and bench records.
-The old persisted `status` derivation is retired. A temporary write-only v1
-default stdout adapter remains separate from the state model; v2 output is
-available with `--schema-version 2`, `--human` or `--json`.
+The old `status` derivation and v1 prose writer are retired. Default gate stdout
+is v2 TOON; `--human` and `--json` select readable and machine JSON of the same
+facts. Gate `--schema-version 1` is rejected with a migration hint. The ctx
+schema-version and legacy JSON contracts do not change.
 Historical `status` labels are decoded
 only by `tool/gate_legacy_read.go` and retained as `historical_status`, not
 inferred v2 states. In particular, old `unverified` cannot identify whether a

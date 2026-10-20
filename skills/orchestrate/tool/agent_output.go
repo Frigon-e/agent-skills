@@ -72,9 +72,9 @@ func outputFailure(w io.Writer, audience outputAudience, err error) error {
 	return &exitError{code: code}
 }
 
-// gateInformation keeps compact status and coverage ahead of expansion links.
-// The existing prose values remain for parsers that identify gate/pass prefixes;
-// evidence and findings remain in the stable report artifact, not a prose table.
+// gateInformation is the state-only v2 selection shared by every audience.
+// Evidence and findings remain in the stable report artifact; completion,
+// reasons and expansion links keep the default agent view actionable.
 type gateInformation struct {
 	Budget        *RunBudget         `json:"budget,omitempty"`
 	SchemaVersion int                `json:"schema_version"`

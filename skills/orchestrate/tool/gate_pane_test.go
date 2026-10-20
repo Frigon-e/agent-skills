@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"slices"
 	"strconv"
@@ -351,7 +352,30 @@ func TestGatePanePassesRunInPanesAndApplyLikeHeadless(t *testing.T) {
 	if code != 1 {
 		t.Fatalf("a verified blocker passed the gate in pane mode: %d %s", code, paneOut)
 	}
-	wantContains(t, paneOut, "gate: fail", "blockers: 1 verified")
+	if view := wantGateState(t, paneOut, "fail"); view.Blockers != "1 verified" {
+		t.Fatalf("accepted blocker count missing: %+v", view)
+	}
+	// Compare decoded selections, retaining every fact and the exact note multiset.
+	// Validate each complete budget against its own persisted run before removing
+	// only clock readings, which legitimately differ between independent runs.
+	stableSelection := func(out string) map[string]any {
+		view := decodedOutput(t, []byte(out), outputAgent).(map[string]any)
+		budgetJSON, err := json.Marshal(readRecord(t, gdir).Budget)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if want := decodedOutput(t, budgetJSON, outputJSON); !reflect.DeepEqual(view["budget"], want) {
+			t.Fatalf("output budget differs from recorded run: %#v != %#v", view["budget"], want)
+		}
+		budget := view["budget"].(map[string]any)
+		for _, key := range []string{"started", "elapsed_seconds", "attempt_seconds"} {
+			delete(budget, key)
+		}
+		delete(budget["remaining"].(map[string]any), "seconds")
+		slices.SortFunc(view["notes"].([]any), func(a, b any) int { return strings.Compare(a.(string), b.(string)) })
+		return view
+	}
+	paneView := stableSelection(paneOut)
 	if n := len(h.gateCalls("agent", "start")); n != 3 {
 		t.Fatalf("agent start calls = %d, want 3 (2 adversaries + one group pass for 3 packages)", n)
 	}
@@ -374,29 +398,10 @@ func TestGatePanePassesRunInPanesAndApplyLikeHeadless(t *testing.T) {
 	// The same passes headless give the same verdict and the same output.
 	t.Setenv("HERDR_ENV", "")
 	code, headOut := h.run("gate", "spec.md")
+	headView := stableSelection(headOut)
 	// The fake pane session holds a toolCall, so only the pane run reports turns.
-	paneOut = strings.Replace(paneOut, ", 3 turns, budget hits: soft 0, hard 0", "", 1)
-	// B4 coverage notes arrive in concurrent pass-completion order. Compare
-	// their exact multiset while preserving every non-note byte and position.
-	orderedNotes := func(out string) string {
-		lines := strings.Split(out, "\n")
-		var notes []string
-		for _, line := range lines {
-			if strings.HasPrefix(line, "note: ") {
-				notes = append(notes, line)
-			}
-		}
-		slices.Sort(notes)
-		n := 0
-		for i, line := range lines {
-			if strings.HasPrefix(line, "note: ") {
-				lines[i] = notes[n]
-				n++
-			}
-		}
-		return strings.Join(lines, "\n")
-	}
-	if code != 1 || orderedNotes(headOut) != orderedNotes(paneOut) {
+	paneView["tokens"] = strings.Replace(paneView["tokens"].(string), ", 3 turns, budget hits: soft 0, hard 0", "", 1)
+	if code != 1 || !reflect.DeepEqual(headView, paneView) {
 		t.Fatalf("headless output differs from pane mode:\n--- pane\n%s\n--- headless\n%s", paneOut, headOut)
 	}
 }
@@ -434,7 +439,7 @@ func TestGateFailedPassKeepsFilesAndSuccessDeletesThem(t *testing.T) {
 	if code != 1 {
 		t.Fatalf("exit %d: %s", code, out)
 	}
-	wantContains(t, out, "gate: unverified", "pass_failed: adversary-a - ", "pi did not start")
+	wantContains(t, wantGateState(t, out, "incomplete").PassErrors["adversary-a"], "pi did not start")
 	for _, f := range []string{"passes/adversary-a.md", "passes/adversary-a.err", "passes/shared-adversary.md", "passes/shared-package.md", "sessions/adversary-a/session.jsonl"} {
 		if !exists(filepath.Join(gdir, f)) {
 			t.Errorf("failed pass lost %s", f)
@@ -469,13 +474,16 @@ func TestGateTimedOutPassGetsCtrlCAndDoesNotStallTheOthers(t *testing.T) {
 	if time.Since(start) > 20*time.Second {
 		t.Fatalf("gate took %s with a 3s pass timeout", time.Since(start))
 	}
-	wantContains(t, out, "gate: unverified", "pass_failed: adversary-a - timed out after 3s")
+	view := wantGateState(t, out, "incomplete")
+	if view.PassErrors["adversary-a"] != "timed out after 3s" {
+		t.Fatalf("wrong public timeout diagnostic: %+v", view.PassErrors)
+	}
 	failure := readRecord(t, gdir).PassErrors["adversary-a"]
 	if failure != "timed out after 3s" {
 		t.Fatalf("recorded timeout = %q, want clear wall-cap diagnostic", failure)
 	}
 	t.Logf("timeout diagnostic: %s", failure)
-	if n := strings.Count(out, "pass_failed:"); n != 1 {
+	if n := len(view.PassErrors); n != 1 {
 		t.Fatalf("%d passes failed, want only the timed-out one:\n%s", n, out)
 	}
 	ints, exits := 0, 0
@@ -556,7 +564,7 @@ func TestGateStartTimeoutWhileWorkingStillFinishesThePass(t *testing.T) {
 	h.gateRepo(1)
 	h.sessionPi(gatePasses(nil))
 	os.WriteFile(h.fake+".starttimeout", nil, 0o644)
-	wantContains(t, h.must("gate", "spec.md"), "gate: pass")
+	wantGateState(t, h.must("gate", "spec.md"), "pass")
 }
 
 func TestGateStuckPaneIsReplacedByAFreshSplit(t *testing.T) {
@@ -565,7 +573,7 @@ func TestGateStuckPaneIsReplacedByAFreshSplit(t *testing.T) {
 	h.sessionPi(gatePasses(nil))
 	os.WriteFile(h.fake+".stuck", nil, 0o644)                                // the first pi to get ctrl+d does not exit
 	gateLeaveWait, gateLeavePoll = 1500*time.Millisecond, 5*time.Millisecond // long enough that a healthy fake pane always exits first
-	wantContains(t, h.must("gate", "spec.md"), "gate: pass")
+	wantGateState(t, h.must("gate", "spec.md"), "pass")
 	closed := h.gateCalls("pane", "close")
 	if len(closed) != 1 {
 		t.Fatalf("pane close calls = %d, want only the stuck pane", len(closed))
@@ -599,7 +607,9 @@ func TestGateHeadlessWithoutHerdrKeepsOnlyFailedSessions(t *testing.T) {
 	if code != 1 {
 		t.Fatalf("exit %d: %s", code, out)
 	}
-	wantContains(t, out, `pass_failed: adversary-a - "pi failed: exit status 1: boom"`)
+	if failure := wantGateState(t, out, "incomplete").PassErrors["adversary-a"]; failure != "pi failed: exit status 1: boom" {
+		t.Fatalf("wrong headless failure: %q", failure)
+	}
 	if st := h.fakeState(); len(st.Calls) != 0 {
 		t.Fatalf("headless gate called herdr: %v", st.Calls)
 	}
@@ -749,8 +759,9 @@ func TestGateStalledGroupPassIsRetriedOnceThenFails(t *testing.T) {
 			if code != 1 {
 				t.Fatalf("exit %d: %s", code, out)
 			}
-			wantContains(t, out, "gate: unverified", "pass_failed: group:api - ", "stalled: no activity for 300ms", "retried once and failed again")
-			if n := strings.Count(out, "pass_failed:"); n != 1 {
+			view := wantGateState(t, out, "incomplete")
+			wantContains(t, view.PassErrors["group:api"], "stalled: no activity for 300ms", "retried once and failed again")
+			if n := len(view.PassErrors); n != 1 {
 				t.Fatalf("%d passes failed, want only the stalled group:\n%s", n, out)
 			}
 			if n := strings.Count(string(mustRead(t, filepath.Join(dir, "attempts.log"))), "attempt"); n != 2 {
@@ -773,8 +784,7 @@ func TestGateStalledGroupPassSucceedsOnTheRetry(t *testing.T) {
 			os.WriteFile(filepath.Join(dir, "group.sleep.once"), nil, 0o644)
 			gateStall = 300 * time.Millisecond
 			out := h.must("gate", "spec.md")
-			wantContains(t, out, "gate: pass")
-			if strings.Contains(out, "pass_failed") {
+			if view := wantGateState(t, out, "pass"); len(view.PassErrors) != 0 {
 				t.Fatalf("a retried pass was reported failed:\n%s", out)
 			}
 			if n := strings.Count(string(mustRead(t, filepath.Join(dir, "attempts.log"))), "attempt"); n != 2 {

@@ -124,9 +124,11 @@ Only a current, subject-bound `pass` whose recorded inputs still reduce to
 pass can authorize `orch plan`. New gate and bench records do not write the
 old `status` field. A read-only shim preserves old gate/bench labels as
 `historical_status`, never as inferred v2 states or new approvals.
-Default stdout still uses the v1 prose adapter; select `--schema-version 2`,
-`--human` or `--json` for the state-based view. That adapter does not participate
-in approval, storage, audit or bench capture.
+Default `orch gate` stdout is the v2 TOON selection. `--human` selects readable
+JSON and `--json` selects machine JSON of the same facts, without legacy
+`status`. `--schema-version 2` is explicit but optional; gate schema 1 is
+retired and rejected with a migration hint. This does not change `orch ctx`
+output or its legacy JSON contract.
 
 Model roles live in the user config next to dispatch rules: `[roles.gate]`,
 `[roles.spec_queries]`, `[roles.shadow_flash]`, `[roles.decider]`. Each role has

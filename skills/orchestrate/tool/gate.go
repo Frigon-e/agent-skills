@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"io/fs"
 	"os"
@@ -1128,9 +1129,10 @@ func cmdGate(a *app, args []string) (retErr error) {
 	fs := a.flags("gate")
 	human := fs.Bool("human", false, "readable JSON of the selected gate summary")
 	machine := fs.Bool("json", false, "JSON of the selected gate summary")
-	schemaVersion := fs.Int("schema-version", 1, "1: legacy gate prose (default); 2: TOON status v2; --human/--json also select v2")
+	schemaVersion := fs.Int("schema-version", 2, "2 (default): state error|stale|fail|incomplete|pass, plus experiment; only a current reducer pass authorizes plan; --human/--json select readable/machine JSON")
 	defer func() {
-		if *schemaVersion == 2 || *human || *machine {
+		// Help is successful control flow, not a failed gate result.
+		if !errors.Is(retErr, flag.ErrHelp) {
 			retErr = outputFailure(a.out, explicitAudience(args), retErr)
 		}
 	}()
@@ -1156,8 +1158,11 @@ func cmdGate(a *app, args []string) (retErr error) {
 	if err != nil {
 		return err
 	}
-	if *schemaVersion != 1 && *schemaVersion != 2 {
-		return fail("--schema-version is 1 or 2, not %d", *schemaVersion)
+	if *schemaVersion == 1 {
+		return fail("--schema-version 1 is retired; use --schema-version 2 (the default), --human or --json")
+	}
+	if *schemaVersion != 2 {
+		return fail("--schema-version is 2, not %d; use --schema-version 2 (the default)", *schemaVersion)
 	}
 	if err := exactArgs(pos, 1, "gate <spec> [--dry-run] [--dossier off|code|plan] [--cache short|long] [--keep-sessions] [--headless] | gate <spec> --only <group-key>[,...] --experiment <name> | gate enrich <spec> | gate compare <spec> <experiment-a> <experiment-b>"); err != nil {
 		return err
@@ -1432,16 +1437,12 @@ func cmdGate(a *app, args []string) (retErr error) {
 		view.Dossier = dossierSummary(opts.dossier, rec.DossierChars)
 	}
 	view.Coverage, view.Shadow = rec.coverageLine(), rec.Shadow
-	var enrichmentError string
-	var enrichmentNotes []string
 	if !experiment && (unanswered > 0 || len(rec.Questions) > 0) {
 		// Best effort: a failure here is a note and never changes the verdict.
 		if res, err := enrichGate(dir, code, src, rel, sp); err != nil {
-			enrichmentError = err.Error()
 			view.Notes = append(view.Notes, "question cards were not enriched: "+err.Error())
 		} else if res.Total > 0 {
 			view.QuestionCards = res.summary()
-			enrichmentNotes = res.Notes
 			view.Notes = append(view.Notes, res.Notes...)
 		}
 	}
@@ -1456,55 +1457,7 @@ func cmdGate(a *app, args []string) (retErr error) {
 	if *machine {
 		audience = outputJSON
 	}
-	if *schemaVersion == 1 && !*human && !*machine {
-		// This is a compatibility protocol consumed by bench_capture, not TOON.
-		// Keep every legacy line, its quoting and warning-first behavior intact.
-		if view.Bench != "" {
-			fmt.Fprintf(a.out, "bench: %s\n", view.Bench)
-		}
-		if view.Warning != "" {
-			fmt.Fprintln(a.out, view.Warning)
-		}
-		if experiment {
-			fmt.Fprintf(a.out, "experiment: %s\nreport: %s\n", view.Experiment, view.Report)
-		} else {
-			fmt.Fprintf(a.out, "gate: %s\nspec: %s (version %s)\nreport: %s\n", legacyGateOutputStatus(rec), legacyGateValue(pos[0]), hash, view.Report)
-		}
-		fmt.Fprintf(a.out, "deterministic: %s\nblockers: %s\nconcerns: %s\nquestions: %s\ndropped: %s\n", view.Deterministic, view.Blockers, view.Concerns, view.Questions, view.Dropped)
-		if view.Dossier != "" {
-			fmt.Fprintf(a.out, "dossier: %s\n", view.Dossier)
-		}
-		if view.Coverage != "" {
-			fmt.Fprintln(a.out, view.Coverage)
-		}
-		if view.Shadow != "" {
-			fmt.Fprintln(a.out, view.Shadow)
-		}
-		if view.Cache != "" {
-			fmt.Fprintf(a.out, "cache: %s\n", view.Cache)
-		}
-		if view.Tokens != "" {
-			fmt.Fprintf(a.out, "tokens: %s\n", view.Tokens)
-		}
-		for _, note := range rec.Notes {
-			fmt.Fprintf(a.out, "note: %s\n", legacyGateValue(note))
-		}
-		if enrichmentError != "" {
-			fmt.Fprintf(a.out, "note: question cards were not enriched: %s\n", legacyGateValue(enrichmentError))
-		}
-		if view.QuestionCards != "" {
-			fmt.Fprintf(a.out, "question cards: %s\n", view.QuestionCards)
-			for _, note := range enrichmentNotes {
-				fmt.Fprintf(a.out, "note: %s\n", legacyGateValue(note))
-			}
-		}
-		for name, msg := range rec.PassErrors {
-			fmt.Fprintf(a.out, "pass_failed: %s - %s\n", name, legacyGateValue(msg))
-		}
-		if !experiment && unanswered > 0 {
-			fmt.Fprintf(a.out, "help[1]:\n  orch ask --cards %s\n", filepath.Join(dir, "questions"))
-		}
-	} else if err := writeOutput(a.out, audience, view); err != nil {
+	if err := writeOutput(a.out, audience, view); err != nil {
 		return err
 	}
 	if experiment {
@@ -1517,16 +1470,6 @@ func cmdGate(a *app, args []string) (retErr error) {
 		return &exitError{code: 1}
 	}
 	return nil
-}
-
-// legacyGateValue preserves the historical gate prose quoting contract. It is
-// intentionally not the v2 TOON encoder; new views use the shared boundary.
-func legacyGateValue(v string) string {
-	if v != "" && !strings.ContainsAny(v, ",:\"\\\n") && strings.TrimSpace(v) == v {
-		return v
-	}
-	r := strings.NewReplacer(`\`, `\\`, `"`, `\"`, "\n", `\n`)
-	return `"` + r.Replace(v) + `"`
 }
 
 // runGatePasses runs the passes through a pool of workers and applies each

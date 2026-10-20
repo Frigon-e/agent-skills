@@ -159,7 +159,9 @@ precedence order. Experiments use `experiment` and never authorize planning.
 Unavailable reviewers leave required checks `incomplete`; invalid system
 records cause `error`. Only a subject-bound `pass` with a successful current
 reducer replay unlocks `orch plan`. The report, findings and
-question cards are in `<run root>/gate/<hash>/`.
+question cards are in `<run root>/gate/<hash>/`. Default stdout is the v2 TOON
+selection; `--human` and `--json` serialize the same facts as readable and
+machine JSON. Gate schema 1 is retired; use `--schema-version 2` or omit it.
 
 ## Requirement splits, merges and migration
 
