@@ -76,6 +76,7 @@ func outputFailure(w io.Writer, audience outputAudience, err error) error {
 // The existing prose values remain for parsers that identify gate/pass prefixes;
 // evidence and findings remain in the stable report artifact, not a prose table.
 type gateInformation struct {
+	Budget        *RunBudget         `json:"budget,omitempty"`
 	SchemaVersion int                `json:"schema_version"`
 	State         string             `json:"state"`
 	Status        string             `json:"status"`

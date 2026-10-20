@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/BurntSushi/toml"
@@ -49,8 +50,9 @@ type userConfig struct {
 	LeadContextLimit int `toml:"lead_context_limit"`
 	// Dispatch rules say which harness and model suit which work. orch only
 	// prints them; the orchestrator matches them by judgment.
-	Dispatch []dispatchRule       `toml:"dispatch"`
-	Roles    map[string]modelRole `toml:"roles"`
+	Dispatch   []dispatchRule       `toml:"dispatch"`
+	Roles      map[string]modelRole `toml:"roles"`
+	GateBudget *gateBudgetConfig    `toml:"gate_budget"`
 	// Triage: a decision model rates each task at spawn (see triage.go).
 	// TriageMode is shadow (record only, the default), enforce or off.
 	// WeakModels may only run tasks triage rates settled, in enforce mode.
@@ -261,7 +263,7 @@ func userConfigPath() string {
 	return filepath.Join(envOr("XDG_CONFIG_HOME", expandHome("~/.config")), "orchestrate", "config.toml")
 }
 
-var userKeys = []string{"ctx_trust", "roles", "max_leads", "claude_args", "pi_args", "lead_context_limit", "dispatch", "triage_model", "triage_mode", "quick_mode", "weak_models", "allowed_models", "allowed_when_limited"}
+var userKeys = []string{"gate_budget", "ctx_trust", "roles", "max_leads", "claude_args", "pi_args", "lead_context_limit", "dispatch", "triage_model", "triage_mode", "quick_mode", "weak_models", "allowed_models", "allowed_when_limited"}
 
 // decodeStrict refuses keys v has no field for. A key that belongs in the
 // other file gets a pointer there instead of "unknown key".
@@ -331,6 +333,17 @@ func readRepoConfig(path string, rc *repoConfig) error {
 func loadUserConfig() (userConfig, error) {
 	uc := userConfig{MaxLeads: 3, LeadContextLimit: 150_000, TriageMode: "shadow", QuickMode: "shadow"}
 	err := decodeStrict(userConfigPath(), &uc, repoKeys, "<repo>/.agents/orchestrate.toml")
+	if err == nil && uc.GateBudget != nil {
+		limits := gateRunLimits(nil, uc.GateBudget)
+		// Total output defaults scale with the actual pass count. Validate an
+		// explicit reserve against an explicit total here, not a zero-pass run.
+		if uc.GateBudget.OutputTokens == nil && uc.GateBudget.OutputReserve != nil {
+			limits.OutputTokens = max(limits.OutputTokens, *uc.GateBudget.OutputReserve)
+		}
+		if e := newRunBudget(limits, time.Now()).validate(); e != nil {
+			err = fail("%s: gate_budget: %v", userConfigPath(), e)
+		}
+	}
 	return uc, err
 }
 

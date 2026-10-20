@@ -12,6 +12,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -50,7 +51,7 @@ func defaultAdjudicationLimits() adjudicationLimits {
 }
 
 // RunBudget is shared across batches, schema repairs and provider switches. It
-// is serially owned by the gate run. Reported usage is never presented as a
+// admits concurrent jobs under one lock. Reported usage is never presented as a
 // complete measurement when any earlier request did not report its usage.
 // Input admission uses a conservative UTF-8 byte allowance, not a token claim.
 // Token caps apply to reported usage plus the next request's reserved allowance;
@@ -71,7 +72,92 @@ type RunBudget struct {
 	Started          time.Time          `json:"started"`
 	TokenEnforcement string             `json:"token_enforcement"`
 	LastRoute        string             `json:"last_route,omitempty"`
-	now              func() time.Time
+	// Unknown jobs retain their admitted allowance as an estimate, never as
+	// reported zero. In-flight reservations prevent concurrent over-admission.
+	EstimatedInput  int64           `json:"estimated_unreported_input_allowance"`
+	EstimatedOutput int64           `json:"estimated_unreported_output_allowance"`
+	UnknownCounts   budgetUnknown   `json:"unknown_counts"`
+	AttemptSeconds  float64         `json:"attempt_seconds"`
+	ElapsedSeconds  float64         `json:"elapsed_seconds"`
+	Remaining       budgetRemaining `json:"remaining"`
+	activeInput     int64
+	activeOutput    int64
+	mu              sync.Mutex
+	parent          *RunBudget
+	pending         *budgetAdmission // serial adjudication adapter only
+	now             func() time.Time
+}
+
+type budgetUnknown struct {
+	Requests int `json:"requests"`
+	Input    int `json:"input"`
+	Output   int `json:"output"`
+	Cost     int `json:"cost"`
+}
+
+type budgetRemaining struct {
+	Requests  int     `json:"requests"`
+	Input     int64   `json:"input_allowance"`
+	Output    int64   `json:"output_allowance"`
+	Seconds   float64 `json:"seconds"`
+	Repairs   int     `json:"repairs"`
+	Fallbacks int     `json:"fallbacks"`
+}
+
+// A ticket belongs to one invocation, even if the harness starts a fresh
+// conversation. Only the shared run owns the counters and the deadline.
+type budgetAdmission struct {
+	budget        *RunBudget
+	parent        *budgetAdmission
+	input, output int64
+	started       time.Time
+	continuations int
+}
+
+// Pane stop/answer prompts are additional requests, not free continuations.
+// Their reservations join the invocation ticket because its final session
+// report includes their usage too.
+func (a *budgetAdmission) continueWith(input int64) error {
+	next, err := a.budget.begin(input, false, false)
+	if err != nil {
+		return err
+	}
+	for current, extra := a, next; current != nil && extra != nil; current, extra = current.parent, extra.parent {
+		current.input += extra.input
+		current.output += extra.output
+		current.continuations++
+	}
+	return nil
+}
+
+// Subtract incrementally so an over-limit reported+estimated total cannot
+// wrap int64 and appear to leave a positive allowance.
+func budgetAllowance(limit int64, spent ...int64) int64 {
+	for _, n := range spent {
+		if n < 0 || n >= limit {
+			return 0
+		}
+		limit -= n
+	}
+	return max(0, limit)
+}
+
+func (b *RunBudget) refreshLocked() {
+	b.ElapsedSeconds = max(0, b.clock().Sub(b.Started).Seconds())
+	b.Remaining = budgetRemaining{
+		Requests:  max(0, b.Limits.Requests-b.Requests),
+		Input:     budgetAllowance(b.Limits.InputTokens, b.ReportedInput, b.EstimatedInput, b.activeInput),
+		Output:    budgetAllowance(b.Limits.OutputTokens, b.ReportedOutput, b.EstimatedOutput, b.activeOutput),
+		Seconds:   max(0, b.remaining().Seconds()),
+		Repairs:   max(0, b.Limits.Repairs-b.Repairs),
+		Fallbacks: max(0, b.Limits.Fallbacks-b.Fallbacks),
+	}
+}
+
+func (b *RunBudget) refresh() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.refreshLocked()
 }
 
 func newRunBudget(l adjudicationLimits, started time.Time) *RunBudget {
@@ -85,11 +171,15 @@ func (b *RunBudget) clock() time.Time {
 	return time.Now()
 }
 func (b *RunBudget) remaining() time.Duration {
-	return b.Started.Add(time.Duration(b.Limits.Seconds) * time.Second).Sub(b.clock())
+	left := b.Started.Add(time.Duration(b.Limits.Seconds) * time.Second).Sub(b.clock())
+	if b.parent != nil {
+		left = min(left, b.parent.remaining())
+	}
+	return left
 }
 func (b *RunBudget) validate() error {
 	l := b.Limits
-	if l.Requests < 1 || l.InputTokens < 1 || l.OutputTokens < 1 || l.Seconds < 1 || l.Seconds > 86400 || l.Repairs < 0 || l.Fallbacks < 0 || l.OutputReserve < 1 || l.OutputReserve > l.OutputTokens {
+	if l.Requests < 1 || l.InputTokens < 1 || l.OutputTokens < 1 || l.Seconds < 1 || int64(l.Seconds) > math.MaxInt64/int64(time.Second) || l.Repairs < 0 || l.Fallbacks < 0 || l.OutputReserve < 1 || l.OutputReserve > l.OutputTokens {
 		return fmt.Errorf("invalid adjudication budget")
 	}
 	for _, v := range []float64{l.MaxUSD, l.EstimatedRequestUSD} {
@@ -106,15 +196,35 @@ func (b *RunBudget) validate() error {
 var errAdjudicationBudget = errors.New("budget_exhausted")
 
 func (b *RunBudget) admit(inputAllowance int64, repair, fallback bool) error {
+	ticket, err := b.begin(inputAllowance, repair, fallback)
+	if err == nil {
+		b.pending = ticket
+	}
+	return err
+}
+
+func (b *RunBudget) begin(inputAllowance int64, repair, fallback bool) (*budgetAdmission, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
 	if err := b.validate(); err != nil {
-		return err
+		return nil, err
 	}
 	if inputAllowance < 0 || b.Requests >= b.Limits.Requests || b.remaining() <= 0 ||
-		inputAllowance > b.Limits.InputTokens-b.ReportedInput || b.Limits.OutputReserve > b.Limits.OutputTokens-b.ReportedOutput ||
+		inputAllowance > budgetAllowance(b.Limits.InputTokens, b.ReportedInput, b.EstimatedInput, b.activeInput) || b.Limits.OutputReserve > budgetAllowance(b.Limits.OutputTokens, b.ReportedOutput, b.EstimatedOutput, b.activeOutput) ||
 		repair && b.Repairs >= b.Limits.Repairs || fallback && b.Fallbacks >= b.Limits.Fallbacks ||
-		b.Limits.MaxUSD > 0 && b.EstimatedUSD+b.Limits.EstimatedRequestUSD > b.Limits.MaxUSD {
-		return errAdjudicationBudget
+		b.Limits.MaxUSD > 0 && math.Max(b.EstimatedUSD, b.ReportedUSD)+b.Limits.EstimatedRequestUSD > b.Limits.MaxUSD {
+		return nil, errAdjudicationBudget
 	}
+	ticket := &budgetAdmission{budget: b, input: inputAllowance, output: b.Limits.OutputReserve, started: b.clock()}
+	if b.parent != nil {
+		var err error
+		ticket.parent, err = b.parent.begin(inputAllowance, repair, fallback)
+		if err != nil {
+			return nil, err
+		}
+	}
+	b.activeInput += ticket.input
+	b.activeOutput += ticket.output
 	b.Requests++
 	if repair {
 		b.Repairs++
@@ -125,30 +235,117 @@ func (b *RunBudget) admit(inputAllowance int64, repair, fallback bool) error {
 	if b.Limits.ReliableEstimate {
 		b.EstimatedUSD += b.Limits.EstimatedRequestUSD
 	}
-	return nil
+	b.refreshLocked()
+	return ticket, nil
+}
+
+// finish accounts this invocation, including failures and timeouts. Usage is
+// observed before the caller may accept a reply. Parent tickets charge the
+// exact same observation to the run total, not a newly seeded copy.
+func (a *budgetAdmission) finish(u executionUsage) error {
+	return a.finishUsage(u, budgetUnknown{})
+}
+
+func (a *budgetAdmission) finishUsage(u executionUsage, unknown budgetUnknown, reportedRequests ...int) error {
+	invalidUsage := u.Validate()
+	if invalidUsage != nil {
+		u = executionUsage{Availability: "unknown"}
+	}
+	b := a.budget
+	b.mu.Lock()
+	b.activeInput -= a.input
+	b.activeOutput -= a.output
+	b.AttemptSeconds += max(0, b.clock().Sub(a.started).Seconds())
+	if unknown.Requests > 0 {
+		b.UnknownRequests = true
+		b.UnknownCounts.Requests++
+	}
+	if u.InputTokens == nil {
+		b.EstimatedInput += a.input
+	} else if unknown.Input > 0 {
+		b.EstimatedInput += max(0, a.input-*u.InputTokens)
+		b.UnknownInput = true
+		b.UnknownCounts.Input++
+	}
+	if u.OutputTokens == nil {
+		b.EstimatedOutput += a.output
+	} else if unknown.Output > 0 {
+		b.EstimatedOutput += max(0, a.output-*u.OutputTokens)
+		b.UnknownOutput = true
+		b.UnknownCounts.Output++
+	}
+	if unknown.Cost > 0 && u.CostUSD != nil {
+		b.UnknownCost = true
+		b.UnknownCounts.Cost++
+	}
+	err := b.observeLocked(u)
+	if len(reportedRequests) > 0 {
+		if e := b.observeRequestsLocked(reportedRequests[0]); e != nil {
+			err = e
+		}
+	}
+	if invalidUsage != nil {
+		err = invalidUsage
+	}
+	b.refreshLocked()
+	b.mu.Unlock()
+	if a.parent != nil {
+		if e := a.parent.finishUsage(u, unknown, reportedRequests...); e != nil {
+			err = e
+		}
+	}
+	return err
 }
 
 // Admission always charges one invocation. Session reports can reveal more
 // underlying requests; charge them before accepting a reply, never discard them.
 func (b *RunBudget) observeRequests(n int) error {
+	b.mu.Lock()
+	err := b.observeRequestsLocked(n)
+	b.refreshLocked()
+	b.mu.Unlock()
+	if b.parent != nil {
+		if e := b.parent.observeRequests(n); e != nil {
+			err = e
+		}
+	}
+	return err
+}
+
+func (b *RunBudget) observeRequestsLocked(n int) error {
 	if n < 0 {
 		return fmt.Errorf("negative request usage")
 	}
 	if n == 0 {
 		b.UnknownRequests = true
+		b.UnknownCounts.Requests++
 		return nil
 	}
 	if n-1 > math.MaxInt-b.Requests {
 		return errAdjudicationBudget
 	}
 	b.Requests += n - 1
-	if b.Requests > b.Limits.Requests {
+	if b.Limits.ReliableEstimate {
+		b.EstimatedUSD += float64(n-1) * b.Limits.EstimatedRequestUSD
+	}
+	if b.Requests > b.Limits.Requests || b.Limits.MaxUSD > 0 && b.EstimatedUSD > b.Limits.MaxUSD {
 		return errAdjudicationBudget
 	}
 	return nil
 }
 
 func (b *RunBudget) observe(u executionUsage) error {
+	if ticket := b.pending; ticket != nil {
+		b.pending = nil
+		return ticket.finish(u)
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	defer b.refreshLocked()
+	return b.observeLocked(u)
+}
+
+func (b *RunBudget) observeLocked(u executionUsage) error {
 	if err := u.Validate(); err != nil {
 		b.UnknownInput = true
 		b.UnknownOutput = true
@@ -160,26 +357,37 @@ func (b *RunBudget) observe(u executionUsage) error {
 	}
 	if u.InputTokens == nil {
 		b.UnknownInput = true
+		b.UnknownCounts.Input++
 	} else {
 		b.ReportedInput += *u.InputTokens
 	}
 	if u.OutputTokens == nil {
 		b.UnknownOutput = true
+		b.UnknownCounts.Output++
 	} else {
 		b.ReportedOutput += *u.OutputTokens
 	}
 	if u.CostUSD == nil {
 		b.UnknownCost = true
+		b.UnknownCounts.Cost++
 	} else {
 		b.ReportedUSD += *u.CostUSD
 	}
-	if b.ReportedInput > b.Limits.InputTokens || b.ReportedOutput > b.Limits.OutputTokens || b.remaining() <= 0 || b.Limits.MaxUSD > 0 && math.Max(b.EstimatedUSD, b.ReportedUSD) > b.Limits.MaxUSD {
+	if b.ReportedInput > b.Limits.InputTokens || b.EstimatedInput > budgetAllowance(b.Limits.InputTokens, b.ReportedInput) ||
+		b.ReportedOutput > b.Limits.OutputTokens || b.EstimatedOutput > budgetAllowance(b.Limits.OutputTokens, b.ReportedOutput) || b.remaining() <= 0 || b.Limits.MaxUSD > 0 && math.Max(b.EstimatedUSD, b.ReportedUSD) > b.Limits.MaxUSD {
 		return errAdjudicationBudget
 	}
 	return nil
 }
 
 func seedAdjudicationBudget(rec *gateRecord, l adjudicationLimits, now time.Time) *RunBudget {
+	if rec.Budget != nil {
+		// Adjudication has a local job cap inside the already live run total.
+		// Do not seed main usage a second time or reset it on a route switch.
+		job := newRunBudget(l, now)
+		job.parent = rec.Budget
+		return job
+	}
 	started := time.Unix(rec.At, 0)
 	if rec.At <= 0 {
 		started = now

@@ -91,7 +91,8 @@ type gateQuestion struct {
 func (q gateQuestion) blocks() bool { return q.Decisive && q.AnsweredBy == "" }
 
 type gateRecord struct {
-	DossierManifest *dossierManifest `json:"dossier_manifest,omitempty"`
+	DossierManifest   *dossierManifest             `json:"dossier_manifest,omitempty"`
+	Budget            *RunBudget                   `json:"budget,omitempty"`
 	SchemaVersion     int                          `json:"schema_version,omitempty"`
 	State             string                       `json:"state,omitempty"`
 	Completion        reviewCompletion             `json:"completion,omitempty"`
@@ -849,7 +850,9 @@ type gatePass struct {
 	contextFiles bool
 	cli          CtxCLI
 	ctx          context.Context
-	budget       int // soft tool-call budget; 0 means none
+	sessionDir   string           // invocation-local session; retries retain earlier usage
+	admission    *budgetAdmission // shared run ticket for pane continuation requests
+	budget       int              // soft tool-call budget; 0 means none
 	// A group pass of the plan arm has a planner pass that runs first; once
 	// its lookups are in the dossier, rebuild makes the pass with them.
 	planner *gatePass
@@ -1121,6 +1124,7 @@ func cmdGate(a *app, args []string) (retErr error) {
 	if len(args) > 0 && args[0] == "compare" {
 		return cmdGateCompare(a, args[1:])
 	}
+	runStarted := time.Now()
 	fs := a.flags("gate")
 	human := fs.Bool("human", false, "readable JSON of the selected gate summary")
 	machine := fs.Bool("json", false, "JSON of the selected gate summary")
@@ -1272,6 +1276,7 @@ func cmdGate(a *app, args []string) (retErr error) {
 	}
 	passes := buildGatePasses(code, src, rel, sp, rec.Groups, dos, opts.dossier == "plan", only)
 	initGateReview(rec, sp, src, passes)
+	rec.Budget = newRunBudget(gateRunLimits(passes, s.cfg.GateBudget), runStarted)
 	for _, p := range passes {
 		if rec.BenchConfig.Budgets != nil {
 			rec.BenchConfig.Budgets[p.name] = p.budget
@@ -1405,7 +1410,7 @@ func cmdGate(a *app, args []string) (retErr error) {
 		}
 	}
 
-	view := gateInformation{SchemaVersion: rec.SchemaVersion, State: rec.State, Status: rec.Status, Completion: rec.Completion, Reasons: rec.Reduction.Reasons, NextActors: rec.NextActors, NextActions: rec.NextActions, Failures: rec.Reduction.Failures, Gate: rec.Status, Spec: pos[0] + " (version " + hash + ")", Report: filepath.Join(runDir, "report.md"), Bench: benchID, Warning: treeWarning(rec), Cache: opts.cache, Tokens: rec.tokenSummary(), Notes: append([]string{}, rec.Notes...), PassErrors: rec.PassErrors}
+	view := gateInformation{Budget: rec.Budget, SchemaVersion: rec.SchemaVersion, State: rec.State, Status: rec.Status, Completion: rec.Completion, Reasons: rec.Reduction.Reasons, NextActors: rec.NextActors, NextActions: rec.NextActions, Failures: rec.Reduction.Failures, Gate: rec.Status, Spec: pos[0] + " (version " + hash + ")", Report: filepath.Join(runDir, "report.md"), Bench: benchID, Warning: treeWarning(rec), Cache: opts.cache, Tokens: rec.tokenSummary(), Notes: append([]string{}, rec.Notes...), PassErrors: rec.PassErrors}
 	if experiment {
 		view.Experiment = *expF + " (dossier " + opts.dossier + ", cache " + cacheName + ", groups " + strings.Join(onlyList, ", ") + ")"
 	}
@@ -1532,6 +1537,10 @@ func runGatePasses(dir, code, model string, passes []gatePass, rec *gateRecord, 
 	if len(passes) == 0 {
 		return
 	}
+	if rec.Budget == nil {
+		rec.Budget = newRunBudget(gateRunLimits(passes, nil), time.Now())
+	}
+	defer rec.Budget.refresh()
 	if opts.runner == nil {
 		opts.runner = &roleRun{s: site{repo: code}, role: "gate", enabled: true, choices: []profile{{Harness: "pi", Model: model}}, down: map[string]string{}}
 	}
@@ -1605,21 +1614,42 @@ func runGatePasses(dir, code, model string, passes []gatePass, rec *gateRecord, 
 				if opts.guard.ctx.Err() != nil {
 					return
 				}
-				passCtx, cancelPass := context.WithTimeout(opts.guard.ctx, gateTimeout)
+				passCtx, cancelPass := context.WithTimeout(opts.guard.ctx, min(gateTimeout, rec.Budget.remaining()))
+				invocations := map[string]int{}
+				calls := map[string]int{}
+				lastRoute := ""
 				run1 := func(q gatePass) (string, string, error) {
 					q.ctxTool, q.ctxOnly, q.ctxProfile, q.contextFiles, q.ctx = opts.ctxTool, opts.ctxOnly, opts.ctxProfile, opts.contextFiles, passCtx
+					job := strings.TrimSuffix(q.name, "#retry")
+					repair := calls[job] > 0
+					calls[job]++
 					out, hit, used, err := opts.runner.run(func(choice profile) (string, string, error) {
-						return opts.guard.run(q.name, func() (string, string, error) {
-							if pool != nil {
-								return runPaneChoice(&pane, code, choice, dir, q, opts.cache)
-							}
-							out, err := runHeadless(code, choice, q, filepath.Join(dir, "sessions", passFile(q.name)), opts.cache)
-							return out, "", err
+						prepared, prepErr := gateAgentPass(code, choice.Harness, q)
+						if prepErr != nil {
+							return "", "", prepErr
+						}
+						fallback := lastRoute != "" && lastRoute != choice.String()
+						lastRoute = choice.String()
+						invocations[q.name]++
+						prepared.sessionDir = filepath.Join(dir, "sessions", passFile(q.name))
+						if n := invocations[q.name]; n > 1 {
+							prepared.sessionDir = filepath.Join(prepared.sessionDir, fmt.Sprintf("attempt-%d", n))
+						}
+						return runBudgetedGatePass(rec.Budget, prepared, repair, fallback, func(attempt gatePass) (string, string, error) {
+							return opts.guard.run(q.name, func() (string, string, error) {
+								if pool != nil {
+									return runPaneChoice(&pane, code, choice, dir, attempt, opts.cache)
+								}
+								out, err := runHeadless(code, choice, attempt, attempt.sessionDir, opts.cache)
+								return out, "", err
+							})
 						})
 					})
 					// The shared wall cap can expire in any runner operation.
 					// Keep its diagnostic stable without hiding checkout cancellation.
-					if err != nil && errors.Is(passCtx.Err(), context.DeadlineExceeded) && opts.guard.ctx.Err() == nil {
+					if rec.Budget.remaining() <= 0 {
+						err = errAdjudicationBudget
+					} else if err != nil && errors.Is(passCtx.Err(), context.DeadlineExceeded) && opts.guard.ctx.Err() == nil {
 						err = &passLimit{fmt.Sprintf("timed out after %s", gateTimeout)}
 					}
 					mu.Lock()
@@ -1651,10 +1681,10 @@ func runGatePasses(dir, code, model string, passes []gatePass, rec *gateRecord, 
 					retried = true
 					first := err
 					if out, err = run(); err != nil {
-						err = fmt.Errorf("%v; retried once and failed again: %v", first, err)
+						err = fmt.Errorf("%v; retried once and failed again: %w", first, err)
 					}
 				}
-				if limit != nil || errors.As(err, &limit) {
+				if limit != nil || errors.As(err, &limit) || errors.Is(err, errAdjudicationBudget) {
 					answerState = reviewAnswerBudget
 				}
 				tokens, haveTokens := sessionTokens(filepath.Join(dir, "sessions", passFile(p.name)))
@@ -1697,7 +1727,7 @@ func runGatePasses(dir, code, model string, passes []gatePass, rec *gateRecord, 
 					}
 					if rerr != nil {
 						answerState = reviewAnswerUnavailable
-						if errors.As(rerr, &limit) {
+						if errors.As(rerr, &limit) || errors.Is(rerr, errAdjudicationBudget) {
 							answerState = reviewAnswerBudget
 						}
 					}
@@ -1708,7 +1738,7 @@ func runGatePasses(dir, code, model string, passes []gatePass, rec *gateRecord, 
 						}
 					}
 					if rerr != nil {
-						err = fmt.Errorf("repair exhausted: %v", rerr)
+						err = fmt.Errorf("repair exhausted: %w", rerr)
 						rec.PassKept[rp.name] = keptFiles(dir, rp.name, pool != nil)
 					} else {
 						err = nil
@@ -1722,21 +1752,24 @@ func runGatePasses(dir, code, model string, passes []gatePass, rec *gateRecord, 
 					for _, it := range left {
 						ids = append(ids, it.ID)
 					}
-					detail := ""
+					incomplete := fmt.Sprintf("incomplete review: %d items had no verdict or unsupported candidates: %s", len(left), strings.Join(ids, ", "))
 					if err == nil {
 						answerState = reviewAnswerInvalid
+						err = errors.New(incomplete)
+					} else {
+						err = fmt.Errorf("%s; %w", incomplete, err)
 					}
-					if err != nil {
-						detail = "; " + err.Error()
-					}
-					err = fmt.Errorf("incomplete review: %d items had no verdict or unsupported candidates: %s%s", len(left), strings.Join(ids, ", "), detail)
 				}
 				if err != nil {
 					if rec.PassAnswerStates == nil {
 						rec.PassAnswerStates = map[string]reviewAnswerState{}
 					}
-					rec.PassAnswerStates[p.name] = answerState
-					rec.PassErrors[p.name] = err.Error()
+					errorKey := p.name
+					if errors.Is(err, errAdjudicationBudget) {
+						errorKey = recordPartialBudgetFailure(rec, p.name)
+					}
+					rec.PassAnswerStates[errorKey] = answerState
+					rec.PassErrors[errorKey] = err.Error()
 					rec.PassKept[p.name] = keptFiles(dir, p.name, pool != nil)
 				} else {
 					dropPassFiles(dir, p.name, opts.keep)

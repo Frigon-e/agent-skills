@@ -84,32 +84,70 @@ output_reserve = 4096
 # reliable_estimate = true
 ```
 
-Without a budget table the conservative limits are 2 total requests, 128000
-input tokens, 8192 output tokens, 180 seconds, 1 repair, 1 fallback and a 4096
-output allowance per request. A supplied table replaces all of these limits;
-required positive fields cannot be omitted. These are run limits, not free
-adjudication entitlements: recorded main-review requests, cached plus fresh
-input, output, reported cost and elapsed wall time seed the same `RunBudget`.
-A missing report remains unknown, with at least one request charged per
-recorded model job. Each adjudication invocation is charged before dispatch;
-extra underlying requests reported by its session are also charged before its
-reply can be accepted. Token enforcement is explicitly labeled
-`reported_usage_and_reserved_allowance`: unknown usage is never reported as
-zero. Admission reserves a conservative UTF-8 byte allowance for the complete
-input and the configured output allowance. Requests and deadline are enforced
-for every adjudication invocation; token limits are checked against reported
-usage and the next allowance. Dollar enforcement is available only with a
-reliable configured estimate; estimated and reported cost remain separate.
-The estimate also accounts for preceding main-review requests.
+Without a role budget table, adjudication has a local cap of 2 requests,
+128000 input tokens, 8192 output tokens, 180 seconds, 1 repair, 1 fallback and
+a 4096 output allowance per invocation. A supplied role table replaces these
+local limits; required positive fields cannot be omitted. This local cap lives
+inside the live whole-gate `RunBudget`, not a fresh run entitlement.
+
+The user configuration, `~/.config/orchestrate/config.toml`, also accepts an
+optional `[gate_budget]` table. Repository files cannot set it. Each omitted
+key keeps its default; an explicit zero disables repairs or fallbacks:
+
+```toml
+[gate_budget]
+requests = 2000
+input_tokens = 300000000
+output_tokens = 64000000
+seconds = 14400
+repairs = 12
+fallbacks = 24
+output_reserve = 4096
+# Optional, only with a reliable configured estimate:
+# max_usd = 10.0
+# estimated_request_usd = 0.01
+# reliable_estimate = true
+```
+
+Defaults preserve the existing normal path: for each main pass, four route
+invocations times its existing hard turn allowance (`ceil(1.4 * soft_turns)`)
+plus two answer turns, two additional invocations per optional planner, and
+two for optional adjudication. The total input allowance is that request count
+times 600000 (four UTF-8 bytes per 150000-token context allowance); output is
+that count times 32768. The total wall cap is 45 minutes times the number of
+main passes plus 180 seconds. Repairs default to twice the number of main passes plus one, fallbacks to
+three times that number plus one, and the per-invocation
+output reserve to 4096. These are generous safety limits, not a guarantee that
+an opaque harness uses exactly the configured turn count. Existing per-job
+45-minute deadlines, stall rules, soft/hard turns, prefixes and warm-up order
+remain unchanged.
+
+First attempts, schema repairs, coverage/stall retries and provider fallbacks
+admit against this same object. Pane stop/answer prompts also require admission.
+Concurrent invocations reserve input/output allowance atomically. Admission
+uses the complete prepared prompt, including the shared prefix and selected
+dossier, not only the changing suffix. Reported usage includes cached input,
+tool-loop requests and output before a reply can be accepted. Retry sessions
+retain earlier usage; a fresh conversation or compaction cannot reset spend.
+An opaque invocation without request telemetry costs at least one request and
+leaves the request counter explicitly incomplete. Missing token/cost reports
+stay unknown, never measured zero. Unknown input/output consumes its admitted
+allowance as an estimate; estimated allowance and reported tokens are separate.
+Token enforcement remains labeled `reported_usage_and_reserved_allowance`:
+unreported provider usage cannot be claimed as an exact hard measurement.
+Dollar enforcement requires the reliable configured per-request estimate;
+estimated and reported cost remain separate. Request, token and wall limits do
+not need a dollar estimate. `gate.json` and v2 status expose the same spent,
+remaining and unknown budget state.
 
 An unresolved batch gets one initial invocation and at most one schema repair,
 from that same run budget. Provider errors and valid uncertainty are not
 resubmitted until another model agrees. A later explicitly requested batch or
 route switch retains the counters and charges a fallback when its route
 changes. Exhaustion records an incomplete answer with `budget_exhausted` and
-an owner/reviewer next action. Existing main reviewers do not yet consume a
-live `RunBudget`; whole-gate hard enforcement needs an execution-boundary seam
-in `gate_agent.go`/`gate_panes.go`, not this post-review hook.
+an owner/reviewer next action. Only the unfinished required checks become
+incomplete; completed groups are retained and are not restarted. Raise the
+user-level budget, resume the named review, or ask its recorded owner.
 
 Only unanswered technical questions with recorded delegation to
 `gate_adjudicator`, an allowed assessor, and targeted evidence retrieval are
