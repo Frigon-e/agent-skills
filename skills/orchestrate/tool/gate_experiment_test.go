@@ -30,7 +30,7 @@ func TestGateDossierCodeGoesAfterThePackageBlocksAndOffIsToday(t *testing.T) {
 	h.sessionPi(gatePasses(nil))
 	t.Setenv("HERDR_ENV", "")
 	out := h.must("gate", "spec.md")
-	wantContains(t, fmt.Sprint(decodedOutput(t, []byte(out), outputAgent).(map[string]any)["dossier"]), "code, 2 package(s),", "chars (~")
+	wantContains(t, out, "dossier: code, 2 package(s),", "chars (~")
 	calls := piCalls(t, h)
 	var group string
 	for _, l := range strings.Split(calls, "\n") {
@@ -152,9 +152,7 @@ func TestGatePlanArmFallsBackToTheCodeDossier(t *testing.T) {
 	t.Setenv("HERDR_ENV", "")
 	out := h.must("gate", "spec.md", "--dossier", "plan")
 	wantContains(t, out, "gate: pass", "plan:group:api: the reply held no lookups; the pass used the code dossier only")
-	if _, ok := decodedOutput(t, []byte(out), outputAgent).(map[string]any)["notes"]; !ok {
-		t.Error("missing planner fallback notes")
-	}
+	wantContains(t, out, `note: "plan:group:api: the reply held no lookups; the pass used the code dossier only"`)
 	if strings.Contains(piCalls(t, h), "### 5.") {
 		t.Error("section 5 appeared without lookups")
 	}
