@@ -533,7 +533,7 @@ func TestGateEnrichesItsCardsAndAskStillParsesThem(t *testing.T) {
 	gdir := filepath.Join(runRoot(h.repo), "gate", specHash(mustRead(t, filepath.Join(h.repo, "spec.md"))))
 	wantContains(t, string(mustRead(t, filepath.Join(gdir, "questions", "q1-api.md"))), "## Tag\nowner (mentions refund)")
 	ask := h.must("ask", "--cards", filepath.Join(gdir, "questions"))
-	wantContains(t, ask, "questions: 1")
+	wantContains(t, ask, "questions: 0\n", "cards: 1\n", "not_ready: 1\n", "q1-api,missing_tradeoffs", "at least two options with Gain: and Cost: effects")
 	if strings.Contains(ask, "INDEX") || strings.Contains(ask, "skipped") {
 		t.Errorf("ask tripped over the index:\n%s", ask)
 	}

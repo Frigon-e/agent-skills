@@ -62,6 +62,7 @@ type askPage struct {
 type card struct {
 	question, recommend, change string
 	area                        string // optional: the topic the question belongs to (sweep routing)
+	route, ready, action, owner string // readiness is separate from decision authority
 	context, next               string
 	extra                       []struct{ title, body string }
 	options                     []struct{ id, label, body string }
@@ -124,6 +125,14 @@ func parseCard(src string) (*card, error) {
 			c.change = v
 		case "area":
 			c.area = v
+		case "route":
+			c.route = v
+		case "ready":
+			c.ready = v
+		case "action":
+			c.action = v
+		case "owner":
+			c.owner = v
 		}
 	}
 	if c.question == "" {
@@ -369,6 +378,13 @@ func buildCard(r *renderer, q *askQuestion) error {
 	if err != nil {
 		return fmt.Errorf("%s: %v", r.cardPath, err)
 	}
+	return renderCard(r, q, c)
+}
+
+// renderCard uses the same parsed snapshot as the readiness check, so an edit
+// during ask cannot swap an unchecked card into the answer page.
+func renderCard(r *renderer, q *askQuestion, c *card) error {
+	var err error
 	q.Question, q.Change = c.question, c.change
 	if q.Context, err = r.body(c.context); err != nil {
 		return err
@@ -401,7 +417,7 @@ func buildCard(r *renderer, q *askQuestion) error {
 func cmdAsk(a *app, args []string) error {
 	fs := a.flags("ask")
 	outFlag := fs.String("out", "", "write the page to `DIR` (default <run root>/ask, or <cards dir>/../ask)")
-	cardsFlag := fs.String("cards", "", "render every card in `DIR` instead of the leads' open decisions")
+	cardsFlag := fs.String("cards", "", "ask ready owner/unclear cards in `DIR`; list lead-settled and not-ready cards")
 	pos, err := parseArgs(fs, args)
 	if err != nil {
 		return err
@@ -444,6 +460,9 @@ func cmdAsk(a *app, args []string) error {
 
 	var page askPage
 	var warnings []askWarning
+	type cardDisposition struct{ key, ready, reason string }
+	var settled, notReady []cardDisposition
+	cardCount := 0
 	add := func(q askQuestion, r *renderer, fallback string) {
 		q.ID = fmt.Sprintf("q%d", len(page.Questions)+1)
 		var werr error
@@ -483,16 +502,55 @@ func cmdAsk(a *app, args []string) error {
 		paths, _ := filepath.Glob(filepath.Join(cardsDir, "*.md"))
 		sort.Strings(paths)
 		for _, cardPath := range paths {
-			if filepath.Base(cardPath) == "INDEX.md" { // the gate's overview of its cards, not a card
+			if filepath.Base(cardPath) == "INDEX.md" { // overview, not an answerable card
+				src, err := os.ReadFile(cardPath)
+				if err != nil {
+					warnings = append(warnings, askWarning{"", "INDEX.md", "cannot read retrieval warnings: " + err.Error()})
+				} else {
+					for _, msg := range cardIndexWarnings(string(src)) {
+						warnings = append(warnings, askWarning{"", "INDEX.md", msg})
+					}
+				}
 				continue
 			}
+			cardCount++
 			key := strings.TrimSuffix(filepath.Base(cardPath), ".md")
 			if !keyRe.MatchString(key) {
-				warnings = append(warnings, askWarning{"", filepath.Base(cardPath), fmt.Sprintf("skipped: the name must match %s.md", keyRe)})
+				msg := fmt.Sprintf("skipped: the name must match %s.md", keyRe)
+				warnings = append(warnings, askWarning{"", filepath.Base(cardPath), msg})
+				notReady = append(notReady, cardDisposition{key, "unclear", msg})
 				continue
 			}
+			src, err := os.ReadFile(cardPath)
+			if err != nil {
+				notReady = append(notReady, cardDisposition{key, "unclear", "cannot read card: " + err.Error()})
+				continue
+			}
+			c, err := parseCard(string(src))
+			if err != nil {
+				notReady = append(notReady, cardDisposition{key, "unclear", err.Error()})
+				continue
+			}
+			readiness := c.readiness(string(src))
+			if readiness.Status != "ready" {
+				notReady = append(notReady, cardDisposition{key, readiness.Status, strings.Join(readiness.Missing, "; ")})
+				continue
+			}
+			if c.route == "lead-may-decide" {
+				settled = append(settled, cardDisposition{key, "ready", c.question})
+				continue
+			}
+			// Missing, unknown and explicit unclear routes stay with the owner.
 			r := &renderer{key: key, cardPath: cardPath, taskDir: topicReal, rawTaskDir: topic, qDir: cardsDir, filesDir: filesDir}
-			add(askQuestion{Label: key}, r, key)
+			q := askQuestion{Label: key}
+			if err := renderCard(r, &q, c); err != nil {
+				msg := strings.TrimPrefix(err.Error(), cardPath+": ")
+				notReady = append(notReady, cardDisposition{key, "missing_evidence", msg})
+				warnings = append(warnings, askWarning{"", key, msg})
+				continue
+			}
+			page.Mermaid = page.Mermaid || r.mermaid
+			add(q, nil, key)
 		}
 	}
 	var leads []openLead
@@ -540,6 +598,22 @@ func cmdAsk(a *app, args []string) error {
 	// AXI-style output: short key: value lines an agent reads in a few tokens.
 	fmt.Fprintf(a.out, "page: %s\n", path)
 	fmt.Fprintf(a.out, "questions: %d\n", len(page.Questions))
+	if cardsDir != "" {
+		fmt.Fprintf(a.out, "cards: %d\nsettled_by_lead: %d\nnot_ready: %d\n", cardCount, len(settled), len(notReady))
+		if len(settled) > 0 {
+			fmt.Fprintln(a.out, "# Settled by lead (routed within delegated authority; not an owner answer)")
+			fmt.Fprintf(a.out, "lead_cards[%d]{card,ready,question}:\n", len(settled))
+			for _, d := range settled {
+				fmt.Fprintf(a.out, "  %s,%s,%s\n", toonValue(d.key), d.ready, toonValue(d.reason))
+			}
+		}
+		if len(notReady) > 0 {
+			fmt.Fprintf(a.out, "unready_cards[%d]{card,ready,missing}:\n", len(notReady))
+			for _, d := range notReady {
+				fmt.Fprintf(a.out, "  %s,%s,%s\n", toonValue(d.key), d.ready, toonValue(d.reason))
+			}
+		}
+	}
 	if len(warnings) > 0 {
 		fmt.Fprintf(a.out, "warnings[%d]{question,message}:\n", len(warnings))
 		for _, w := range warnings {
@@ -547,6 +621,10 @@ func cmdAsk(a *app, args []string) error {
 		}
 	}
 	if len(page.Questions) == 0 {
+		if cardsDir != "" && cardCount > 0 {
+			fmt.Fprintln(a.out, "No ready owner questions; see the card dispositions and warnings above.")
+			return nil
+		}
 		fmt.Fprintln(a.out, "No open questions.")
 		return nil
 	}
