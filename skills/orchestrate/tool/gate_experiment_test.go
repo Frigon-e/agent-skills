@@ -30,7 +30,7 @@ func TestGateDossierCodeGoesAfterThePackageBlocksAndOffIsToday(t *testing.T) {
 	h.sessionPi(gatePasses(nil))
 	t.Setenv("HERDR_ENV", "")
 	out := h.must("gate", "spec.md")
-	wantContains(t, out, "dossier: code, 2 package(s),", "chars (~")
+	wantContains(t, fmt.Sprint(decodedOutput(t, []byte(out), outputAgent).(map[string]any)["dossier"]), "code, 2 package(s),", "chars (~")
 	calls := piCalls(t, h)
 	var group string
 	for _, l := range strings.Split(calls, "\n") {
@@ -43,8 +43,8 @@ func TestGateDossierCodeGoesAfterThePackageBlocksAndOffIsToday(t *testing.T) {
 	if group == "" || i < 0 || j < i || k < j {
 		t.Fatalf("order must be package blocks, dossier, tag (%d %d %d):\n%s", i, j, k, calls)
 	}
-	wantContains(t, calls, "## Package api", "### 1. Ranked files", "Use the facts gathered by code", "Budget: about 20 turns.", "Budget: about 40 turns.")
-	if b := mustRead(t, filepath.Join(gdir, "dossier", "api.md")); !strings.Contains(string(b), "### 4. Names not found anywhere") {
+	wantContains(t, calls, "## Package api", "### 1. Ranked files", "Use the evidence dossier", "Budget: about 20 turns.", "Budget: about 40 turns.")
+	if b := mustRead(t, filepath.Join(gdir, "dossier", "api.md")); !strings.Contains(string(b), "### 4. Names not found in completed bounded lookups (not proof of absence)") {
 		t.Errorf("dossier file:\n%s", b)
 	}
 	rec := readRecord(t, gdir)
@@ -58,7 +58,7 @@ func TestGateDossierCodeGoesAfterThePackageBlocksAndOffIsToday(t *testing.T) {
 	h.sessionPi(gatePasses(nil))
 	out = h.must("gate", "spec.md", "--dossier", "off")
 	calls = piCalls(t, h)
-	if strings.Contains(calls, dossierTitle) || strings.Contains(calls, "Use the facts gathered by code") || strings.Contains(out, "dossier:") || exists(filepath.Join(gdir, "dossier")) {
+	if strings.Contains(calls, dossierTitle) || strings.Contains(calls, "Use the evidence dossier") || strings.Contains(out, "dossier:") || exists(filepath.Join(gdir, "dossier")) {
 		t.Errorf("--dossier off still produced a dossier:\n%s\n%s", out, calls)
 	}
 	if code, _ := h.run("gate", "spec.md", "--dossier", "maybe"); code == 0 {
@@ -151,12 +151,22 @@ func TestGatePlanArmFallsBackToTheCodeDossier(t *testing.T) {
 	h.sessionPi(gatePasses(map[string]string{"plan": "I cannot decide"}))
 	t.Setenv("HERDR_ENV", "")
 	out := h.must("gate", "spec.md", "--dossier", "plan")
-	wantContains(t, out, "gate: pass", "note: ", "plan:group:api: the reply held no lookups; the pass used the code dossier only")
+	wantContains(t, out, "gate: pass", "plan:group:api: the reply held no lookups; the pass used the code dossier only")
+	if _, ok := decodedOutput(t, []byte(out), outputAgent).(map[string]any)["notes"]; !ok {
+		t.Error("missing planner fallback notes")
+	}
 	if strings.Contains(piCalls(t, h), "### 5.") {
 		t.Error("section 5 appeared without lookups")
 	}
-	if rec := readRecord(t, gdir); len(rec.Notes) != 2 || !strings.HasPrefix(rec.Notes[1], "plan:group:api: ") {
-		t.Errorf("notes: %v", rec.Notes)
+	rec := readRecord(t, gdir)
+	var retrievalNotes []string
+	for _, note := range rec.Notes {
+		if !strings.Contains(note, " coverage:") {
+			retrievalNotes = append(retrievalNotes, note)
+		}
+	}
+	if len(retrievalNotes) != 2 || !strings.HasPrefix(retrievalNotes[1], "plan:group:api: ") {
+		t.Errorf("retrieval notes: %v", retrievalNotes)
 	}
 }
 

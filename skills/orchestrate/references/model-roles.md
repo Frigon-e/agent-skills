@@ -2,8 +2,10 @@
 
 Machine settings go in `~/.config/orchestrate/config.toml` (or `ORCH_CONFIG`),
 never repository config. Each role tries its ordered `use` list. An omitted
-`enabled` means true. An explicitly configured empty list has no choices;
-`enabled = false` also wins over command overrides.
+`enabled` means true for an explicitly configured role. An explicitly
+configured empty list has no choices; `enabled = false` also wins over command
+overrides. The optional `gate_adjudicator` role is disabled when absent, with
+no inherited model choices, even when a command supplies a runner override.
 
 ```toml
 [roles.gate]
@@ -51,6 +53,140 @@ there is no `--runner`. `ORCH_PI` and `ORCH_CLAUDE` override headless binaries.
 A profile marked `degraded = true` requires user approval and `--degraded`.
 `site.runModel(role, prompt, ...modelOptions)` is the tool-less conversational
 entry point for generation commands. API Decider calls use the API wrapper.
+
+## Optional gate adjudication infrastructure
+
+`gate_adjudicator` is separate from the main `gate` reviewer and the triage
+`decider`. It may use the same model without sharing a conversation. Neither
+`triage_model` nor `ORCH_GATE_MODEL` changes this role. Existing runner override,
+health, allowlist and approved degraded-profile rules still apply through
+`newRoleRun`. Gate reviewer command overrides do not reroute adjudication.
+
+The role stays off until explicitly configured. This example is deliberately
+disabled; enabling it is a separate calibration decision:
+
+```toml
+[roles.gate_adjudicator]
+enabled = false
+use = [{ harness = "claude", model = "haiku", effort = "low" }]
+
+[roles.gate_adjudicator.budget]
+requests = 24
+input_tokens = 256000
+output_tokens = 32768
+seconds = 3600
+repairs = 1
+fallbacks = 1
+output_reserve = 4096
+# Optional dollar cap requires a reliable configured per-request estimate:
+# max_usd = 1.0
+# estimated_request_usd = 0.05
+# reliable_estimate = true
+```
+
+Without a role budget table, adjudication has a local cap of 2 requests,
+128000 input tokens, 8192 output tokens, 180 seconds, 1 repair, 1 fallback and
+a 4096 output allowance per invocation. A supplied role table replaces these
+local limits; required positive fields cannot be omitted. This local cap lives
+inside the live whole-gate `RunBudget`, not a fresh run entitlement.
+
+The user configuration, `~/.config/orchestrate/config.toml`, also accepts an
+optional `[gate_budget]` table. Repository files cannot set it. Each omitted
+key keeps its default; an explicit zero disables repairs or fallbacks:
+
+```toml
+[gate_budget]
+requests = 2000
+input_tokens = 300000000
+output_tokens = 64000000
+seconds = 14400
+repairs = 12
+fallbacks = 24
+output_reserve = 4096
+# Optional, only with a reliable configured estimate:
+# max_usd = 10.0
+# estimated_request_usd = 0.01
+# reliable_estimate = true
+```
+
+Defaults preserve the existing normal path: for each main pass, four route
+invocations times its existing hard turn allowance (`ceil(1.4 * soft_turns)`)
+plus two answer turns, two additional invocations per optional planner, and
+two for optional adjudication. The total input allowance is that request count
+times 600000 (four UTF-8 bytes per 150000-token context allowance); output is
+that count times 32768. The total wall cap is 45 minutes times the number of
+main passes plus 180 seconds. Repairs default to twice the number of main passes plus one, fallbacks to
+three times that number plus one, and the per-invocation
+output reserve to 4096. These are generous safety limits, not a guarantee that
+an opaque harness uses exactly the configured turn count. Existing per-job
+45-minute deadlines, stall rules, soft/hard turns, prefixes and warm-up order
+remain unchanged.
+
+First attempts, schema repairs, coverage/stall retries and provider fallbacks
+admit against this same object. Pane stop/answer prompts also require admission.
+Concurrent invocations reserve input/output allowance atomically. Admission
+uses the complete prepared prompt, including the shared prefix and selected
+dossier, not only the changing suffix. Reported usage includes cached input,
+tool-loop requests and output before a reply can be accepted. Retry sessions
+retain earlier usage; a fresh conversation or compaction cannot reset spend.
+An opaque invocation without request telemetry costs at least one request and
+leaves the request counter explicitly incomplete. Missing token/cost reports
+stay unknown, never measured zero. Unknown input/output consumes its admitted
+allowance as an estimate; estimated allowance and reported tokens are separate.
+Token enforcement remains labeled `reported_usage_and_reserved_allowance`:
+unreported provider usage cannot be claimed as an exact hard measurement.
+Dollar enforcement requires the reliable configured per-request estimate;
+estimated and reported cost remain separate. Request, token and wall limits do
+not need a dollar estimate. `gate.json` and v2 status expose the same spent,
+remaining and unknown budget state.
+
+An unresolved batch gets one initial invocation and at most one schema repair,
+from that same run budget. Provider errors and valid uncertainty are not
+resubmitted until another model agrees. A later explicitly requested batch or
+route switch retains the counters and charges a fallback when its route
+changes. Exhaustion records an incomplete answer with `budget_exhausted` and
+an owner/reviewer next action. Only the unfinished required checks become
+incomplete; completed groups are retained and are not restarted. Raise the
+user-level budget, resume the named review, or ask its recorded owner.
+
+Only unanswered technical questions with recorded delegation to
+`gate_adjudicator`, an allowed assessor, and targeted evidence retrieval are
+eligible. No source text or model reply can grant that authority. The current
+legacy consequential-question adapter grants no delegation, so simply enabling
+the role does not authorize user-owned decisions. Future typed producers must
+record the check owner, delegates, assessor and question basis. Fully resolved,
+disabled and user-owned paths make no packet-formatting, adjudication or shadow
+call. The existing reviewer or authorized owner remains responsible otherwise.
+
+Packets carry the unresolved check only, exact source excerpts with their
+recorded hashes, lookup coverage/omissions, earlier claims and allowed actions.
+Related unresolved items in one package share a batch; completed items are
+excluded, and separate package batches consume the same run budget.
+Paths without excerpts, stale hashes and unsupported exact column selections
+fail closed. Chat runners receive TOON through the shared output boundary,
+with stable instructions before changing evidence and repairs. Decisions API
+runners retain native object state/questions and use the existing decisions
+endpoint, never chat completions. The current finite-choice endpoint can select
+a complete recorded behavioral proposal, retaining its explanation, evidence
+and matching/missing behavior. It can also decline or defer. If no complete
+proposal exists, that connector cannot supply the required support fields and
+records incomplete without a call; it never invents an explanation or embeds
+JSON chat inside a typed choice. An eligible later configured conversational
+route may be selected before any model call.
+
+Both adapters normalize to `reviewAnswer`, `reviewQuestion` and
+`reviewResolution`. Subject and attempt identity come from the trusted request.
+Earlier judgments remain recorded; a later answer never wins by arrival order.
+Material conflicts stay incomplete and an accepted blocker requires an explicit
+evidence-linked resolution, including a finding-to-resolution link. The pure
+reducer is unchanged. `adjudication.json` beside the gate run records packets,
+raw replies, execution/usage, normalized results and the shared budget.
+Native decisions aggregate usage and served model are retained separately when
+reported; aggregate tokens are not guessed into an input/output split. The
+explicit `recordAdjudicationShadow` experiment hook owns a separate budget and
+records later outcomes without applying any reply to production. It is not
+called by ordinary runs, and adds no default shadow traffic. Cache availability
+changes neither authority nor reduction of identical recorded answers.
 
 ## Connector lanes
 

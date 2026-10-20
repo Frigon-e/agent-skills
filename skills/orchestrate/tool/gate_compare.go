@@ -146,10 +146,10 @@ func describeExperiment(w io.Writer, label, name string, rec *gateRecord, dir st
 		}
 	}
 	for _, n := range rec.Notes {
-		fmt.Fprintf(w, "  note: %s\n", toonValue(n))
+		fmt.Fprintf(w, "  note: %s\n", agentScalar(n))
 	}
 	for n, e := range rec.PassErrors {
-		fmt.Fprintf(w, "  pass_failed: %s - %s\n", n, toonValue(e))
+		fmt.Fprintf(w, "  pass_failed: %s - %s\n", n, agentScalar(e))
 	}
 }
 

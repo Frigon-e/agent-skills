@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	_ "embed"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"html"
@@ -51,6 +52,7 @@ type askQuestion struct {
 	Context, Next            template.HTML
 	Extra                    []askExtra
 	Options                  []askOption
+	source                   *card // Plain source for the shared information view, not rendered HTML.
 }
 
 type askPage struct {
@@ -62,6 +64,7 @@ type askPage struct {
 type card struct {
 	question, recommend, change string
 	area                        string // optional: the topic the question belongs to (sweep routing)
+	route, ready, action, owner string // readiness is separate from decision authority
 	context, next               string
 	extra                       []struct{ title, body string }
 	options                     []struct{ id, label, body string }
@@ -124,6 +127,14 @@ func parseCard(src string) (*card, error) {
 			c.change = v
 		case "area":
 			c.area = v
+		case "route":
+			c.route = v
+		case "ready":
+			c.ready = v
+		case "action":
+			c.action = v
+		case "owner":
+			c.owner = v
 		}
 	}
 	if c.question == "" {
@@ -369,6 +380,13 @@ func buildCard(r *renderer, q *askQuestion) error {
 	if err != nil {
 		return fmt.Errorf("%s: %v", r.cardPath, err)
 	}
+	return renderCard(r, q, c)
+}
+
+// Use the same parsed snapshot for readiness and rendering.
+func renderCard(r *renderer, q *askQuestion, c *card) error {
+	var err error
+	q.source = c
 	q.Question, q.Change = c.question, c.change
 	if q.Context, err = r.body(c.context); err != nil {
 		return err
@@ -398,10 +416,42 @@ func buildCard(r *renderer, q *askQuestion) error {
 	return nil
 }
 
-func cmdAsk(a *app, args []string) error {
+func cmdAsk(a *app, args []string) (retErr error) {
 	fs := a.flags("ask")
+	human := fs.Bool("human", false, "readable JSON question view, preserving all choices and uncertainty")
+	machine := fs.Bool("json", false, "machine JSON of the selected question view")
+	audience := outputAgent
+	for _, arg := range args {
+		if arg == "--" {
+			break
+		}
+		if arg == "--human" || arg == "--human=true" {
+			audience = outputHuman
+		}
+	}
+	for _, arg := range args {
+		if arg == "--" {
+			break
+		}
+		if arg == "--json" || arg == "--json=true" {
+			audience = outputJSON
+		}
+	}
+	defer func() {
+		if retErr == nil {
+			return
+		}
+		code := 1
+		var ee *exitError
+		if errors.As(retErr, &ee) {
+			code = ee.code
+		}
+		_ = writeOutput(a.out, audience, map[string]any{"status": "failed", "error": retErr.Error()})
+		retErr = &exitError{code: code}
+	}()
+	_, _ = human, machine
 	outFlag := fs.String("out", "", "write the page to `DIR` (default <run root>/ask, or <cards dir>/../ask)")
-	cardsFlag := fs.String("cards", "", "render every card in `DIR` instead of the leads' open decisions")
+	cardsFlag := fs.String("cards", "", "ask ready owner/unclear cards in `DIR`; list lead-settled and not-ready cards")
 	pos, err := parseArgs(fs, args)
 	if err != nil {
 		return err
@@ -444,6 +494,9 @@ func cmdAsk(a *app, args []string) error {
 
 	var page askPage
 	var warnings []askWarning
+	type cardDisposition struct{ key, ready, reason string }
+	var settled, notReady []cardDisposition
+	cardCount := 0
 	add := func(q askQuestion, r *renderer, fallback string) {
 		q.ID = fmt.Sprintf("q%d", len(page.Questions)+1)
 		var werr error
@@ -483,16 +536,55 @@ func cmdAsk(a *app, args []string) error {
 		paths, _ := filepath.Glob(filepath.Join(cardsDir, "*.md"))
 		sort.Strings(paths)
 		for _, cardPath := range paths {
-			if filepath.Base(cardPath) == "INDEX.md" { // the gate's overview of its cards, not a card
+			if filepath.Base(cardPath) == "INDEX.md" { // overview, not an answerable card
+				src, err := os.ReadFile(cardPath)
+				if err != nil {
+					warnings = append(warnings, askWarning{"", "INDEX.md", "cannot read retrieval warnings: " + err.Error()})
+				} else {
+					for _, msg := range cardIndexWarnings(string(src)) {
+						warnings = append(warnings, askWarning{"", "INDEX.md", msg})
+					}
+				}
 				continue
 			}
+			cardCount++
 			key := strings.TrimSuffix(filepath.Base(cardPath), ".md")
 			if !keyRe.MatchString(key) {
-				warnings = append(warnings, askWarning{"", filepath.Base(cardPath), fmt.Sprintf("skipped: the name must match %s.md", keyRe)})
+				msg := fmt.Sprintf("skipped: the name must match %s.md", keyRe)
+				warnings = append(warnings, askWarning{"", filepath.Base(cardPath), msg})
+				notReady = append(notReady, cardDisposition{key, "unclear", msg})
 				continue
 			}
+			src, err := os.ReadFile(cardPath)
+			if err != nil {
+				notReady = append(notReady, cardDisposition{key, "unclear", "cannot read card: " + err.Error()})
+				continue
+			}
+			c, err := parseCard(string(src))
+			if err != nil {
+				notReady = append(notReady, cardDisposition{key, "unclear", err.Error()})
+				continue
+			}
+			readiness := c.readiness(string(src))
+			if readiness.Status != "ready" {
+				notReady = append(notReady, cardDisposition{key, readiness.Status, strings.Join(readiness.Missing, "; ")})
+				continue
+			}
+			if c.route == "lead-may-decide" {
+				settled = append(settled, cardDisposition{key, "ready", c.question})
+				continue
+			}
+			// Missing, unknown and explicit unclear routes stay with the owner.
 			r := &renderer{key: key, cardPath: cardPath, taskDir: topicReal, rawTaskDir: topic, qDir: cardsDir, filesDir: filesDir}
-			add(askQuestion{Label: key}, r, key)
+			q := askQuestion{Label: key}
+			if err := renderCard(r, &q, c); err != nil {
+				msg := strings.TrimPrefix(err.Error(), cardPath+": ")
+				notReady = append(notReady, cardDisposition{key, "missing_evidence", msg})
+				warnings = append(warnings, askWarning{"", key, msg})
+				continue
+			}
+			page.Mermaid = page.Mermaid || r.mermaid
+			add(q, nil, key)
 		}
 	}
 	var leads []openLead
@@ -537,23 +629,103 @@ func cmdAsk(a *app, args []string) error {
 	if err := writeAtomic(path, buf.Bytes()); err != nil {
 		return err
 	}
-	// AXI-style output: short key: value lines an agent reads in a few tokens.
-	fmt.Fprintf(a.out, "page: %s\n", path)
-	fmt.Fprintf(a.out, "questions: %d\n", len(page.Questions))
-	if len(warnings) > 0 {
-		fmt.Fprintf(a.out, "warnings[%d]{question,message}:\n", len(warnings))
-		for _, w := range warnings {
-			fmt.Fprintf(a.out, "  %s,%s\n", toonValue(w.id()), toonValue(w.msg))
+	view := askOutputView(path, page.Questions, warnings)
+	if cardsDir != "" {
+		// Preserve B3's output boundary and D2's readiness dispositions.
+		b, _ := json.Marshal(view)
+		var fields map[string]any
+		_ = json.Unmarshal(b, &fields)
+		fields["cards"], fields["settled_by_lead"], fields["not_ready"] = cardCount, len(settled), len(notReady)
+		rows := func(ds []cardDisposition) []map[string]string {
+			out := make([]map[string]string, 0, len(ds))
+			for _, d := range ds {
+				out = append(out, map[string]string{"card": d.key, "ready": d.ready, "reason": d.reason})
+			}
+			return out
 		}
+		fields["lead_cards"], fields["unready_cards"] = rows(settled), rows(notReady)
+		view = fields
 	}
-	if len(page.Questions) == 0 {
-		fmt.Fprintln(a.out, "No open questions.")
-		return nil
+	return writeOutput(a.out, audience, view)
+}
+
+// askInformation is selected once for agents, humans and machine clients.
+// Keep question/choices/required action ahead of provenance. Source Markdown is
+// intentional: it preserves uncertainty and include references without HTML.
+type askInformation struct {
+	ID               string                  `json:"id"`
+	Question         string                  `json:"question"`
+	Options          []askChoiceInformation  `json:"options"`
+	AnswerNeededFrom string                  `json:"answer_needed_from"`
+	Context          string                  `json:"context,omitempty"`
+	Recommendation   string                  `json:"recommendation,omitempty"`
+	NextAction       string                  `json:"next_action,omitempty"`
+	Change           string                  `json:"change,omitempty"`
+	MaterialContext  []askContextInformation `json:"material_context,omitempty"`
+	Warning          string                  `json:"warning,omitempty"`
+	Lead             string                  `json:"lead,omitempty"`
+	Resolve          string                  `json:"resolve,omitempty"`
+}
+
+type askChoiceInformation struct {
+	ID     string `json:"id"`
+	Choice string `json:"choice"`
+	Effect any    `json:"effect"`
+}
+
+type askContextInformation struct {
+	Topic  string   `json:"topic"`
+	Detail []string `json:"detail"`
+}
+
+// Long prose is a block, not a cell in a dense uniform metadata table.
+func askEffect(body string) any {
+	if len(body) > 160 || strings.Contains(body, "\n") {
+		return []string{body}
 	}
-	fmt.Fprintln(a.out, "help[2]:")
-	fmt.Fprintf(a.out, "  lavish-axi %s\n", path)
-	fmt.Fprintf(a.out, "  lavish-axi poll %s\n", path)
-	return nil
+	return body
+}
+
+func askOutputView(path string, questions []askQuestion, warnings []askWarning) any {
+	packets := make([]askInformation, 0, len(questions))
+	for _, q := range questions {
+		id := q.Label
+		if q.Lead != "" {
+			id = q.Lead + "/" + id
+		}
+		p := askInformation{ID: id, Question: q.Question, Options: []askChoiceInformation{}, AnswerNeededFrom: "owner", Lead: q.Lead, Resolve: q.Resolve, Warning: q.Warning}
+		if c := q.source; c != nil {
+			p.Context, p.Recommendation, p.NextAction, p.Change = c.context, c.recommend, c.next, c.change
+			for _, o := range c.options {
+				p.Options = append(p.Options, askChoiceInformation{o.id, o.label, askEffect(o.body)})
+			}
+			for _, x := range c.extra {
+				p.MaterialContext = append(p.MaterialContext, askContextInformation{x.title, []string{x.body}})
+			}
+		}
+		packets = append(packets, p)
+	}
+	type warning struct {
+		Question string `json:"question"`
+		Message  string `json:"message"`
+	}
+	ws := make([]warning, 0, len(warnings))
+	for _, w := range warnings {
+		ws = append(ws, warning{w.id(), w.msg})
+	}
+	status, message := "ok", ""
+	if len(questions) == 0 {
+		status, message = "empty", "No open questions."
+	}
+	return struct {
+		Status    string           `json:"status"`
+		Questions int              `json:"questions"`
+		Message   string           `json:"message,omitempty"`
+		Decisions []askInformation `json:"decisions"`
+		Page      string           `json:"page"`
+		Warnings  []warning        `json:"warnings,omitempty"`
+		Help      []string         `json:"help"`
+	}{status, len(questions), message, packets, path, ws, []string{"lavish-axi " + path, "lavish-axi poll " + path}}
 }
 
 type askWarning struct{ lead, label, msg string }
@@ -563,16 +735,6 @@ func (w askWarning) id() string {
 		return w.label
 	}
 	return w.lead + "/" + w.label
-}
-
-// toonValue quotes a TOON value when it holds a delimiter, a quote or edge
-// spaces.
-func toonValue(v string) string {
-	if v != "" && !strings.ContainsAny(v, ",:\"\\\n") && strings.TrimSpace(v) == v {
-		return v
-	}
-	r := strings.NewReplacer(`\`, `\\`, `"`, `\"`, "\n", `\n`)
-	return `"` + r.Replace(v) + `"`
 }
 
 func fileExists(p string) bool {

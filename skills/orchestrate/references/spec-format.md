@@ -45,8 +45,10 @@ What this package does. Prefer `path#Symbol` pointers - why it matters.
 
 #### Builds
 - Queues a transfer and keeps it across panel restarts.
+  id: queue-durable
   search: Code that saves a transfer for a server, when a user queues it, producing a durable queue row
 - Lists queued transfers in the panel.
+  id: queue-list
   search: Code that lists queued transfers
 
 #### Acceptance
@@ -94,7 +96,8 @@ None.
     continuation lines are joined; the text is kept verbatim. Optional indented
     `search:` lines are jbcontext queries, one behaviour per query; several are
     allowed on a bullet with distinct behaviours. Optional `reuse:` lines name
-    known existing code (comma-separated pointers).
+    known existing code (comma-separated pointers). Optional indented `id:` names
+    a stable requirement; `supersedes:` records explicit split or merge lineage.
   - Search guidance: `Code that <action> on <entity>, when <trigger>, producing
     <result>`. Drop any slot that does not apply; never invent symbols or paths.
     Good (full): `Code that saves a payment method for a customer, when a checkout
@@ -105,8 +108,24 @@ None.
     appears in the checklist, but gets no searched candidates.
   - A ship package without Builds gets a warning, not an error: its reuse
     checklist is skipped. Scouts are exempt. More than 8 bullets warns to split
-    the package. Items have ids `<package>#<n>` (1-based), saved in `items.json`
-    with `queries` and `reuse` arrays; no items are guessed from body/acceptance.
+    the package. An explicit `id:` must match `[a-z][a-z0-9._-]*` and be unique
+    within its package. Its identity is `<package>#<slug>` regardless of bullet
+    order; numeric IDs are not allowed. Without `id:`, an item keeps its legacy
+    `<package>#<n>` (1-based) key. Legacy keys are local to the exact spec or
+    itemset, not cross-version identities. No items are guessed from body/acceptance.
+  - `items.json` keeps `queries` and `reuse` arrays and adds optional `revision`
+    and `supersedes` fields. The content revision is a SHA-256 of trimmed
+    requirement text and its trimmed `search:` and `reuse:` declaration lines,
+    preserving their spelling and order. Any content edit needs a fresh answer,
+    including a cosmetic edit; changing only an explicit ID's position does not
+    change its identity or revision. Overall gate approval still requires the
+    exact reviewed spec and checkout. Old archives without these fields remain
+    readable and their stored hashes still verify.
+  - A split or merge uses new IDs with `supersedes: <old-id>[, <old-id>]`.
+    Each old ID is a slug in the same package, no longer an active requirement.
+    Several replacements may supersede the same old ID. Mappings are recorded
+    as qualified IDs in `items.json`; they describe lineage, never transfer an
+    old answer or approval. Do not match by wording or shared source functions.
   - Prefer `path#Symbol` (methods: `path#Type.Method`) anywhere existing code is
     referenced. `path:line` and `path:line-line` remain useful for a block inside
     a function, SQL, config, generated code or docs. The gate verifies the file
@@ -139,10 +158,45 @@ question whose answer changes visible behaviour blocks. The verdict is
 limited); only `pass` unlocks `orch plan`. The report, findings and
 question cards are in `<run root>/gate/<hash>/`.
 
+## Requirement splits, merges and migration
+
+For a split, both new requirements explicitly name their predecessor:
+
+```
+#### Builds
+- Saves a transfer before acknowledging it.
+  id: queue-save
+  supersedes: queue-durable
+  reuse: queue.py#Queue.save
+- Reloads saved transfers on restart.
+  id: queue-restore
+  supersedes: queue-durable
+  reuse: queue.py#Queue.restore
+```
+
+For a merge, the new requirement names both predecessors:
+
+```
+#### Builds
+- Shows queued and running transfers in one accessible view.
+  id: transfer-view
+  supersedes: queue-list, running-list
+  reuse: transfers.ts#TransferView.render
+```
+
+`orch spec ids <spec>` prints deterministic proposed `id:` lines for legacy
+bullets, without editing the spec or writing any archive. Existing explicit
+IDs are kept and proposed names avoid active and superseded IDs. Repeated requirement text
+is marked as ambiguous history. Review the proposal and add IDs by hand.
+Historical mappings always require an explicit mapping and revalidation; the
+preview never accepts a historical answer or infers a split or merge. Two
+requirements that cite the same function stay separate requirements.
+
 ## Inspect or propose queries
 
 `orch spec queries <spec>` is a parser, with grouped text or `--json`.
-`--package <id>` or `--item <id>#<n>` selects a subset. It shows every item's
+`--package <id>` or `--item <package>#<slug>` selects a subset.
+`--item <package>#<n>` still selects legacy bullets. It shows every item's
 text, search lines and reuse pointers without a model or repo state.
 
 `orch spec queries <spec> --generate --package <id>` proposes search lines
@@ -154,8 +208,9 @@ requires explicit `--all`; a package or item selector is the normal use.
 Candidates are retrieved only from explicit queries. The default is three per
 query for small packages; larger packages divide a 24-body budget over their
 queries, clamped to 2..5 per query. A location answering several items is shown
-once with `also for #2, #5`. Compare reports items with queries, queries run,
-distinct locations and bodies shown; reference precision/recall scores
+once with `also for #2, #5` for legacy items or qualified explicit IDs.
+Compare reports items with queries, queries run, distinct locations and bodies
+shown; reference precision/recall scores
 locations rather than item wording.
 
 ## What `orch plan` does

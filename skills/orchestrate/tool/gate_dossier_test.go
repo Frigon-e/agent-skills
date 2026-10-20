@@ -72,7 +72,7 @@ func TestDossierRanksFilesAndFindsWhatExistsAndWhatDoesNot(t *testing.T) {
 	text := buildDossier(t, code, src, t.TempDir()).text("api")
 
 	wantContains(t, text,
-		"### 1. Ranked files", "### 2. Interface sheet", "### 3. Existing things that look like what this package builds (outside its owns)", "### 4. Names not found anywhere",
+		"### 1. Ranked files", "### 2. Interface sheet", "### 3. Existing things that look like what this package builds (outside its owns)", "### 4. Names not found in completed bounded lookups (not proof of absence)",
 		// owned and named in the text: 2 + 2 is not it; owned file also pointed at gets both reasons
 		"`internal/queue/queue.go` (score 2: own): owned; named in the text",
 		// a concept hit (2) and a rare rg hit (1) in the same file, plus 2 for two kinds agreeing

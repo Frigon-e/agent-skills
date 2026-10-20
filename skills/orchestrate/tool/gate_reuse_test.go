@@ -207,21 +207,21 @@ func bigCands(n int) []itemCands {
 
 func TestChecklistIsCappedPagedAndSaysWhatWasCut(t *testing.T) {
 	small := renderChecklist(bigCands(2), nil)
-	wantContains(t, small, "- `p#1` item 1", "1. `x/f1_1.go:1-90` func Fn", "| (75 more lines)")
+	wantContains(t, small, "- `p#1` item 1", "1. `x/f1_1.go:1-90`", "func Fn", "| (50 more lines) omitted evidence-")
 	if strings.Contains(small, "cut:") || strings.Contains(small, "More items") {
 		t.Errorf("a small checklist was cut:\n%s", small)
 	}
-	// a body over 40 lines shows its first 15
-	if strings.Count(small, "| \tline") != 2*3*reuseLongHead {
+	// Larger bodies keep up to 40 relevant lines, with an explicit expansion.
+	if strings.Count(small, "| \tline") != 2*3*reuseShowLines {
 		t.Errorf("long bodies show %d lines", strings.Count(small, "| \tline"))
 	}
 	big := renderChecklist(bigCands(20), nil)
-	wantContains(t, big, reuseMoreNotice, "- `p#13` item 13", "cut:")
+	wantContains(t, big, reuseMoreNotice, "- `p#13` item 13", "Recorded omissions")
 	if i := strings.Index(big, reuseMoreNotice); i < 0 || strings.Index(big, "`p#12`") > i || strings.Index(big, "`p#13`") < i {
 		t.Error("items 13 and later must come after the notice")
 	}
-	if len(big) > (reuseCapMain+reuseCapMore)*13/10 {
-		t.Errorf("checklist is %d characters, past its caps", len(big))
+	if len(big) > dossierTotal {
+		t.Errorf("checklist is %d bytes, past its single overall budget", len(big))
 	}
 	only := renderChecklist(bigCands(5), map[string]bool{"p#2": true})
 	if strings.Contains(only, "`p#1`") || !strings.Contains(only, "`p#2`") {
@@ -313,8 +313,8 @@ esac
 func TestGroupVerdictsAreOffByDefaultAndTheRetryAsksOnlyForMissingItems(t *testing.T) {
 	h := setup(t)
 	gdir := verdictRepo(t, h)
-	group := `{"packages":[{"id":"api","will_change":[],"claims":[],"questions":[],"reuse":[],"items":[{"item":"api#1","verdict":"reuse","candidate":"internal/store.go:3","why":"Put exists"}]}]}`
-	retry := `{"packages":[{"id":"api","items":[{"item":"api#2","verdict":"extend","candidate":"internal/store.go:3","why":"add the route beside Put"}]}]}`
+	group := `{"packages":[{"id":"api","will_change":[],"claims":[],"questions":[],"reuse":[],"items":[{"item":"api#1","verdict":"reuse","candidate":"internal/store.go:3","why":"Put exists","matching_behavior":"Put stores the record","support_assessment":{"schema_version":1,"state":"supported","rationale":"The existing Put function handles the requested storage behavior"}}]}]}`
+	retry := `{"packages":[{"id":"api","items":[{"item":"api#2","verdict":"extend","candidate":"internal/store.go:3","why":"add the route beside Put","matching_behavior":"Put supplies storage","missing_behavior":"Add the POST route beside Put","support_assessment":{"schema_version":1,"state":"supported","rationale":"Storage exists but the requested HTTP route must be added"}}]}]}`
 	dir := scriptPi(t, h, cleanPackageReply, retry)
 
 	// Off by default: no verdict is asked for and no retry runs.

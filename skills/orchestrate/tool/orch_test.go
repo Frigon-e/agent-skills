@@ -714,15 +714,29 @@ func TestGateEvidenceDecidesTheVerdict(t *testing.T) {
 		t.Fatalf("plan without a gate: %d %s", code, out)
 	}
 
-	// A claim whose evidence is not in the repo is dropped, not counted.
+	// An unsupported blocking claim is not accepted, but the required check
+	// stays incomplete until evidence supports or rejects the interpretation.
 	h.fakePi(gatePasses(map[string]string{"adv-a": `{"findings":[{"severity":"blocker","where":"Design rules","claim":"x","evidence":"internal/nope.go:9"}]}`}))
-	out := h.must("gate", "spec.md")
-	wantContains(t, out, "gate: pass", "blockers: 0 verified", "concerns: 0 verified, 1 unverified", "dropped: 1 claim(s)")
-	h.must("plan", "spec.md") // the passed gate unlocks plan
-
-	// The same finding with evidence that exists is a verified blocker.
-	h.fakePi(gatePasses(map[string]string{"adv-b": `{"findings":[{"severity":"blocker","where":"Design rules","claim":"Put ignores errors","evidence":"internal/store.go:3","why":"w"}]}`}))
 	code, out := h.run("gate", "spec.md")
+	if code != 1 {
+		t.Fatalf("unsupported blocking claim passed: %d %s", code, out)
+	}
+	wantContains(t, out, "gate: unverified", "blockers: 0 verified", "concerns: 0 verified, 1 unverified", "dropped: 1 claim(s)")
+	gdir := gateDir(h.a.siteRoot(t), specHash(mustRead(t, filepath.Join(h.repo, "spec.md"))))
+	rec := readRecord(t, gdir)
+	if rec.State != "incomplete" || len(rec.Reduction.Reasons) == 0 || rec.Reduction.Reasons[0].Reason != reviewUnsupportedClaim {
+		t.Fatalf("unsupported claim did not remain incomplete: %+v", rec.Reduction)
+	}
+	if code, _ := h.run("plan", "spec.md"); code != 1 {
+		t.Fatal("unsupported claim authorized plan")
+	}
+	h.fakePi(gatePasses(nil))
+	h.must("gate", "spec.md")
+	h.must("plan", "spec.md") // only a complete supported review unlocks plan
+
+	// A valid locator plus separate behavioral support is an accepted blocker.
+	h.fakePi(gatePasses(map[string]string{"adv-b": `{"findings":[{"severity":"blocker","where":"Design rules","claim":"Put ignores errors","evidence":"internal/store.go:3","why":"The failure path does not report storage errors","support_assessment":{"schema_version":1,"state":"supported","rationale":"The Put implementation has no error return","excerpt":"func Put() {}","failure_scenario":"A failed write cannot be reported to its caller"}}]}`}))
+	code, out = h.run("gate", "spec.md")
 	if code != 1 {
 		t.Fatalf("a verified blocker passed the gate: %d %s", code, out)
 	}
@@ -2258,7 +2272,11 @@ func TestAsk(t *testing.T) {
 		"shot.png": "PNGDATA",
 	})
 	out := h.must("ask")
-	wantContains(t, out, "page: ", "index.html", "questions: 2\n", "help[2]:", "  lavish-axi ", "  lavish-axi poll ")
+	wantContains(t, out, "page: ", "index.html", "questions: 2\n", "help[2]:", "lavish-axi ", "lavish-axi poll ")
+	info := decodedOutput(t, []byte(out), outputAgent).(map[string]any)
+	if len(info["decisions"].([]any)) != 2 || len(info["help"].([]any)) != 2 {
+		t.Fatalf("incomplete structured ask view: %#v", info)
+	}
 	page := h.askPage()
 	wantContains(t, page, "Does a script make the page?", "Question for other?", "Recommended", "Change later: hard",
 		"<strong>bold</strong>", `src="files/t1-page-diagram.svg"`, `alt="A diagram"`, `src="files/t1-page-shot.png"`, `alt="A screenshot"`,
@@ -2418,8 +2436,8 @@ func TestAskCards(t *testing.T) {
 	}
 	writeFiles(t, topic, map[string]string{"map.md": "Idea **map**.\n"})
 	writeFiles(t, qd, map[string]string{
-		"b-pick.md":       "---\nquestion: Pick one?\nrecommend: x\n---\n## Context\ninclude: ../map.md\n\n## Options\n### x: Ex\nGain: a.\n\n### y: Why\nGain: b.\n",
-		"a-out.md":        "---\nquestion: Out?\n---\n## Context\ninclude: ../../secret.md\n",
+		"b-pick.md":       "---\nquestion: Pick one?\nrecommend: x\n---\n## Context\ninclude: ../map.md\n\n## Options\n### x: Ex\nGain: a.\nCost: less b.\n\n### y: Why\nGain: b.\nCost: less a.\n\n## Next\nThe lead implements the choice.\n",
+		"a-out.md":        strings.Replace(readyAskCard, "The Python API uses asyncio.TaskGroup.", "include: ../../secret.md\n\nThe Python API uses asyncio.TaskGroup.", 1),
 		"Bad Name.md":     "---\nquestion: Skipped?\n---\n",
 		"answered/old.md": "---\nquestion: Old?\n---\n",
 	})
@@ -2429,15 +2447,29 @@ func TestAskCards(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantContains(t, out, "page: "+filepath.Join(topic, "ask", "index.html"), "questions: 2\n", "a-out,", "outside the task directory", "Bad Name.md,")
+	wantContains(t, out, "page: "+filepath.Join(topic, "ask", "index.html"), "questions: 1\n", "cards: 3\n", "not_ready: 2\n", "a-out,", "outside the task directory")
+	warnings, ok := decodedOutput(t, []byte(out), outputAgent).(map[string]any)["warnings"].([]any)
+	if !ok {
+		t.Fatal("Ask output has no decoded warning rows")
+	}
+	found := false
+	for _, row := range warnings {
+		warning, ok := row.(map[string]any)
+		if ok && warning["question"] == "Bad Name.md" && warning["message"] == fmt.Sprintf("skipped: the name must match %s.md", keyRe) {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("missing bad-name warning attached to Bad Name.md: %v", warnings)
+	}
 	wantContains(t, string(page), "Pick one?", "Idea <strong>map</strong>.", `data-lavish-question="b-pick"`, `data-lead=""`, "Answer for question ")
 	for _, bad := range []string{"SECRET", "Old?", "Skipped?", `data-lavish-question="/`} {
 		if strings.Contains(string(page), bad) {
 			t.Errorf("page contains %q", bad)
 		}
 	}
-	if strings.Index(string(page), "Out?") > strings.Index(string(page), "Pick one?") {
-		t.Error("cards are not in file name order")
+	if strings.Contains(string(page), `data-lavish-question="a-out"`) {
+		t.Error("a card with an unavailable include was asked as complete")
 	}
 	if code, out := h.run("ask", "--cards", filepath.Join(h.tmp, "nope")); code == 0 || !strings.Contains(out, "is not a directory") {
 		t.Errorf("missing --cards dir: exit %d, %s", code, out)

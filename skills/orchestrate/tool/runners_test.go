@@ -67,6 +67,66 @@ enabled = false
 	}
 }
 
+func TestRoleAdjudicatorAPIConfigIsScoped(t *testing.T) {
+	h := setup(t)
+	path := filepath.Join(h.tmp, "adjudicator-roles.toml")
+	t.Setenv("ORCH_CONFIG", path)
+	for _, tc := range []struct {
+		name, harness, provider string
+		want                    bool
+	}{
+		{"decider", "api", "openrouter", true},
+		{"gate_adjudicator", "api", "openrouter", true},
+		{"gate_adjudicator", "claude", "", true},
+		{"gate", "api", "openrouter", false},
+		{"spec_queries", "api", "openrouter", false},
+		{"shadow_flash", "api", "openrouter", false},
+		{"decider", "claude", "", false},
+		{"gate_adjudicator", "api", "", false},
+		{"gate_adjudicator", "api", "bad/provider", false},
+	} {
+		t.Run(tc.name+"-"+tc.harness+"-"+strings.ReplaceAll(tc.provider, "/", "-"), func(t *testing.T) {
+			raw := fmt.Sprintf("[roles.%s]\nenabled = false\nuse = [{harness=%q, provider=%q, model=\"test-model\"}]\n", tc.name, tc.harness, tc.provider)
+			if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			cfg, err := loadConfig(h.repo)
+			if (err == nil) != tc.want {
+				t.Fatalf("accepted=%v want %v: %v", err == nil, tc.want, err)
+			}
+			if err == nil {
+				r, _ := (site{cfg: cfg}).newRoleRun(tc.name, modelOptions{Runner: "claude:override"})
+				if r.enabled {
+					t.Fatal("parsed disabled role enabled by override")
+				}
+			}
+		})
+	}
+	raw := `[roles.gate_adjudicator]
+enabled = false
+use = [{harness="api", provider="openrouter", model="test-model"}]
+[roles.gate_adjudicator.budget]
+requests = 7
+input_tokens = 40000
+output_tokens = 12000
+seconds = 300
+repairs = 1
+fallbacks = 1
+output_reserve = 4000
+`
+	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := loadConfig(h.repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	budget := cfg.Roles[adjudicatorRole].Budget
+	if budget == nil || budget.Requests != 7 || budget.InputTokens != 40000 || budget.OutputReserve != 4000 {
+		t.Fatal("role budget lost in machine config", budget)
+	}
+}
+
 func TestRoleOrderedFilteringOverrideAndFallback(t *testing.T) {
 	t.Setenv("ORCH_HEALTH", filepath.Join(t.TempDir(), "health.json"))
 	t.Setenv("ORCH_GATE_MODEL", "")

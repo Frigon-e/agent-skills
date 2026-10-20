@@ -17,11 +17,12 @@ import (
 	"time"
 )
 
-var modelRoles = []string{"gate", "spec_queries", "shadow_flash", "decider"}
+var modelRoles = []string{"gate", "spec_queries", "shadow_flash", "decider", "gate_adjudicator"}
 
 type modelRole struct {
-	Enabled *bool     `toml:"enabled"`
-	Use     []profile `toml:"use"`
+	Enabled *bool               `toml:"enabled"`
+	Use     []profile           `toml:"use"`
+	Budget  *adjudicationLimits `toml:"budget"`
 }
 
 func runnerBinary(h string) string {
@@ -46,6 +47,11 @@ func (s site) role(name string) modelRole {
 		return r
 	}
 	var r modelRole
+	if name == "gate_adjudicator" {
+		disabled := false
+		r.Enabled = &disabled
+		return r
+	}
 	if name == "decider" {
 		if installed("pi") || os.Getenv("OPENROUTER_API_KEY") != "" || os.Getenv("ORCH_TRIAGE_KEY") != "" {
 			r.Use = []profile{{Harness: "api", Provider: "openrouter", Model: orDefault(s.cfg.TriageModel, triageModelDefault)}}

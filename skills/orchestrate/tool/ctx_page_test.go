@@ -120,12 +120,15 @@ func TestCtxTextPageFlagsAndErrors(t *testing.T) {
 	c := newCtxHarness(t)
 	p1 := c.must("ctx", "text", "StartCheckout", "--limit", "1", "-C", "0")
 	p2 := c.must("ctx", "text", "StartCheckout", "--limit", "1", "--page", "2", "-C", "0")
-	wantContains(t, p1, "  4:", "showing 1-1 of 2; next: --page 2")
-	wantContains(t, p2, "  7:", "showing 2-2 of 2")
-	if strings.Contains(p2, "  4:") {
-		t.Errorf("page 2 repeats page 1:\n%s", p2)
+	wantContains(t, ctxTestStrings(t, p1), "showing 1-1 of 2; next: --page 2")
+	wantContains(t, ctxTestStrings(t, p2), "showing 2-2 of 2")
+	if one, two := ctxTestSourceLines(t, p1, "pay/pay.go"), ctxTestSourceLines(t, p2, "pay/pay.go"); len(one) != 1 || one[4] == nil || len(two) != 1 || two[7] == nil {
+		t.Fatalf("page source overlap: %#v %#v", one, two)
 	}
-	wantContains(t, c.must("ctx", "text", "StartCheckout", "--max", "1", "--page", "2", "-C", "0"), "  7:")
+	alias := c.must("ctx", "text", "StartCheckout", "--max", "1", "--page", "2", "-C", "0")
+	if lines := ctxTestSourceLines(t, alias, "pay/pay.go"); len(lines) != 1 || lines[7] == nil {
+		t.Fatalf("max alias page=%#v", lines)
+	}
 	wantContains(t, c.must("ctx", "text", "StartCheckout", "--limit", "1", "--page", "3"), "page 3 is past the end (2 hits, 2 pages)")
 	for _, args := range [][]string{{"ctx", "text", "x", "--page", "0"}, {"ctx", "text", "x", "--limit", "0"}, {"ctx", "find", "x", "--page", "0"}, {"ctx", "sym", "StartCheckout", "--limit", "-1"}} {
 		if code, out := c.run(args...); code != 2 || !strings.Contains(out, "error: ") || !strings.Contains(out, "at least 1") {
@@ -139,7 +142,11 @@ func TestCtxBatchPerLookupLimitAndPage(t *testing.T) {
 	out := c.must("ctx", "batch", "-q", "text:StartCheckout limit=1 page=2 context=0", "-q", "text:StartCheckout limit=1 context=0")
 	wantContains(t, out, "showing 2-2 of 2", "showing 1-1 of 2; next: page=2")
 	c.stdin.WriteString(`{"lookups":[{"kind":"text","query":"StartCheckout","limit":1,"page":2,"context":0}]}`)
-	wantContains(t, c.must("ctx", "batch", "-"), "  7:", "showing 2-2 of 2")
+	fromPlan := c.must("ctx", "batch", "-")
+	wantContains(t, ctxTestStrings(t, fromPlan), "showing 2-2 of 2")
+	if lines := ctxTestSourceLines(t, fromPlan, "pay/pay.go"); len(lines) != 1 || lines[7] == nil {
+		t.Fatalf("plan page=%#v", lines)
+	}
 	c.stdin.WriteString(`{"lookups":[{"kind":"text","query":"x","page":-1}]}`)
 	if code, out := c.run("ctx", "batch", "-"); code != 2 || !strings.Contains(out, "at least 1") {
 		t.Errorf("negative page: %d %s", code, out)
@@ -152,12 +159,15 @@ func TestCtxBatchPerLookupLimitAndPage(t *testing.T) {
 func TestCtxSymCallersPageAndImplementers(t *testing.T) {
 	c := newCtxHarness(t)
 	p2 := c.must("ctx", "sym", "StartCheckout", "--limit", "3", "--page", "2", "--impl=false")
-	wantContains(t, p2, "used by 8", "    4  ", "    5  ", "    6  ", "showing 4-6 of 8; next: --page 3")
-	if strings.Contains(p2, "    3  ") || strings.Contains(p2, "    7  ") {
-		t.Errorf("page 2 is not lines 4-6:\n%s", p2)
+	wantContains(t, ctxTestStrings(t, p2), "used by 8", "showing 4-6 of 8; next: --page 3")
+	if lines := ctxTestSourceLines(t, p2, "svc/svc.go"); len(lines) != 3 || lines[4] == nil || lines[5] == nil || lines[6] == nil {
+		t.Fatalf("callers page2=%#v", lines)
 	}
 	p3 := c.must("ctx", "sym", "StartCheckout", "--limit", "3", "--page", "3", "--impl=false")
-	wantContains(t, p3, "    7  ", "    8  ", "showing 7-8 of 8")
+	wantContains(t, ctxTestStrings(t, p3), "showing 7-8 of 8")
+	if lines := ctxTestSourceLines(t, p3, "svc/svc.go"); len(lines) != 2 || lines[7] == nil || lines[8] == nil {
+		t.Fatalf("callers page3=%#v", lines)
+	}
 	wantContains(t, c.must("ctx", "sym", "StartCheckout", "--limit", "3", "--page", "4", "--impl=false"), "page 4 is past the end (8 callers, 3 pages)")
 	wantContains(t, c.must("ctx", "sym", "StartCheckout", "--limit", "1", "--page", "2"), "implemented by 1 - page 2 is past the end (1 implementers, 1 page)")
 }

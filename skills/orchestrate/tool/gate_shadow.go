@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -242,6 +243,12 @@ func postDecisions(model string, state, questions map[string]any) (map[string]de
 }
 
 func postDecisionsWith(p profile, state, questions map[string]any) (map[string]decAnswer, string, shadowUsage, error) {
+	return postDecisionsWithContext(context.Background(), p, state, questions)
+}
+
+// Adjudication experiments use the same typed decisions boundary with a shared
+// run deadline. Existing shadow and triage callers retain their timeout/routing.
+func postDecisionsWithContext(ctx context.Context, p profile, state, questions map[string]any) (map[string]decAnswer, string, shadowUsage, error) {
 	var u shadowUsage
 	key, err := providerKey(p.Provider)
 	if err != nil {
@@ -255,7 +262,7 @@ func postDecisionsWith(p profile, state, questions map[string]any) (map[string]d
 			return nil, "", u, fmt.Errorf("%s decisions connector has no endpoint", p.Provider)
 		}
 	}
-	req, err := http.NewRequest("POST", endpoint, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, "POST", endpoint, bytes.NewReader(body))
 	if err != nil {
 		return nil, "", u, err
 	}
@@ -279,6 +286,27 @@ func postDecisionsWith(p profile, state, questions map[string]any) (map[string]d
 		return nil, "", u, fmt.Errorf("decisions API reply is not JSON: %v", err)
 	}
 	return r.Answers, r.Model, r.Usage, nil
+}
+
+// recordAdjudicationShadow is an explicit experiment hook, never called by the
+// ordinary gate. It owns a separate budget, records packets/replies/usage/later
+// outcomes and never applies a reply to the production review.
+func recordAdjudicationShadow(enabled bool, rr *roleRun, limits adjudicationLimits, env adjudicationEnvelope, run adjudicationRunner, path, laterOutcome string) (*adjudicationAudit, error) {
+	if !enabled || len(env.Packets) == 0 {
+		return nil, nil
+	}
+	budget := newRunBudget(limits, time.Now())
+	audit := executeAdjudication(rr, budget, env, run)
+	audit.LaterOutcome = laterOutcome
+	record := struct {
+		Budget *RunBudget        `json:"experiment_budget"`
+		Audit  adjudicationAudit `json:"adjudication"`
+	}{budget, audit}
+	raw, err := json.MarshalIndent(record, "", "  ")
+	if err == nil {
+		err = os.WriteFile(path, append(raw, '\n'), 0o600)
+	}
+	return &audit, err
 }
 
 // orderedDeciderQuestions preserves the behavioral checks before the class on the wire.

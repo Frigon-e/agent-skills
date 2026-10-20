@@ -12,18 +12,19 @@ import (
 // ---- symbols ----
 
 type symOpts struct {
-	Refs      int    // non-test callers listed (each with its line, enclosing function and the line before)
-	Impl      bool   // implementers listed
-	Tests     string // none (default), include or only: how test references are shown
-	Kind      string // only definitions of this kind
-	In        string // only definitions under this path
-	Compact   bool   // signature, first doc line and counts only
-	Full      bool   // whole bodies and every caller kept
-	Context   int    // lines above each caller
-	Generated string // generated callers: none (hidden, counted), include or only
-	Limit     int    // callers and implementers per page; 0: Refs for callers, 10 for implementers
-	Page      int    // 1-based page of both lists
-	Batch     bool   // inside orch ctx batch: hints use -q keys
+	SchemaVersion int    // v2 source bytes stay native, legacy JSON remains unchanged
+	Refs          int    // non-test callers listed (each with its line, enclosing function and the line before)
+	Impl          bool   // implementers listed
+	Tests         string // none (default), include or only: how test references are shown
+	Kind          string // only definitions of this kind
+	In            string // only definitions under this path
+	Compact       bool   // signature, first doc line and counts only
+	Full          bool   // whole bodies and every caller kept
+	Context       int    // lines above each caller
+	Generated     string // generated callers: none (hidden, counted), include or only
+	Limit         int    // callers and implementers per page; 0: Refs for callers, 10 for implementers
+	Page          int    // 1-based page of both lists
+	Batch         bool   // inside orch ctx batch: hints use -q keys
 }
 
 const (
@@ -35,9 +36,9 @@ const (
 
 func defaultSymOpts(f ctxFmt) symOpts {
 	if f.Compact {
-		return symOpts{Compact: true}
+		return symOpts{Compact: true, SchemaVersion: f.SchemaVersion}
 	}
-	o := symOpts{Refs: symRefsDefault, Impl: true, Full: f.Full, Batch: f.Batch}
+	o := symOpts{Refs: symRefsDefault, Impl: true, Full: f.Full, Batch: f.Batch, SchemaVersion: f.SchemaVersion}
 	if f.Full {
 		o.Refs = ctxMaxRefs
 	}
@@ -334,15 +335,23 @@ func (e *ctxEnv) symView(f symFact, o symOpts) *ctxView {
 				def.Raw = append(def.Raw, short(doc[0], 140))
 			}
 			if len(body) > 0 {
-				def.Raw = append(def.Raw, "  "+short(keepIndent(body[0]), width))
+				if o.SchemaVersion == 2 {
+					def.add(path, ctxLine{N: start, Text: body[0], Match: true})
+				} else {
+					def.Raw = append(def.Raw, "  "+short(keepIndent(body[0]), width))
+				}
 			}
 		default:
 			for _, l := range doc[:min(len(doc), 10)] {
 				def.Raw = append(def.Raw, short(l, width))
 			}
 			if o.Tests != "only" {
-				for _, l := range body {
-					def.Raw = append(def.Raw, "  "+short(keepIndent(l), width))
+				for i, l := range body {
+					if o.SchemaVersion == 2 {
+						def.add(path, ctxLine{N: start + i, Text: l, Match: true})
+					} else {
+						def.Raw = append(def.Raw, "  "+short(keepIndent(l), width))
+					}
 				}
 				if more > 0 {
 					def.Raw = append(def.Raw, fmt.Sprintf("  (+%d lines; --full)", more))

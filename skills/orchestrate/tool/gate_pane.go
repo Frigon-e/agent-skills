@@ -190,7 +190,10 @@ func runPaneChoice(pane *string, repo string, choice profile, gdir string, p gat
 	name := passFile(p.name)
 	task := filepath.Join(gdir, "passes", name+".md")
 	errF := filepath.Join(gdir, "passes", name+".err")
-	session := filepath.Join(gdir, "sessions", name)
+	session := p.sessionDir
+	if session == "" {
+		session = filepath.Join(gdir, "sessions", name)
+	}
 	defer func() {
 		if err != nil {
 			_ = os.WriteFile(errF, []byte(err.Error()+"\n"), 0o644)
@@ -287,6 +290,12 @@ func runPaneChoice(pane *string, repo string, choice profile, gdir string, p gat
 				hit = "hard"
 				_, _ = herdrCmd(herdrTimeout, "agent", "send-keys", *pane, "ctrl+c")
 				time.Sleep(gateLeavePoll)
+				if p.admission != nil {
+					if e := p.admission.continueWith(max(int64(len(p.prompt)), int64(context)*4)); e != nil {
+						leavePane(pane, repo, true)
+						return "", hit, e
+					}
+				}
 				o, perr := herdrCmd(185*time.Second, "agent", "prompt", *pane, "Reply now with the final JSON only.", "--wait", "--timeout", "180000")
 				if perr != nil {
 					leavePane(pane, repo, true)
@@ -299,6 +308,12 @@ func runPaneChoice(pane *string, repo string, choice profile, gdir string, p gat
 				why := fmt.Sprintf("%d turns", calls)
 				if context >= gateContextSoft {
 					why = fmt.Sprintf("context %d tokens", context)
+				}
+				if p.admission != nil {
+					if e := p.admission.continueWith(max(int64(len(p.prompt)), int64(context)*4)); e != nil {
+						leavePane(pane, repo, true)
+						return "", hit, e
+					}
 				}
 				_, _ = herdrCmd(herdrTimeout, "agent", "prompt", *pane, fmt.Sprintf("Budget reached (%s). Stop exploring and reply now with the final JSON from what you have.", why))
 			}

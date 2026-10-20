@@ -82,6 +82,9 @@ func TestGateEnrichQuestionAuthorityAndAnswerHistory(t *testing.T) {
 				{Question: "What retention applies to `" + path + "` and `cache_days`?", Decisive: true},
 				{Question: "Which test layout should verify `" + path + "` and `cache_days` using deterministic fixtures and isolated clocks?", Decisive: true},
 			}
+			for i := range qs {
+				qs[i].Packet = &gateQuestionPacket{Goal: "Resolve the cache behavior and its acceptance checks", KnownFacts: []string{path + " defines cache_days = 30"}, Unknown: qs[i].Question, Options: []gatePacketOption{{"a", "Keep the current setting and deterministic fixtures", "Retains current behavior", "Does not add broader coverage"}, {"b", "Change the setting and expand the fixtures", "Covers the new behavior", "Requires new assertions"}}, Recommendation: "a", Rationale: "The current setting is explicit in the fixture", Authority: "Owner decides retention; the lead decides test layout", NextAction: "Record the authorized choice and update the fixture checks"}
+			}
 			reply, err := json.Marshal(map[string]any{
 				"id": "api", "will_change": []string{}, "claims": []any{}, "reuse": []any{}, "questions": qs,
 			})
@@ -106,8 +109,8 @@ func TestGateEnrichQuestionAuthorityAndAnswerHistory(t *testing.T) {
 			}
 			index := string(mustRead(t, filepath.Join(qdir, "INDEX.md")))
 			wantContains(t, index, "| q1-api | owner |", "| q2-api | lead-may-decide |", "settle-by-lead")
-			// The existing ask contract still renders every root card, including delegated cards.
-			wantContains(t, h.must("ask", "--cards", qdir), "questions: 2")
+			// D2 publishes ready owner questions and reports delegated cards separately.
+			wantContains(t, h.must("ask", "--cards", qdir), "questions: 1", "settled_by_lead: 1")
 			before := string(mustRead(t, filepath.Join(gdir, "gate.json")))
 			answered := filepath.Join(qdir, "answered", "q1-api.md")
 			if err := os.MkdirAll(filepath.Dir(answered), 0o755); err != nil {
@@ -123,7 +126,7 @@ func TestGateEnrichQuestionAuthorityAndAnswerHistory(t *testing.T) {
 				t.Error("enrichment reopened the answered question")
 			}
 			wantContains(t, string(mustRead(t, filepath.Join(qdir, "q2-api.md"))), qs[1].Question, "route: lead-may-decide")
-			wantContains(t, h.must("ask", "--cards", qdir), "questions: 1")
+			wantContains(t, h.must("ask", "--cards", qdir), "questions: 0", "settled_by_lead: 1")
 			if after := string(mustRead(t, filepath.Join(gdir, "gate.json"))); after != before {
 				t.Error("enrichment changed the original questions or answer evidence in gate.json")
 			}
@@ -529,12 +532,19 @@ func TestGateEnrichesItsCardsAndAskStillParsesThem(t *testing.T) {
 	if code != 1 {
 		t.Fatalf("exit %d: %s", code, out)
 	}
-	wantContains(t, out, "questions: 1 need a decision", "question cards: 1 -> 1 after merging; owner 1, lead-may-decide 0, unclear 0; spec hints 0; code hits 1; symbol facts 0")
+	wantContains(t, out, "questions: 1 need a decision")
+	gateInfo := decodedOutput(t, []byte(out), outputAgent).(map[string]any)
+	if gateInfo["question_cards"] != "1 -> 1 after merging; owner 1, lead-may-decide 0, unclear 0; spec hints 0; code hits 1; symbol facts 0" {
+		t.Fatalf("gate question accounting: %#v", gateInfo)
+	}
 	gdir := filepath.Join(runRoot(h.repo), "gate", specHash(mustRead(t, filepath.Join(h.repo, "spec.md"))))
 	wantContains(t, string(mustRead(t, filepath.Join(gdir, "questions", "q1-api.md"))), "## Tag\nowner (mentions refund)")
 	ask := h.must("ask", "--cards", filepath.Join(gdir, "questions"))
-	wantContains(t, ask, "questions: 1")
-	if strings.Contains(ask, "INDEX") || strings.Contains(ask, "skipped") {
+	wantContains(t, ask, "questions: 0")
+	// Question context now includes legitimate retrieval uncertainty such as
+	// "Spec hint search ... skipped". Inspect warnings, not arbitrary prose.
+	info := decodedOutput(t, []byte(ask), outputAgent).(map[string]any)
+	if _, ok := info["warnings"]; ok {
 		t.Errorf("ask tripped over the index:\n%s", ask)
 	}
 

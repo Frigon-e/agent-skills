@@ -128,7 +128,7 @@ func (a *app) integrate(s site, dir, id string, fm map[string]string, candidate 
 			files := strings.Split(conflicts, "\n")
 			fmt.Fprintf(a.out, "integration: conflict\nfiles[%d]:\n", len(files))
 			for _, f := range files {
-				fmt.Fprintf(a.out, "  %s\n", toonValue(f))
+				fmt.Fprintf(a.out, "  %s\n", agentScalar(f))
 			}
 			_ = a.appendStatus(dir, "note", fmt.Sprintf("merge into %s conflicted in %d files; left unmerged", branch, len(files)), "", "orch")
 			return &exitError{code: 1}

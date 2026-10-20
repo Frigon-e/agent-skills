@@ -141,6 +141,23 @@ func (r *roleRun) providerReadiness(provider string) keyReadiness {
 	return result
 }
 
+// adjudicationTransport is deliberately separate from triage routing. The
+// decisions endpoint has native object state and finite typed choices, not chat
+// or arbitrary explanation fields. Explanations must be selected from complete
+// recorded proposals; adapters must not fabricate missing support.
+func adjudicationTransport(p profile) (string, error) {
+	switch p.Harness {
+	case "pi", "claude":
+		return "text", nil
+	case "api":
+		if p.Provider == "openrouter" || os.Getenv("ORCH_"+strings.ToUpper(strings.ReplaceAll(p.Provider, "-", "_"))+"_DECISIONS_URL") != "" {
+			return "decisions", nil
+		}
+		return "", fmt.Errorf("%s decisions connector has no endpoint", p.Provider)
+	}
+	return "", fmt.Errorf("unsupported adjudication connector %q", p.Harness)
+}
+
 func laneWithin(name, parent string) bool {
 	return name == parent || strings.HasPrefix(name, parent+":")
 }

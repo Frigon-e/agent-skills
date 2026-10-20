@@ -384,8 +384,8 @@ func gateApproval(root, code string, src []byte) (bool, string) {
 	if !r.Subject.valid() || r.ReviewPolicy == nil || r.ReviewPolicy.Version != gateReviewPolicyVersion {
 		return false, "unbound or legacy approval; a fresh review is required"
 	}
-	if r.Status != gateStatePass {
-		return false, "recorded gate status is " + r.Status
+	if r.SchemaVersion != gateStatusSchemaVersion || r.State != gateStatePass || r.Status != gateStatePass || r.Review == nil {
+		return false, "recorded gate is not an accepted reducer pass; a fresh review is required"
 	}
 	now, err := captureGateSubject(code, src)
 	if err != nil {
@@ -393,6 +393,34 @@ func gateApproval(root, code string, src []byte) (bool, string) {
 	}
 	if changed := gateSubjectChanges(r.Subject, now); len(changed) > 0 {
 		return false, "stale approval: " + strings.Join(changed, ", ") + " changed; a fresh review is required"
+	}
+	policy := r.Review.Policy
+	policy.CurrentSubject = now
+	// Revalidate our full-file source observations at the approval boundary.
+	// Ignored sources and symlink targets may change without a checkout-ID change.
+	// Other producers retain their own declared hash/range basis; never guess it.
+	hashes := make(map[string]string, len(policy.CurrentHashes))
+	for id, hash := range policy.CurrentHashes {
+		hashes[id] = hash
+	}
+	sourceReads := map[string]bool{}
+	for _, lookup := range policy.Packet.Lookups {
+		if lookup.Unit == "source_read" {
+			sourceReads[lookup.ID] = true
+		}
+	}
+	for _, e := range policy.Packet.Evidence {
+		if e.SourceKind == evidenceSourceCode && e.Range == nil && sourceReads[e.LookupID] {
+			hashes[e.ID] = ""
+			if bytes, err := os.ReadFile(filepath.Join(code, e.Path)); err == nil {
+				hashes[e.ID] = subjectDigest(bytes)
+			}
+		}
+	}
+	policy.CurrentHashes = hashes
+	result := ReduceReview(r.Subject, r.Review.Checks, r.Review.Answers, r.Review.Findings, policy)
+	if result.State != gateStatePass || result.Completion.Required == 0 {
+		return false, "recorded review does not reduce to pass; a fresh review is required"
 	}
 	return true, ""
 }

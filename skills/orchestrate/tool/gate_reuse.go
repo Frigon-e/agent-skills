@@ -14,44 +14,46 @@ import (
 // might already do the job, found by code with no model. Evidence is counted
 // the way the dossier counts it (concept hit 2, symbol definition 2, rare text
 // hit 1, two kinds agreeing +2); the package's own files, tests, generated
-// files and docs never count. The top candidates of each item are shown in
-// full so the model decides from them instead of searching.
+// files and docs never count. Matched source previews and precise expansion
+// routes let a reviewer assess candidates without treating retrieval as proof.
 
 const (
 	reuseCands      = 3  // default candidates per query in small packages
 	reuseBodyBudget = 24 // bodies per package, divided over its queries
 	reuseMinCands   = 2
 	reuseMaxCands   = 5
-	reuseRootQuota  = 2     // ... at most this many from one project root
-	reuseShowLines  = 40    // body lines shown for a candidate
-	reuseLongHead   = 15    // lines shown of a longer one
-	reuseKeepLines  = 80    // body lines kept for the shadow judges
-	reuseCapMain    = 30000 // characters of the checklist for items 1-12
-	reuseCapMore    = 12000 // ... and for the items after them
-	reuseNameLimit  = 6     // identifier-like names looked up per item
+	reuseRootQuota  = 2  // ... at most this many from one project root
+	reuseShowLines  = 40 // body lines shown for a candidate
+	reuseKeepLines  = 80 // body lines kept for the shadow judges
+	reuseNameLimit  = 6  // identifier-like names looked up per item
 	reuseMoreNotice = "More items (13 and later): treat them exactly like the items above and decide every one."
 )
 
 // reuseCand is one candidate: a declaration (or, failing that, a place) of
 // existing code.
 type reuseCand struct {
-	Hint    bool     `json:"hint,omitempty"`
-	Path    string   `json:"path"`
-	Start   int      `json:"start"`
-	End     int      `json:"end"`
-	Name    string   `json:"name,omitempty"`
-	Kind    string   `json:"kind,omitempty"`
-	In      string   `json:"in,omitempty"`
-	Sig     string   `json:"signature"`
-	Doc     string   `json:"doc,omitempty"`
-	Lines   []string `json:"-"` // up to reuseKeepLines lines of the declaration
-	Total   int      `json:"lines"`
-	Callers int      `json:"callers"`
-	ByName  bool     `json:"callers_by_name,omitempty"`
-	Score   int      `json:"score"`
-	Kinds   string   `json:"kinds"`
-	Via     []string `json:"via,omitempty"`
-	Tree    string   `json:"-"`
+	EvidenceID   string   `json:"evidence_id,omitempty"`
+	MatchLine    int      `json:"match_line,omitempty"`
+	MatchEnd     int      `json:"match_end,omitempty"`
+	PreviewStart int      `json:"preview_start,omitempty"`
+	Expansion    string   `json:"expansion,omitempty"`
+	Hint         bool     `json:"hint,omitempty"`
+	Path         string   `json:"path"`
+	Start        int      `json:"start"`
+	End          int      `json:"end"`
+	Name         string   `json:"name,omitempty"`
+	Kind         string   `json:"kind,omitempty"`
+	In           string   `json:"in,omitempty"`
+	Sig          string   `json:"signature"`
+	Doc          string   `json:"doc,omitempty"`
+	Lines        []string `json:"-"` // up to reuseKeepLines lines of the declaration
+	Total        int      `json:"lines"`
+	Callers      int      `json:"callers"`
+	ByName       bool     `json:"callers_by_name,omitempty"`
+	Score        int      `json:"score"`
+	Kinds        string   `json:"kinds"`
+	Via          []string `json:"via,omitempty"`
+	Tree         string   `json:"-"`
 }
 
 func (c reuseCand) at() string {
@@ -66,6 +68,7 @@ type itemCands struct {
 	Cands      []reuseCand
 	Queries    []string
 	QueriesRun int
+	Lookups    []evidenceLookup `json:"lookups,omitempty"`
 }
 
 // itemEv is the evidence for one file of one item.
@@ -123,12 +126,16 @@ func declLineFor(ls []string, ln, end int, path string) int {
 
 // reuseCandidates finds the candidates of each item. owns are the files the
 // package creates or changes; title is its purpose.
-func (e *ctxEnv) reuseCandidates(items []gateItem, owns []string, title string) []itemCands {
+func (e *ctxEnv) reuseCandidates(items []gateItem, owns []string, _ string) []itemCands {
 	var queries []gateItem
 	var owners []int
 	out := make([]itemCands, len(items))
 	for i, it := range items {
 		out[i] = itemCands{Item: it, Queries: it.Queries}
+		if len(it.Queries) == 0 {
+			zero := 0
+			out[i].Lookups = []evidenceLookup{{SchemaVersion: evidenceSchemaVersion, ID: "lookup-unrequested-" + subjectDigest([]byte(it.ID))[:20], Scope: ".", Unit: "concept", ExecutionStatus: lookupNotRequested, Completeness: evidenceUnknown, CountKind: evidenceCountUnknown, Counts: lookupCounts{Requested: &zero}}}
+		}
 		for _, q := range it.Queries {
 			queries = append(queries, gateItem{ID: it.ID, Package: it.Package, Text: q, Queries: []string{q}})
 			owners = append(owners, i)
@@ -137,6 +144,7 @@ func (e *ctxEnv) reuseCandidates(items []gateItem, owns []string, title string) 
 	for j, ic := range e.reuseQueryCandidates(queries, owns, candidatesPerQuery(len(queries))) {
 		i := owners[j]
 		out[i].QueriesRun += ic.QueriesRun
+		out[i].Lookups = append(out[i].Lookups, ic.Lookups...)
 		for _, c := range ic.Cands {
 			seen := false
 			for _, prev := range out[i].Cands {
@@ -228,6 +236,7 @@ func (e *ctxEnv) reuseQueryCandidates(items []gateItem, owns []string, limit int
 					f = t
 				}
 			}
+			res[i].Lookups = append(res[i].Lookups, dossierSymbolLookup(n, orDefault(tsRoots[i], "."), f))
 			if f == nil {
 				continue
 			}
@@ -251,11 +260,12 @@ func (e *ctxEnv) reuseQueryCandidates(items []gateItem, owns []string, limit int
 		for _, n := range names[i] {
 			jobs = append(jobs, job{i, n, "", true})
 		}
-		if jbReady {
-			res[i].QueriesRun = len(res[i].Queries)
-			for _, q := range res[i].Queries {
-				for _, t := range trees {
+		for _, q := range res[i].Queries {
+			for _, t := range trees {
+				if jbReady {
 					jobs = append(jobs, job{i, q, t, false})
+				} else {
+					res[i].Lookups = append(res[i].Lookups, dossierLookup(q, t, "concept", 0, dossierConceptHits, nil, e.jbMissing()))
 				}
 			}
 		}
@@ -264,6 +274,9 @@ func (e *ctxEnv) reuseQueryCandidates(items []gateItem, owns []string, limit int
 		j := jobs[k]
 		if j.isTxt {
 			r, err := e.Text(rgQuery{Pattern: j.name, Fixed: true, PerFile: 3, AllFiles: true, CaseSensitive: true})
+			mu.Lock()
+			res[j.i].Lookups = append(res[j.i].Lookups, dossierTextLookup(j.name, ".", r, err))
+			mu.Unlock()
 			if err != nil || len(r.Hits) == 0 || len(r.Hits) > dossierRare {
 				return
 			}
@@ -273,6 +286,9 @@ func (e *ctxEnv) reuseQueryCandidates(items []gateItem, owns []string, limit int
 			return
 		}
 		hits, err := e.Concept(j.name, j.tree, dossierConceptHits)
+		mu.Lock()
+		res[j.i].Lookups = append(res[j.i].Lookups, dossierLookup(j.name, j.tree, "concept", len(hits), dossierConceptHits, err, ""))
+		mu.Unlock()
 		if err != nil {
 			return
 		}
@@ -285,6 +301,19 @@ func (e *ctxEnv) reuseQueryCandidates(items []gateItem, owns []string, limit int
 		}
 	})
 	for i := range items {
+		sort.Slice(res[i].Lookups, func(a, b int) bool { return res[i].Lookups[a].ID < res[i].Lookups[b].ID })
+		// A query succeeds only after every requested scoped execution completes.
+		for _, q := range res[i].Queries {
+			complete := true
+			for _, lk := range res[i].Lookups {
+				if lk.Unit == "concept" && lk.Query == q && lk.ExecutionStatus != lookupSucceeded {
+					complete = false
+				}
+			}
+			if complete {
+				res[i].QueriesRun++
+			}
+		}
 		type scored struct {
 			path  string
 			ev    *itemEv
@@ -324,7 +353,7 @@ func (e *ctxEnv) reuseQueryCandidates(items []gateItem, owns []string, limit int
 // candidateAt builds the candidate for a file from its best evidence.
 func (e *ctxEnv) candidateAt(path string, ev *itemEv) reuseCand {
 	ls := e.Lines(path)
-	c := reuseCand{Path: path, Start: ev.line, End: ev.end}
+	c := reuseCand{Path: path, Start: ev.line, End: ev.end, MatchLine: ev.line, MatchEnd: max(ev.line, ev.end)}
 	if d := declLineFor(ls, ev.line, ev.end, path); d > 0 {
 		body, more := bodyPreview(ls, d, reuseKeepLines)
 		c.Start, c.Total, c.Lines = d, len(body)+more, body
@@ -348,6 +377,20 @@ func (e *ctxEnv) candidateAt(path string, ev *itemEv) reuseCand {
 		}
 		c.End = c.Start + max(c.Total-1, 0)
 	}
+	// Preview the matched region, not just the declaration's opening lines.
+	c.PreviewStart = c.Start
+	if c.Total > reuseShowLines && c.MatchLine > c.Start+reuseShowLines/2 {
+		c.PreviewStart = max(c.Start, c.MatchLine-reuseShowLines/2)
+		end := min(c.End, c.PreviewStart+reuseShowLines-1)
+		if c.PreviewStart >= 1 && end <= len(ls) {
+			c.Lines = append([]string{}, ls[c.PreviewStart-1:end]...)
+		}
+	}
+	fromLine := min(len(ls), max(0, c.Start-1))
+	toLine := min(len(ls), max(fromLine, c.End))
+	c.EvidenceID = dossierSourceID(path, c.Start, c.End, strings.Join(ls[fromLine:toLine], "\n"))
+	from := max(c.Start, c.MatchLine-3)
+	c.Expansion = dossierRead(path, from, min(c.End, min(from+reuseShowLines-1, max(c.MatchEnd, c.MatchLine+3))))
 	name := c.Name
 	if i := strings.LastIndex(name, "."); i >= 0 {
 		name = name[i+1:]
@@ -432,11 +475,17 @@ func callersText(c reuseCand) string {
 	return s
 }
 
-// candidateText writes one candidate; full shows the body (up to 40 lines, the
-// first 15 of a longer one), otherwise only the header lines.
+// candidateText writes one candidate; full shows its matched preview (up to
+// 40 lines), otherwise only metadata and the native expansion route.
 func candidateText(n int, c reuseCand, full bool) string {
 	var b strings.Builder
-	head := fmt.Sprintf("  %d. `%s`", n, c.at())
+	if c.EvidenceID == "" {
+		c.EvidenceID = dossierSourceID(c.Path, c.Start, c.End, strings.Join(c.Lines, "\n"))
+	}
+	if c.Expansion == "" {
+		c.Expansion = dossierRead(c.Path, c.Start, max(c.Start, c.End))
+	}
+	head := fmt.Sprintf("  %d. `%s` evidence=%s (candidate, unverified)", n, c.at(), c.EvidenceID)
 	if c.In != "" {
 		head += " " + c.In
 	}
@@ -448,22 +497,35 @@ func candidateText(n int, c reuseCand, full bool) string {
 		b.WriteString("     doc: " + c.Doc + "\n")
 	}
 	if !full {
-		b.WriteString("     (body left out: the section cap was reached)\n")
+		fmt.Fprintf(&b, "     omitted %s: body budget; expand: %s\n", c.EvidenceID, c.Expansion)
 		return b.String()
 	}
 	shown := c.Lines
 	more := c.Total - len(shown)
-	if c.Total > reuseShowLines {
-		shown = c.Lines[:min(reuseLongHead, len(c.Lines))]
-		more = c.Total - len(shown)
-	} else if len(shown) > reuseShowLines {
+	if len(shown) > reuseShowLines {
 		shown = shown[:reuseShowLines]
 	}
+	// When only a manually supplied preview is available, prefer a matching line.
+	if len(c.Lines) > reuseShowLines {
+		for i, line := range c.Lines {
+			for _, via := range c.Via {
+				if strings.Contains(line, via) {
+					from := max(0, i-reuseShowLines/2)
+					shown = c.Lines[from:min(len(c.Lines), from+reuseShowLines)]
+					break
+				}
+			}
+		}
+		more = c.Total - len(shown)
+	}
+	if c.PreviewStart > 0 {
+		fmt.Fprintf(&b, "     preview lines %d-%d\n", c.PreviewStart, c.PreviewStart+len(shown)-1)
+	}
 	for _, l := range shown {
-		b.WriteString("     | " + short(strings.TrimRight(l, " \t\r"), 200) + "\n")
+		b.WriteString("     | " + l + "\n")
 	}
 	if more > 0 {
-		fmt.Fprintf(&b, "     | (%d more lines)\n", more)
+		fmt.Fprintf(&b, "     | (%d more lines) omitted %s; expand: %s\n", more, c.EvidenceID, c.Expansion)
 	}
 	return b.String()
 }
@@ -474,8 +536,18 @@ func itemText(ic itemCands, full bool) string {
 	for _, p := range ic.Item.Reuse {
 		fmt.Fprintf(&b, "  author's pointer: `%s`\n", p)
 	}
-	if len(ic.Cands) == 0 {
-		b.WriteString("  (no candidates found by code)\n")
+	if len(ic.Queries) == 0 {
+		b.WriteString("  search: not_requested (no explicit queries; unresolved work)\n")
+	}
+	for _, lk := range ic.Lookups {
+		b.WriteString(lookupObservation(lk) + "\n")
+	}
+	if len(ic.Cands) == 0 && len(ic.Queries) > 0 {
+		if ic.QueriesRun == len(ic.Queries) {
+			b.WriteString("  (completed search: no eligible candidates in the searched scope; not proof of absence)\n")
+		} else {
+			b.WriteString("  (unresolved: requested search did not complete; no negative conclusion)\n")
+		}
 	}
 	for i, c := range ic.Cands {
 		b.WriteString(candidateText(i+1, c, full))
@@ -486,94 +558,14 @@ func itemText(ic itemCands, full bool) string {
 // renderChecklist writes the checklist of the items in ics (restricted to
 // the ids in only when it is not nil), capped, saying what was cut.
 func renderChecklist(ics []itemCands, only map[string]bool) string {
-	var main, more []itemCands
+	var selected []itemCands
 	for _, ic := range ics {
-		if only != nil && !only[ic.Item.ID] {
-			continue
-		}
-		if len(main) < itemPageMain {
-			main = append(main, ic)
-		} else {
-			more = append(more, ic)
+		if only == nil || only[ic.Item.ID] {
+			selected = append(selected, ic)
 		}
 	}
-	if len(main) == 0 {
+	if len(selected) == 0 {
 		return ""
 	}
-	var b strings.Builder
-	seen := map[string]bool{}
-	answers := map[string][]string{}
-	for _, ic := range append(append([]itemCands{}, main...), more...) {
-		for _, c := range ic.Cands {
-			_, n, _ := strings.Cut(ic.Item.ID, "#")
-			answers[c.at()] = append(answers[c.at()], "#"+n)
-		}
-	}
-	part := func(list []itemCands, cap int) {
-		used, bodiesCut, itemsCut := 0, 0, 0
-		for i, ic := range list {
-			var unique []reuseCand
-			var refs strings.Builder
-			for _, c := range ic.Cands {
-				if seen[c.at()] {
-					fmt.Fprintf(&refs, "  candidate `%s` shown above\n", c.at())
-					continue
-				}
-				seen[c.at()] = true
-				unique = append(unique, c)
-				if ids := answers[c.at()]; len(ids) > 1 {
-					_, n, _ := strings.Cut(ic.Item.ID, "#")
-					var others []string
-					for _, id := range ids {
-						if id != "#"+n {
-							others = append(others, id)
-						}
-					}
-					fmt.Fprintf(&refs, "  `%s` also for %s\n", c.at(), strings.Join(others, ", "))
-				}
-			}
-			sharedOnly := len(ic.Cands) > 0 && len(unique) == 0
-			ic.Cands = unique
-			text := func(full bool) string {
-				s := itemText(ic, full)
-				if sharedOnly {
-					s = strings.ReplaceAll(s, "  (no candidates found by code)\n", "")
-				}
-				return s + refs.String()
-			}
-			full := text(true)
-			if used+len(full) <= cap {
-				b.WriteString(full)
-				used += len(full)
-				continue
-			}
-			brief := text(false)
-			if used+len(brief) > cap*5/4 {
-				for _, c := range unique {
-					delete(seen, c.at())
-				}
-				itemsCut = len(list) - i
-				break
-			}
-			b.WriteString(brief)
-			used += len(brief)
-			bodiesCut++
-		}
-		if bodiesCut > 0 {
-			fmt.Fprintf(&b, "(cut: %d item(s) show only the header of their candidates; the section is capped at %d characters; open a candidate to read its body)\n", bodiesCut, cap)
-		}
-		if itemsCut > 0 {
-			var ids []string
-			for _, ic := range list[len(list)-itemsCut:] {
-				ids = append(ids, ic.Item.ID)
-			}
-			fmt.Fprintf(&b, "(cut: %d item(s) have no candidates listed because the section is capped: %s; decide them from the package text, opening files as needed)\n", itemsCut, strings.Join(ids, ", "))
-		}
-	}
-	part(main, reuseCapMain)
-	if len(more) > 0 {
-		b.WriteString(reuseMoreNotice + "\n")
-		part(more, reuseCapMore)
-	}
-	return b.String()
+	return (&ctxBrief{ReuseItems: selected}).Render("", "package", dossierTotal)
 }

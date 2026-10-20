@@ -127,7 +127,7 @@ func TestGateCheckoutMutationDiscardsAndStops(t *testing.T) {
 					if kind == "untracked" {
 						want = "new.txt"
 					}
-					if len(rec.TreeChanged) != 1 || rec.TreeChanged[0] != want || len(rec.TreeChangedPasses) == 0 || len(rec.Findings) != 0 || rec.Status != "unverified" {
+					if len(rec.TreeChanged) != 1 || rec.TreeChanged[0] != want || len(rec.TreeChangedPasses) == 0 || len(rec.Findings) != 0 || rec.Status != "" || rec.PassErrors["all"] == "" {
 						t.Fatalf("mutation not rejected: %+v", rec)
 					}
 					if len(rec.PassSeconds) >= 12 {
