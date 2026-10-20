@@ -1360,6 +1360,7 @@ func cmdGate(a *app, args []string) (retErr error) {
 	}
 
 	prepareGateReview(rec, code)
+	offerGateAdjudication(s, rec, code, runDir, a.now(), modelOptions{AllowDegraded: *degraded})
 	if opts.guard != nil {
 		opts.guard.finish(rec)
 	}

@@ -2,8 +2,10 @@
 
 Machine settings go in `~/.config/orchestrate/config.toml` (or `ORCH_CONFIG`),
 never repository config. Each role tries its ordered `use` list. An omitted
-`enabled` means true. An explicitly configured empty list has no choices;
-`enabled = false` also wins over command overrides.
+`enabled` means true for an explicitly configured role. An explicitly
+configured empty list has no choices; `enabled = false` also wins over command
+overrides. The optional `gate_adjudicator` role is disabled when absent, with
+no inherited model choices, even when a command supplies a runner override.
 
 ```toml
 [roles.gate]
@@ -51,6 +53,102 @@ there is no `--runner`. `ORCH_PI` and `ORCH_CLAUDE` override headless binaries.
 A profile marked `degraded = true` requires user approval and `--degraded`.
 `site.runModel(role, prompt, ...modelOptions)` is the tool-less conversational
 entry point for generation commands. API Decider calls use the API wrapper.
+
+## Optional gate adjudication infrastructure
+
+`gate_adjudicator` is separate from the main `gate` reviewer and the triage
+`decider`. It may use the same model without sharing a conversation. Neither
+`triage_model` nor `ORCH_GATE_MODEL` changes this role. Existing runner override,
+health, allowlist and approved degraded-profile rules still apply through
+`newRoleRun`. Gate reviewer command overrides do not reroute adjudication.
+
+The role stays off until explicitly configured. This example is deliberately
+disabled; enabling it is a separate calibration decision:
+
+```toml
+[roles.gate_adjudicator]
+enabled = false
+use = [{ harness = "claude", model = "haiku", effort = "low" }]
+
+[roles.gate_adjudicator.budget]
+requests = 24
+input_tokens = 256000
+output_tokens = 32768
+seconds = 3600
+repairs = 1
+fallbacks = 1
+output_reserve = 4096
+# Optional dollar cap requires a reliable configured per-request estimate:
+# max_usd = 1.0
+# estimated_request_usd = 0.05
+# reliable_estimate = true
+```
+
+Without a budget table the conservative limits are 2 total requests, 128000
+input tokens, 8192 output tokens, 180 seconds, 1 repair, 1 fallback and a 4096
+output allowance per request. A supplied table replaces all of these limits;
+required positive fields cannot be omitted. These are run limits, not free
+adjudication entitlements: recorded main-review requests, cached plus fresh
+input, output, reported cost and elapsed wall time seed the same `RunBudget`.
+A missing report remains unknown, with at least one request charged per
+recorded model job. Each adjudication invocation is charged before dispatch;
+extra underlying requests reported by its session are also charged before its
+reply can be accepted. Token enforcement is explicitly labeled
+`reported_usage_and_reserved_allowance`: unknown usage is never reported as
+zero. Admission reserves a conservative UTF-8 byte allowance for the complete
+input and the configured output allowance. Requests and deadline are enforced
+for every adjudication invocation; token limits are checked against reported
+usage and the next allowance. Dollar enforcement is available only with a
+reliable configured estimate; estimated and reported cost remain separate.
+The estimate also accounts for preceding main-review requests.
+
+An unresolved batch gets one initial invocation and at most one schema repair,
+from that same run budget. Provider errors and valid uncertainty are not
+resubmitted until another model agrees. A later explicitly requested batch or
+route switch retains the counters and charges a fallback when its route
+changes. Exhaustion records an incomplete answer with `budget_exhausted` and
+an owner/reviewer next action. Existing main reviewers do not yet consume a
+live `RunBudget`; whole-gate hard enforcement needs an execution-boundary seam
+in `gate_agent.go`/`gate_panes.go`, not this post-review hook.
+
+Only unanswered technical questions with recorded delegation to
+`gate_adjudicator`, an allowed assessor, and targeted evidence retrieval are
+eligible. No source text or model reply can grant that authority. The current
+legacy consequential-question adapter grants no delegation, so simply enabling
+the role does not authorize user-owned decisions. Future typed producers must
+record the check owner, delegates, assessor and question basis. Fully resolved,
+disabled and user-owned paths make no packet-formatting, adjudication or shadow
+call. The existing reviewer or authorized owner remains responsible otherwise.
+
+Packets carry the unresolved check only, exact source excerpts with their
+recorded hashes, lookup coverage/omissions, earlier claims and allowed actions.
+Related unresolved items in one package share a batch; completed items are
+excluded, and separate package batches consume the same run budget.
+Paths without excerpts, stale hashes and unsupported exact column selections
+fail closed. Chat runners receive TOON through the shared output boundary,
+with stable instructions before changing evidence and repairs. Decisions API
+runners retain native object state/questions and use the existing decisions
+endpoint, never chat completions. The current finite-choice endpoint can select
+a complete recorded behavioral proposal, retaining its explanation, evidence
+and matching/missing behavior. It can also decline or defer. If no complete
+proposal exists, that connector cannot supply the required support fields and
+records incomplete without a call; it never invents an explanation or embeds
+JSON chat inside a typed choice. An eligible later configured conversational
+route may be selected before any model call.
+
+Both adapters normalize to `reviewAnswer`, `reviewQuestion` and
+`reviewResolution`. Subject and attempt identity come from the trusted request.
+Earlier judgments remain recorded; a later answer never wins by arrival order.
+Material conflicts stay incomplete and an accepted blocker requires an explicit
+evidence-linked resolution, including a finding-to-resolution link. The pure
+reducer is unchanged. `adjudication.json` beside the gate run records packets,
+raw replies, execution/usage, normalized results and the shared budget.
+Native decisions aggregate usage and served model are retained separately when
+reported; aggregate tokens are not guessed into an input/output split. The
+explicit `recordAdjudicationShadow` experiment hook owns a separate budget and
+records later outcomes without applying any reply to production. It is not
+called by ordinary runs, and adds no default shadow traffic. Cache availability
+changes neither authority nor reduction of identical recorded answers.
 
 ## Connector lanes
 

@@ -362,8 +362,8 @@ func loadConfig(repo string) (config, error) {
 			if name == "decider" && p.Harness != "api" {
 				return cfg, fail("%s: role decider needs harness api and a provider", user)
 			}
-			if (p.Harness != "claude" && p.Harness != "pi" && p.Harness != "api") || p.Model == "" || (p.Harness == "api" && (name != "decider" || p.Provider == "" || !validLane("pi:"+p.Provider))) {
-				return cfg, fail("%s: role %s: choices need claude/pi and a model, or api with a provider and model for decider", user, name)
+			if (p.Harness != "claude" && p.Harness != "pi" && p.Harness != "api") || p.Model == "" || (p.Harness == "api" && ((name != "decider" && name != "gate_adjudicator") || p.Provider == "" || !validLane("pi:"+p.Provider))) {
+				return cfg, fail("%s: role %s: choices need claude/pi and a model, or api with a provider and model for decider or gate_adjudicator", user, name)
 			}
 		}
 	}
