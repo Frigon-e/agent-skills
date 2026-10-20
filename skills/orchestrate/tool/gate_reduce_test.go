@@ -519,6 +519,64 @@ func TestGateStateSupportingRepairCompletesTheSameClaim(t *testing.T) {
 	}
 }
 
+func TestGateStateOutputAudiencesShareV2Selection(t *testing.T) {
+	for _, incomplete := range []bool{false, true} {
+		t.Run(map[bool]string{false: "pass", true: "incomplete"}[incomplete], func(t *testing.T) {
+			h := setup(t)
+			dir := h.gateRepo(1)
+			over := map[string]string{}
+			wantState, wantStatus, wantCode := "pass", "pass", 0
+			if incomplete {
+				over["adv-a"] = `{"findings":[{"severity":"blocker","where":"Design","claim":"Unsupported interpretation","evidence":"missing.py:1"}]}`
+				wantState, wantStatus, wantCode = "incomplete", "unverified", 1
+			}
+			h.fakePi(gatePasses(over))
+			var selected any
+			for _, audience := range []struct {
+				flag string
+				kind outputAudience
+			}{{"", outputAgent}, {"--human", outputHuman}, {"--json", outputJSON}} {
+				args := []string{"gate", "spec.md"}
+				if audience.flag != "" {
+					args = append(args, audience.flag)
+				}
+				code, out := h.run(args...)
+				if code != wantCode {
+					t.Fatalf("%s: %d %s", audience.flag, code, out)
+				}
+				decoded := decodedOutput(t, []byte(out), audience.kind)
+				view := decoded.(map[string]any)
+				if view["schema_version"] != float64(2) || view["state"] != wantState || view["status"] != wantStatus || view["gate"] != wantStatus {
+					t.Fatalf("wrong public state: %+v", view)
+				}
+				completion := view["completion"].(map[string]any)
+				if completion["required"].(float64) <= 0 {
+					t.Fatal("required completion disappeared")
+				}
+				if incomplete {
+					reasons := view["reasons"].([]any)
+					actors := view["next_actors"].([]any)
+					actions := view["next_actions"].([]any)
+					if len(reasons) == 0 || len(actors) == 0 || len(actions) == 0 || reasons[0].(map[string]any)["reason"] != "unsupported_claim" {
+						t.Fatal("incomplete output lost reason/actor/action")
+					}
+				}
+				if selected != nil && !reflect.DeepEqual(selected, decoded) {
+					t.Fatalf("audiences selected different facts: %#v != %#v", selected, decoded)
+				}
+				selected = decoded
+			}
+			report := string(mustRead(t, dir+"/report.md"))
+			if !strings.Contains(report, "Review state: **"+wantState+"**") || !strings.Contains(report, "Completion:") {
+				t.Fatal("human report omitted v2 state/completion")
+			}
+			if incomplete && !strings.Contains(report, "## Next actions") {
+				t.Fatal("human report omitted next action")
+			}
+		})
+	}
+}
+
 func TestGateStateIgnoredEvidenceIsRevalidatedForApproval(t *testing.T) {
 	h := setup(t)
 	verdictRepo(t, h)

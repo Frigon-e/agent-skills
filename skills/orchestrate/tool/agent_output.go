@@ -76,27 +76,35 @@ func outputFailure(w io.Writer, audience outputAudience, err error) error {
 // The existing prose values remain for parsers that identify gate/pass prefixes;
 // evidence and findings remain in the stable report artifact, not a prose table.
 type gateInformation struct {
-	Gate          string            `json:"gate"`
-	Deterministic string            `json:"deterministic"`
-	Blockers      string            `json:"blockers"`
-	Concerns      string            `json:"concerns"`
-	Questions     string            `json:"questions"`
-	Dropped       string            `json:"dropped"`
-	Coverage      string            `json:"coverage,omitempty"`
-	Spec          string            `json:"spec"`
-	Report        string            `json:"report"`
-	Details       string            `json:"details"`
-	Experiment    string            `json:"experiment,omitempty"`
-	Bench         string            `json:"bench,omitempty"`
-	Warning       string            `json:"warning,omitempty"`
-	Dossier       string            `json:"dossier,omitempty"`
-	Cache         string            `json:"cache,omitempty"`
-	Tokens        string            `json:"tokens,omitempty"`
-	Shadow        string            `json:"shadow,omitempty"`
-	QuestionCards string            `json:"question_cards,omitempty"`
-	Notes         []string          `json:"notes,omitempty"`
-	PassErrors    map[string]string `json:"pass_failed,omitempty"`
-	Help          []string          `json:"help,omitempty"`
+	SchemaVersion int                `json:"schema_version"`
+	State         string             `json:"state"`
+	Status        string             `json:"status"`
+	Completion    reviewCompletion   `json:"completion"`
+	Reasons       []reviewNextAction `json:"reasons"`
+	NextActors    []string           `json:"next_actors"`
+	NextActions   []reviewAction     `json:"next_actions"`
+	Failures      []string           `json:"failures"`
+	Gate          string             `json:"gate"`
+	Deterministic string             `json:"deterministic"`
+	Blockers      string             `json:"blockers"`
+	Concerns      string             `json:"concerns"`
+	Questions     string             `json:"questions"`
+	Dropped       string             `json:"dropped"`
+	Coverage      string             `json:"coverage,omitempty"`
+	Spec          string             `json:"spec"`
+	Report        string             `json:"report"`
+	Details       string             `json:"details"`
+	Experiment    string             `json:"experiment,omitempty"`
+	Bench         string             `json:"bench,omitempty"`
+	Warning       string             `json:"warning,omitempty"`
+	Dossier       string             `json:"dossier,omitempty"`
+	Cache         string             `json:"cache,omitempty"`
+	Tokens        string             `json:"tokens,omitempty"`
+	Shadow        string             `json:"shadow,omitempty"`
+	QuestionCards string             `json:"question_cards,omitempty"`
+	Notes         []string           `json:"notes,omitempty"`
+	PassErrors    map[string]string  `json:"pass_failed,omitempty"`
+	Help          []string           `json:"help,omitempty"`
 }
 
 // selectedOutput retains the original JSON bytes for machine compatibility and

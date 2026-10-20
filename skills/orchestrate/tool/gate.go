@@ -1390,7 +1390,7 @@ func cmdGate(a *app, args []string) (retErr error) {
 		}
 	}
 
-	view := gateInformation{Gate: rec.Status, Spec: pos[0] + " (version " + hash + ")", Report: filepath.Join(runDir, "report.md"), Bench: benchID, Warning: treeWarning(rec), Cache: opts.cache, Tokens: rec.tokenSummary(), Notes: append([]string{}, rec.Notes...), PassErrors: rec.PassErrors}
+	view := gateInformation{SchemaVersion: rec.SchemaVersion, State: rec.State, Status: rec.Status, Completion: rec.Completion, Reasons: rec.Reduction.Reasons, NextActors: rec.NextActors, NextActions: rec.NextActions, Failures: rec.Reduction.Failures, Gate: rec.Status, Spec: pos[0] + " (version " + hash + ")", Report: filepath.Join(runDir, "report.md"), Bench: benchID, Warning: treeWarning(rec), Cache: opts.cache, Tokens: rec.tokenSummary(), Notes: append([]string{}, rec.Notes...), PassErrors: rec.PassErrors}
 	if experiment {
 		view.Experiment = *expF + " (dossier " + opts.dossier + ", cache " + cacheName + ", groups " + strings.Join(onlyList, ", ") + ")"
 	}
@@ -1997,6 +1997,9 @@ func writeGate(dir string, rec *gateRecord) error {
 		fmt.Fprintf(&r, "%s\n\n", warning)
 	}
 	fmt.Fprintf(&r, "# Gate report: %s\n\nStatus: **%s** (spec version %s)\n\n", rec.Spec, rec.Status, rec.Hash)
+	if rec.SchemaVersion == gateStatusSchemaVersion {
+		fmt.Fprintf(&r, "Review state: **%s** (schema %d)\n\nCompletion: %d/%d required checks complete; %d incomplete; %d optional.\n\n", rec.State, rec.SchemaVersion, rec.Completion.Completed, rec.Completion.Required, rec.Completion.Incomplete, rec.Completion.Optional)
+	}
 	fmt.Fprintf(&r, "ctx_tool: %s; context_files: %s; ctx_shell: %s; ctx_profile: %s\n\n", orDefault(rec.CtxTool, "off (legacy)"), orDefault(rec.ContextFiles, "off (legacy)"), orDefault(rec.CtxShell, "open"), orDefault(rec.CtxProfile, "default"))
 	if t := rec.tokenSummary(); t != "" {
 		fmt.Fprintf(&r, "Tokens: %s\n\n", t)
@@ -2021,6 +2024,11 @@ func writeGate(dir string, rec *gateRecord) error {
 		r.WriteString("\n")
 	}
 	section("Approval reasons", rec.Reasons)
+	var actions []string
+	for _, action := range rec.NextActions {
+		actions = append(actions, action.Actor+": "+action.Action)
+	}
+	section("Next actions", actions)
 	section("Deterministic issues", rec.Deterministic)
 	var verified, unverified []string
 	for _, f := range rec.Findings {
