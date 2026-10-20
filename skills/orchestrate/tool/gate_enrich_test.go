@@ -529,12 +529,19 @@ func TestGateEnrichesItsCardsAndAskStillParsesThem(t *testing.T) {
 	if code != 1 {
 		t.Fatalf("exit %d: %s", code, out)
 	}
-	wantContains(t, out, "questions: 1 need a decision", "question cards: 1 -> 1 after merging; owner 1, lead-may-decide 0, unclear 0; spec hints 0; code hits 1; symbol facts 0")
+	wantContains(t, out, "questions: 1 need a decision")
+	gateInfo := decodedOutput(t, []byte(out), outputAgent).(map[string]any)
+	if gateInfo["question_cards"] != "1 -> 1 after merging; owner 1, lead-may-decide 0, unclear 0; spec hints 0; code hits 1; symbol facts 0" {
+		t.Fatalf("gate question accounting: %#v", gateInfo)
+	}
 	gdir := filepath.Join(runRoot(h.repo), "gate", specHash(mustRead(t, filepath.Join(h.repo, "spec.md"))))
 	wantContains(t, string(mustRead(t, filepath.Join(gdir, "questions", "q1-api.md"))), "## Tag\nowner (mentions refund)")
 	ask := h.must("ask", "--cards", filepath.Join(gdir, "questions"))
 	wantContains(t, ask, "questions: 1")
-	if strings.Contains(ask, "INDEX") || strings.Contains(ask, "skipped") {
+	// Question context now includes legitimate retrieval uncertainty such as
+	// "Spec hint search ... skipped". Inspect warnings, not arbitrary prose.
+	info := decodedOutput(t, []byte(ask), outputAgent).(map[string]any)
+	if _, ok := info["warnings"]; ok {
 		t.Errorf("ask tripped over the index:\n%s", ask)
 	}
 

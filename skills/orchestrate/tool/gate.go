@@ -1056,7 +1056,7 @@ func cmdGateEnrich(a *app, args []string) error {
 	}
 	fmt.Fprintf(a.out, "question cards: %s\nindex: %s\n", res.summary(), filepath.Join(dir, "questions", "INDEX.md"))
 	for _, n := range res.Notes {
-		fmt.Fprintf(a.out, "note: %s\n", toonValue(n))
+		fmt.Fprintf(a.out, "note: %s\n", agentScalar(n))
 	}
 	return nil
 }
@@ -1109,7 +1109,7 @@ func onlyKeys(list string, sp *spec) (map[string]bool, []string, error) {
 	return only, keys, nil
 }
 
-func cmdGate(a *app, args []string) error {
+func cmdGate(a *app, args []string) (retErr error) {
 	if len(args) > 0 && args[0] == "enrich" {
 		return cmdGateEnrich(a, args[1:])
 	}
@@ -1120,6 +1120,9 @@ func cmdGate(a *app, args []string) error {
 		return cmdGateCompare(a, args[1:])
 	}
 	fs := a.flags("gate")
+	human := fs.Bool("human", false, "readable JSON of the selected gate summary")
+	machine := fs.Bool("json", false, "JSON of the selected gate summary")
+	defer func() { retErr = outputFailure(a.out, explicitAudience(args), retErr) }()
 	dry := fs.Bool("dry-run", false, "show the passes, their sizes and the deterministic checks; call no model and write nothing")
 	dossier := fs.String("dossier", "code", "off, code (facts gathered by code, no model) or plan (code facts plus lookups a tool-less planner pass asked for)")
 	onlyF := fs.String("only", "", "experiment: run only these group passes (comma-separated keys); needs --experiment")
@@ -1372,6 +1375,7 @@ func cmdGate(a *app, args []string) error {
 	if err := writeGate(runDir, rec); err != nil {
 		return err
 	}
+	benchID := ""
 	if experiment {
 		suite := *benchSuiteF
 		if suite == "" {
@@ -1382,17 +1386,13 @@ func cmdGate(a *app, args []string) error {
 			if err != nil {
 				return fmt.Errorf("benchmark recording failed (gate artifacts kept): %w", err)
 			}
-			fmt.Fprintf(a.out, "bench: %s/%s\n", suite, br.ID)
+			benchID = suite + "/" + br.ID
 		}
 	}
 
-	if warning := treeWarning(rec); warning != "" {
-		fmt.Fprintln(a.out, warning)
-	}
+	view := gateInformation{Gate: rec.Status, Spec: pos[0] + " (version " + hash + ")", Report: filepath.Join(runDir, "report.md"), Bench: benchID, Warning: treeWarning(rec), Cache: opts.cache, Tokens: rec.tokenSummary(), Notes: append([]string{}, rec.Notes...), PassErrors: rec.PassErrors}
 	if experiment {
-		fmt.Fprintf(a.out, "experiment: %s (dossier %s, cache %s, groups %s)\nreport: %s\n", *expF, opts.dossier, cacheName, strings.Join(onlyList, ", "), filepath.Join(runDir, "report.md"))
-	} else {
-		fmt.Fprintf(a.out, "gate: %s\nspec: %s (version %s)\nreport: %s\n", rec.Status, toonValue(pos[0]), hash, filepath.Join(dir, "report.md"))
+		view.Experiment = *expF + " (dossier " + opts.dossier + ", cache " + cacheName + ", groups " + strings.Join(onlyList, ", ") + ")"
 	}
 	concerns, unverified := 0, 0
 	for _, f := range rec.Findings {
@@ -1403,48 +1403,43 @@ func cmdGate(a *app, args []string) error {
 			concerns++
 		}
 	}
-	fmt.Fprintf(a.out, "deterministic: %d issue(s)\nblockers: %d verified\nconcerns: %d verified, %d unverified\nquestions: %d need a decision\ndropped: %d claim(s) without real evidence\n",
-		len(rec.Deterministic), blockers, concerns, unverified, unanswered, rec.Dropped)
+	view.Deterministic = fmt.Sprintf("%d issue(s)", len(rec.Deterministic))
+	view.Blockers = fmt.Sprintf("%d verified", blockers)
+	view.Concerns = fmt.Sprintf("%d verified, %d unverified", concerns, unverified)
+	view.Questions = fmt.Sprintf("%d need a decision", unanswered)
+	view.Dropped = fmt.Sprintf("%d claim(s) without real evidence", rec.Dropped)
 	if len(rec.DossierChars) > 0 {
-		fmt.Fprintf(a.out, "dossier: %s\n", dossierSummary(opts.dossier, rec.DossierChars))
+		view.Dossier = dossierSummary(opts.dossier, rec.DossierChars)
 	}
-	if c := rec.coverageLine(); c != "" {
-		fmt.Fprintln(a.out, c)
-	}
-	if rec.Shadow != "" {
-		fmt.Fprintln(a.out, rec.Shadow)
-	}
-	if opts.cache != "" {
-		fmt.Fprintf(a.out, "cache: %s\n", opts.cache)
-	}
-	if t := rec.tokenSummary(); t != "" {
-		fmt.Fprintf(a.out, "tokens: %s\n", t)
-	}
-	for _, n := range rec.Notes {
-		fmt.Fprintf(a.out, "note: %s\n", toonValue(n))
-	}
+	view.Coverage, view.Shadow = rec.coverageLine(), rec.Shadow
 	if !experiment && (unanswered > 0 || len(rec.Questions) > 0) {
 		// Best effort: a failure here is a note and never changes the verdict.
 		if res, err := enrichGate(dir, code, src, rel, sp); err != nil {
-			fmt.Fprintf(a.out, "note: question cards were not enriched: %s\n", toonValue(err.Error()))
+			view.Notes = append(view.Notes, "question cards were not enriched: "+err.Error())
 		} else if res.Total > 0 {
-			fmt.Fprintf(a.out, "question cards: %s\n", res.summary())
-			for _, n := range res.Notes {
-				fmt.Fprintf(a.out, "note: %s\n", toonValue(n))
-			}
+			view.QuestionCards = res.summary()
+			view.Notes = append(view.Notes, res.Notes...)
 		}
 	}
-	for name, msg := range rec.PassErrors {
-		fmt.Fprintf(a.out, "pass_failed: %s - %s\n", name, toonValue(msg))
+	if unanswered > 0 {
+		view.Help = []string{"orch ask --cards " + filepath.Join(dir, "questions")}
+	}
+	view.Details = "Use native read on " + view.Report + " for findings, evidence and coverage details."
+	audience := outputAgent
+	if *human {
+		audience = outputHuman
+	}
+	if *machine {
+		audience = outputJSON
+	}
+	if err := writeOutput(a.out, audience, view); err != nil {
+		return err
 	}
 	if experiment {
 		if len(rec.PassErrors) > 0 {
 			return &exitError{code: 1}
 		}
 		return nil
-	}
-	if unanswered > 0 {
-		fmt.Fprintf(a.out, "help[1]:\n  orch ask --cards %s\n", filepath.Join(dir, "questions"))
 	}
 	if rec.Status != gateStatePass {
 		return &exitError{code: 1}
@@ -2152,7 +2147,7 @@ func gateDryRun(a *app, specArg, hash, code, src, rel string, cfg config, sp *sp
 		return nil
 	}
 	tok := func(n int) int { return (n + 3) / 4 }
-	fmt.Fprintf(a.out, "gate dry run: %s (version %s); no model is called and nothing is written\n", toonValue(specArg), hash)
+	fmt.Fprintf(a.out, "gate dry run: %s (version %s); no model is called and nothing is written\n", agentScalar(specArg), hash)
 	fmt.Fprintf(a.out, "deterministic: %d issue(s)\n", len(det))
 	for _, d := range det {
 		fmt.Fprintf(a.out, "  %s\n", d)
@@ -2184,7 +2179,7 @@ func gateDryRun(a *app, specArg, hash, code, src, rel string, cfg config, sp *sp
 			extra = fmt.Sprintf("  turn budget: %d soft, %d hard\n", p.budget, int(float64(p.budget)*gateBudgetHard))
 		}
 		fmt.Fprintf(a.out, "%s: %s\n  packages: %s\n  shared prefix: %d chars (~%d tokens)\n  task: %d chars (~%d tokens)\n%s  starts: %s\n",
-			label, p.name, covers, len(p.shared), tok(len(p.shared)), len(p.task), tok(len(p.task)), extra, toonValue(p.brief))
+			label, p.name, covers, len(p.shared), tok(len(p.shared)), len(p.task), tok(len(p.task)), extra, agentScalar(p.brief))
 	}
 	for _, p := range passes {
 		covers := "the whole spec"
@@ -2212,7 +2207,7 @@ func gateDryRun(a *app, specArg, hash, code, src, rel string, cfg config, sp *sp
 	fmt.Fprintf(a.out, "totals: %d passes, %d workers, ~%d input tokens summed over the passes\n", len(passes), min(gateParallel, len(passes)), total)
 	if dos != nil {
 		for _, n := range dos.e.Notes() {
-			fmt.Fprintf(a.out, "note: %s\n", toonValue(n))
+			fmt.Fprintf(a.out, "note: %s\n", agentScalar(n))
 		}
 	}
 	return nil
