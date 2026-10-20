@@ -1,15 +1,18 @@
 package main
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 )
 
-// Items are the Builds bullets, with stable ids (<package>#<n>). Only explicit
+// Items are the Builds bullets, with explicit IDs (<package>#<slug>) or
+// spec-local legacy ordinals (<package>#<n>). Only explicit
 // search lines retrieve candidates; the deliverable text is for humans.
 
 const (
@@ -27,6 +30,10 @@ type gateItem struct {
 	Kind    string   `json:"kind"`
 	Queries []string `json:"queries,omitempty"`
 	Reuse   []string `json:"reuse,omitempty"`
+	// Keep these additive and optional: old archived itemset hashes depend on
+	// the original JSON field order and the absence of newly introduced fields.
+	Revision   string   `json:"revision,omitempty"`
+	Supersedes []string `json:"supersedes,omitempty"`
 }
 
 // UnmarshalJSON also reads old experiment files whose reuse field was a string.
@@ -52,10 +59,17 @@ func (it *gateItem) UnmarshalJSON(b []byte) error {
 }
 
 type buildItem struct {
-	Text    string
-	Queries []string
-	Reuse   []string
+	Text       string
+	ID         string
+	Queries    []string
+	Reuse      []string
+	Supersedes []string
+	// Retain declaration spelling and order for revision hashing, not just
+	// parsed pointers. Even a cosmetic edit requires a fresh answer.
+	contentLines []string
 }
+
+var requirementIDRe = regexp.MustCompile(`^[a-z][a-z0-9._-]*$`)
 
 const buildsMaxBullets = 8 // more than this is a warning: split the package
 
@@ -70,27 +84,103 @@ func parseBuilds(text string) (items []buildItem, problems []string) {
 			cur = &items[len(items)-1]
 		} else if cur != nil && len(l) > len(strings.TrimLeft(l, " \t")) {
 			switch {
+			case strings.HasPrefix(t, "id:"):
+				if cur.ID != "" {
+					problems = append(problems, fmt.Sprintf("Builds bullet %d: repeated id line", len(items)))
+				}
+				cur.ID = strings.TrimSpace(strings.TrimPrefix(t, "id:"))
+				if !requirementIDRe.MatchString(cur.ID) {
+					problems = append(problems, fmt.Sprintf("Builds bullet %d: invalid id %q; expected [a-z][a-z0-9._-]*", len(items), cur.ID))
+				}
+			case strings.HasPrefix(t, "supersedes:"):
+				for _, id := range strings.Split(strings.TrimPrefix(t, "supersedes:"), ",") {
+					id = strings.TrimSpace(id)
+					if !requirementIDRe.MatchString(id) {
+						problems = append(problems, fmt.Sprintf("Builds bullet %d: invalid supersedes id %q; expected a requirement slug", len(items), id))
+					}
+					cur.Supersedes = append(cur.Supersedes, id)
+				}
 			case strings.HasPrefix(t, "search:"):
+				cur.contentLines = append(cur.contentLines, t)
 				if q := strings.TrimSpace(strings.TrimPrefix(t, "search:")); q != "" {
 					cur.Queries = append(cur.Queries, q)
 				}
 			case strings.HasPrefix(t, "reuse:"):
+				cur.contentLines = append(cur.contentLines, t)
 				cur.Reuse = append(cur.Reuse, splitList(strings.TrimPrefix(t, "reuse:"))...)
 			case t != "":
 				cur.Text += " " + t
 			}
 		}
 	}
+	ids := map[string]bool{}
+	for _, it := range items {
+		if it.ID != "" && ids[it.ID] {
+			problems = append(problems, fmt.Sprintf("duplicate Builds id %q", it.ID))
+		}
+		ids[it.ID] = true
+	}
+	for i, it := range items {
+		seen := map[string]bool{}
+		for _, id := range it.Supersedes {
+			switch {
+			case it.ID == "":
+				problems = append(problems, fmt.Sprintf("Builds bullet %d: supersedes requires a new explicit id", i+1))
+			case id == it.ID:
+				problems = append(problems, fmt.Sprintf("Builds id %q cannot supersede itself", it.ID))
+			case ids[id]:
+				problems = append(problems, fmt.Sprintf("Builds id %q supersedes still-active id %q; give replacements new ids", it.ID, id))
+			case seen[id]:
+				problems = append(problems, fmt.Sprintf("Builds id %q repeats supersedes id %q", it.ID, id))
+			}
+			seen[id] = true
+		}
+	}
 	return items, problems
+}
+
+// buildRevision binds an answer to content, independently of identity or
+// supersession. Supersession records lineage only, never inherited approval.
+func buildRevision(b buildItem) string {
+	lines := b.contentLines
+	if lines == nil {
+		for _, q := range b.Queries {
+			lines = append(lines, "search: "+q)
+		}
+		if len(b.Reuse) > 0 {
+			lines = append(lines, "reuse: "+strings.Join(b.Reuse, ", "))
+		}
+	}
+	content := append([]string{strings.TrimSpace(b.Text)}, lines...)
+	encoded, _ := json.Marshal(content)
+	return fmt.Sprintf("%x", sha256.Sum256(encoded))
 }
 
 // packageItems lists the items of a package: its Builds bullets, verbatim.
 func packageItems(p *specPackage) []gateItem {
 	var out []gateItem
 	for i, b := range p.builds {
-		out = append(out, gateItem{ID: fmt.Sprintf("%s#%d", p.id, i+1), Package: p.id, Text: b.Text, Kind: "builds", Queries: b.Queries, Reuse: b.Reuse})
+		id := b.ID
+		if id == "" {
+			id = strconv.Itoa(i + 1)
+		}
+		it := gateItem{ID: itemKey(p.id, id), Package: p.id, Text: b.Text, Kind: "builds", Queries: b.Queries, Reuse: b.Reuse, Revision: buildRevision(b)}
+		for _, prior := range b.Supersedes {
+			it.Supersedes = append(it.Supersedes, itemKey(p.id, prior))
+		}
+		out = append(out, it)
 	}
 	return out
+}
+
+// checklistItemRef preserves compact legacy references while showing the
+// qualified identity of explicit requirements, never their current ordinal.
+func checklistItemRef(it gateItem) string {
+	_, id, _ := strings.Cut(it.ID, "#")
+	if requirementIDRe.MatchString(id) {
+		return it.ID
+	}
+	return "#" + id
 }
 
 func writeItems(dir string, items map[string][]gateItem, order []string) error {
@@ -168,10 +258,11 @@ func normVerdict(v string) string {
 	return ""
 }
 
-// itemKey makes "api#2", "2" and "#2" the same item of package pkg.
+// itemKey accepts qualified IDs, bare slugs, and legacy numeric ordinals.
+// Explicit IDs cannot be numeric, so an ordinal never aliases a slug.
 func itemKey(pkg, id string) string {
 	id = strings.TrimSpace(id)
-	if _, err := strconv.Atoi(strings.TrimPrefix(id, "#")); err == nil {
+	if _, err := strconv.Atoi(strings.TrimPrefix(id, "#")); err == nil || requirementIDRe.MatchString(strings.TrimPrefix(id, "#")) {
 		return pkg + "#" + strings.TrimPrefix(id, "#")
 	}
 	return id
