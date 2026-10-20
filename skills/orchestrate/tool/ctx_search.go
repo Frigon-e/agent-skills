@@ -1,15 +1,18 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -18,7 +21,7 @@ const (
 	ctxSnippet   = 6  // snippet lines kept per concept hit (the gate's cards)
 	ctxBodyLines = 80 // lines of a concept chunk kept for `orch ctx`
 	ctxCallLimit = 20 * time.Second
-	ctxRgMax     = 2000 // hits read from one rg call
+	ctxRgMax     = 2000 // retained visible text excerpts or semantic raw ranks
 )
 
 type codeHit struct {
@@ -41,10 +44,10 @@ func jbcontextBin() string {
 // indexed revision when not empty.
 func searchCode(bin, dir, cacheDir, rev, pathFilter string, limit int, query string) ([]codeHit, error) {
 	sum := sha256.Sum256([]byte(fmt.Sprintf("%s\x00%s\x00%s\x00%d", query, rev, pathFilter, limit)))
-	cache := filepath.Join(cacheDir, fmt.Sprintf("jb2-%x.json", sum[:8]))
+	cache := filepath.Join(cacheDir, fmt.Sprintf("jb3-%x.json", sum[:8]))
 	if b, err := os.ReadFile(cache); err == nil {
 		var hits []codeHit
-		if json.Unmarshal(b, &hits) == nil {
+		if json.Unmarshal(b, &hits) == nil && hits != nil && len(hits) < limit {
 			return hits, nil
 		}
 	}
@@ -59,26 +62,29 @@ func searchCode(bin, dir, cacheDir, rev, pathFilter string, limit int, query str
 	}
 	cmd := exec.CommandContext(ctx, bin, append(args, query)...)
 	cmd.Dir = dir
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	out, err := cmd.Output()
+	stdout := ctxBoundedBuffer{limit: 16 * 1024 * 1024}
+	stderr := ctxBoundedBuffer{limit: 64 * 1024}
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	runErr := cmd.Run()
+	hits, err := parseJbcontext(stdout.Bytes())
 	if ctx.Err() != nil {
-		return nil, fmt.Errorf("jbcontext timed out after %s", ctxCallLimit)
+		return hits, fmt.Errorf("jbcontext timed out after %s", ctxCallLimit)
+	}
+	if runErr != nil {
+		return hits, fmt.Errorf("jbcontext failed: %v: %s", runErr, short(strings.TrimSpace(stderr.String()), 200))
+	}
+	if stdout.cut {
+		return hits, fmt.Errorf("jbcontext output reached the 16 MiB cap; narrow with -p/path= and retry")
 	}
 	if err != nil {
-		msg := strings.TrimSpace(stderr.String())
-		if msg == "" {
-			msg = strings.TrimSpace(string(out))
+		return hits, err
+	}
+	// A full ranked page is truncated, not a completed search.
+	if len(hits) < limit {
+		if hits == nil {
+			hits = []codeHit{}
 		}
-		return nil, fmt.Errorf("jbcontext failed: %v: %s", err, short(msg, 200))
-	}
-	hits, err := parseJbcontext(out)
-	if err != nil {
-		return nil, err
-	}
-	if b, err := json.Marshal(hits); err == nil {
-		_ = os.MkdirAll(cacheDir, 0o755)
-		_ = os.WriteFile(cache, b, 0o644)
+		ctxCacheWrite(cache, hits)
 	}
 	return hits, nil
 }
@@ -90,7 +96,7 @@ func parseJbcontext(out []byte) ([]codeHit, error) {
 	dec := json.NewDecoder(bytes.NewReader(out))
 	var hits []codeHit
 	seen := false
-	for dec.More() {
+	for {
 		var o struct {
 			Type    string `json:"type"`
 			Results []struct {
@@ -104,16 +110,28 @@ func parseJbcontext(out []byte) ([]codeHit, error) {
 			} `json:"results"`
 		}
 		if err := dec.Decode(&o); err != nil {
-			if seen {
+			if err == io.EOF && seen {
 				break
 			}
-			return nil, fmt.Errorf("jbcontext output is not JSON: %v", err)
+			return hits, fmt.Errorf("jbcontext output is incomplete or not JSON: %v", err)
 		}
-		seen = true
 		if o.Type != "search_result" {
+			if o.Type == "error" {
+				return hits, fmt.Errorf("jbcontext returned an error event")
+			}
 			continue
 		}
+		seen = true
+		if o.Results == nil {
+			return hits, fmt.Errorf("jbcontext search_result is missing results")
+		}
 		for _, r := range o.Results {
+			if len(hits) >= ctxRgMax {
+				return hits, fmt.Errorf("jbcontext raw-rank cap %d reached; narrow with -p/path=", ctxRgMax)
+			}
+			if r.Result.Position.Path == "" || r.StartLine < 1 || r.Content == "" {
+				return hits, fmt.Errorf("jbcontext result is missing a path, range or content")
+			}
 			lines := strings.Split(strings.Trim(r.Content, "\n"), "\n")
 			start := max(r.StartLine, 1)
 			if strings.HasPrefix(r.Content, "\n") {
@@ -144,6 +162,17 @@ func (e *ctxEnv) indexDetail() string {
 // Concept is a semantic code search with jbcontext. Hits in files the env
 // skips (the spec) are left out.
 func (e *ctxEnv) Concept(query, pathFilter string, limit int) ([]codeHit, error) {
+	if pathFilter != "" && pathFilter != "." {
+		p, ok := repoPath(pathFilter)
+		if !ok {
+			return nil, fmt.Errorf("path %s is outside the repo", pathFilter)
+		}
+		pathFilter = p
+		if e.ReadOnly && !ctxWithinRoot(e.Code, pathFilter) {
+			return nil, fmt.Errorf("read-only ctx: path %s is outside the pinned root or missing", pathFilter)
+		}
+	}
+	limit = min(max(limit, 1), ctxRgMax)
 	if why := e.jbMissing(); why != "" {
 		return nil, fmt.Errorf("%s", why)
 	}
@@ -154,8 +183,10 @@ func (e *ctxEnv) Concept(query, pathFilter string, limit int) ([]codeHit, error)
 		// A pinned search reads only the committed snapshot. An unpinned one
 		// also sees this worktree's edits, so run both and let the check below
 		// keep what still matches the files.
-		if more, merr := searchCode(e.JB, e.Code, e.CacheDir, "", pathFilter, limit, query); merr == nil {
-			hits = mergeHits(hits, more)
+		more, merr := searchCode(e.JB, e.Code, e.CacheDir, "", pathFilter, limit, query)
+		hits = mergeHits(hits, more)
+		if merr != nil {
+			err = fmt.Errorf("working-tree semantic search failed: %w", merr)
 		}
 	}
 	e.use("jbcontext", e.indexDetail())
@@ -166,23 +197,22 @@ func (e *ctxEnv) Concept(query, pathFilter string, limit int) ([]codeHit, error)
 	ignored := e.ignoredPaths(paths)
 	var out []codeHit
 	stale := 0
-	edited := map[string]bool{}
-	for _, f := range e.editedFiles() {
-		edited[f] = true
-	}
+	seenCurrent := map[string]bool{}
 	for _, h := range hits {
-		if e.Skip[h.Path] || ignored[h.Path] {
+		if e.Skip[h.Path] || ignored[h.Path] || !ctxPathInScope(h.Path, pathFilter) {
 			continue
 		}
-		// A pinned search of a file nobody edited reads the checkout's own
-		// committed text, and outside a git repo there is no other revision, so
-		// only the file's presence is checked; the text is compared when the
-		// file is edited here or a search in a repo was not pinned.
-		if !e.hitMatchesCheckout(h, edited[h.Path] || rev == "" && e.Ready().head != "") {
+		// Always validate the location and read the body from this checkout.
+		current, ok := e.checkoutHit(h)
+		if !ok {
 			stale++
 			continue
 		}
-		out = append(out, h)
+		key := fmt.Sprintf("%s:%d:%d", current.Path, current.Start, current.End)
+		if !seenCurrent[key] {
+			seenCurrent[key] = true
+			out = append(out, current)
+		}
 	}
 	if files := e.editedFiles(); rev != "" && len(files) > 0 {
 		list := files[:min(len(files), 8)]
@@ -216,42 +246,65 @@ func mergeHits(base, more []codeHit) []codeHit {
 	return base
 }
 
-// hitMatchesCheckout reports whether a hit's file is in this checkout and, with
-// compareText, its first line is still where the index said. jbcontext shares one repository id
-// between worktrees, so a search can return another worktree's untracked file,
-// or text from a snapshot that this worktree has since edited. Lines can be a
-// couple off between the index and the file, so the first non-blank line of the
-// hit is looked for within two lines of its start.
-func (e *ctxEnv) hitMatchesCheckout(h codeHit, compareText bool) bool {
-	if !ctxWithinRoot(e.Code, h.Path) {
-		return false
-	}
-	if !compareText {
+// ctxPathInScope compares path components, not string prefixes (src is not src2).
+func ctxPathInScope(path, scope string) bool {
+	if scope == "" || scope == "." {
 		return true
 	}
-	want := ""
-	for _, l := range h.Body {
-		if want = strings.TrimSpace(l); want != "" {
+	p, ok := repoPath(path)
+	s, valid := repoPath(scope)
+	return ok && valid && (p == s || strings.HasPrefix(p, s+"/"))
+}
+
+// checkoutHit validates/relocates the semantic anchor and reads every displayed
+// line from this checkout. Ambiguous anchors are refused, never guessed.
+func (e *ctxEnv) checkoutHit(h codeHit) (codeHit, bool) {
+	if !ctxWithinRoot(e.Code, h.Path) {
+		return h, false
+	}
+	ls := e.Lines(h.Path)
+	body := h.Body
+	if len(body) == 0 {
+		body = h.Snippet
+	}
+	anchor, offset := "", 0
+	for i, line := range body {
+		if strings.TrimSpace(line) != "" {
+			anchor, offset = strings.TrimSpace(line), i
 			break
 		}
 	}
-	if want == "" {
-		for _, l := range h.Snippet {
-			if want = strings.TrimSpace(l); want != "" {
-				break
+	if anchor == "" {
+		return h, false
+	}
+	start := h.Start
+	if start < 1 || start+offset > len(ls) || strings.TrimSpace(ls[start+offset-1]) != anchor {
+		found := 0
+		for i, line := range ls {
+			if strings.TrimSpace(line) == anchor {
+				if found != 0 {
+					return h, false
+				}
+				found = i + 1 - offset
 			}
 		}
-	}
-	if want == "" {
-		return true // an empty chunk has nothing to compare
-	}
-	ls := e.Lines(h.Path)
-	for i := max(h.Start-3, 0); i < min(h.Start+2, len(ls)); i++ {
-		if strings.TrimSpace(ls[i]) == want {
-			return true
+		if found < 1 {
+			return h, false
 		}
+		start = found
 	}
-	return false
+	n := h.End - h.Start + 1
+	if n < 1 {
+		n = len(body)
+	}
+	end := min(start+n-1, len(ls))
+	if end < start {
+		return h, false
+	}
+	h.Start, h.End = start, end
+	h.Body = append([]string(nil), ls[start-1:min(end, start+ctxBodyLines-1)]...)
+	h.Snippet = append([]string(nil), h.Body[:min(len(h.Body), ctxSnippet)]...)
+	return h, true
 }
 
 // ctxDefaultExcludes are the globs rg skips unless asked: lockfiles, minified
@@ -292,14 +345,23 @@ type rgQuery struct {
 	AllFiles      bool   // do not skip lockfiles, generated and vendored files
 	CaseSensitive bool   // -s instead of smart-case
 	Generated     string // none (default), include or only: the generated-file mode; include and only lift the name-based generated excludes
+	Tests         string // applied before retention with ViewFilters
+	ViewFilters   bool   // CLI filters, distinct from symbol/declaration consumers
 }
 
 // rgResult is what a search found: match and context lines, or the files, or
 // the counts per file.
 type rgResult struct {
-	Hits   []rgHit   `json:"hits,omitempty"`
-	Files  []string  `json:"files,omitempty"`
-	Counts []rgCount `json:"counts,omitempty"`
+	Hits     []rgHit   `json:"hits,omitempty"`
+	Files    []string  `json:"files,omitempty"`
+	Counts   []rgCount `json:"counts,omitempty"`
+	Total    int       `json:"total,omitempty"`
+	Rows     int       `json:"rows,omitempty"` // matching files in count mode, independent of retained rows
+	Hidden   int       `json:"hidden,omitempty"`
+	HiddenG  int       `json:"hidden_generated,omitempty"`
+	Filtered bool      `json:"filtered,omitempty"`
+	Limited  bool      `json:"limited,omitempty"`
+	Complete bool      `json:"complete,omitempty"`
 }
 
 const rgTextCap = 400 // characters kept of a matching line
@@ -317,11 +379,11 @@ func (e *ctxEnv) Text(q rgQuery) (rgResult, error) {
 	sort.Strings(skip)
 	key := fmt.Sprintf("%+v\x00%s", q, strings.Join(skip, ","))
 	sum := sha256.Sum256([]byte(key))
-	cache := filepath.Join(e.CacheDir, fmt.Sprintf("rg-%x.json", sum[:8]))
+	cache := filepath.Join(e.CacheDir, fmt.Sprintf("rg3-%x.json", sum[:8]))
 	e.use("rg", orDefault(which(e.RG), e.RG))
 	if b, err := os.ReadFile(cache); err == nil {
 		var res rgResult
-		if json.Unmarshal(b, &res) == nil {
+		if json.Unmarshal(b, &res) == nil && res.Complete && !res.Limited {
 			return res, nil
 		}
 	}
@@ -373,53 +435,154 @@ func (e *ctxEnv) Text(q rgQuery) (rgResult, error) {
 	defer cancel()
 	cmd := exec.CommandContext(ctx, e.RG, args...)
 	cmd.Dir = e.Code
-	var stderr bytes.Buffer
+	stderr := ctxBoundedBuffer{limit: 64 * 1024}
 	cmd.Stderr = &stderr
-	out, err := cmd.Output()
+	pipe, err := cmd.StdoutPipe()
+	if err != nil {
+		return rgResult{}, err
+	}
+	if err := cmd.Start(); err != nil {
+		return rgResult{}, fmt.Errorf("rg failed: %w", err)
+	}
+	res, parseErr := e.streamRG(pipe, q)
+	if parseErr != nil {
+		cancel()
+	}
+	err = cmd.Wait()
+	if parseErr != nil {
+		return res, parseErr
+	}
 	if ctx.Err() != nil {
-		return rgResult{}, fmt.Errorf("rg timed out after %s", ctxCallLimit)
+		return res, fmt.Errorf("rg timed out after %s", ctxCallLimit)
 	}
 	if err != nil {
-		// 1 is no match; a glob that leaves no file to search is no match either
-		noFiles := strings.Contains(stderr.String(), "No files were searched")
-		if ee, ok := err.(*exec.ExitError); !noFiles && (!ok || ee.ExitCode() != 1) {
-			return rgResult{}, fmt.Errorf("rg failed: %v: %s", err, short(strings.TrimSpace(stderr.String()), 160))
+		ee, ok := err.(*exec.ExitError)
+		// This specific rg diagnostic means the requested file/glob universe
+		// is empty, not that a search of existing files failed. Other exit-2
+		// diagnostics (bad regex, permissions, missing path) remain failures.
+		noFiles := ok && ee.ExitCode() == 2 && strings.HasPrefix(strings.TrimSpace(stderr.String()), "rg: No files were searched,") && res.Total+res.Hidden+res.HiddenG == 0
+		if noFiles {
+			res.Complete = true
+			e.note("rg: no files matched the requested scope and exclusion rules")
+		} else if !ok || ee.ExitCode() != 1 {
+			return res, fmt.Errorf("rg failed: %v: %s", err, short(strings.TrimSpace(stderr.String()), 160))
+		} else {
+			if res.Total+res.Hidden+res.HiddenG > 0 {
+				return res, fmt.Errorf("rg returned no-match status after emitting matches")
+			}
+			res.Complete = true // exit 1 is rg's explicit successful no-match result
 		}
 	}
-	var res rgResult
-	clean := func(p string) string { return filepath.ToSlash(strings.TrimPrefix(p, "./")) }
-	switch {
-	case q.FilesOnly:
-		for _, l := range strings.Split(string(out), "\n") {
-			if l != "" {
-				res.Files = append(res.Files, clean(l))
-			}
-		}
-	case q.Count:
-		for _, l := range strings.Split(string(out), "\n") {
-			if i := strings.LastIndex(l, ":"); i > 0 {
-				var n int
-				if _, err := fmt.Sscanf(l[i+1:], "%d", &n); err == nil {
-					res.Counts = append(res.Counts, rgCount{clean(l[:i]), n})
-				}
-			}
-		}
-	default:
-		res.Hits = parseRgJSON(out, q.OnlyMatching, q.Multiline)
+	if err == nil && !q.FilesOnly && !q.Count && !res.Complete {
+		return res, fmt.Errorf("rg incomplete JSON stream: missing summary; narrow and retry")
 	}
-	if b, err := json.Marshal(res); err == nil {
-		_ = os.MkdirAll(e.CacheDir, 0o755)
-		_ = os.WriteFile(cache, b, 0o644)
+	res.Complete = true
+	if !res.Limited {
+		ctxCacheWrite(cache, res)
 	}
 	return res, nil
 }
 
-// parseRgJSON reads `rg --json`: match events with their path,
-// line and text. With onlyMatching a match is its matched text.
-func parseRgJSON(out []byte, onlyMatching, multiline bool) []rgHit {
-	var hits []rgHit
-	for _, line := range strings.Split(string(out), "\n") {
-		if line == "" {
+// Keep dependency diagnostics and semantic JSON bounded even when a broken
+// backend ignores its requested limit. Drain discarded bytes to avoid blocking.
+type ctxBoundedBuffer struct {
+	buf   bytes.Buffer // do not embed: Buffer.ReadFrom would bypass Write's cap
+	limit int
+	cut   bool
+}
+
+func (b *ctxBoundedBuffer) Bytes() []byte  { return b.buf.Bytes() }
+func (b *ctxBoundedBuffer) String() string { return b.buf.String() }
+func (b *ctxBoundedBuffer) Len() int       { return b.buf.Len() }
+
+func (b *ctxBoundedBuffer) Write(p []byte) (int, error) {
+	n := len(p)
+	keep := min(n, max(b.limit-b.Len(), 0))
+	if keep < n {
+		b.cut = true
+	}
+	_, _ = b.buf.Write(p[:keep])
+	return n, nil
+}
+
+// ctxCacheWrite publishes complete entries atomically.
+func ctxCacheWrite(path string, value any) {
+	b, err := json.Marshal(value)
+	if err != nil {
+		return
+	}
+	if os.MkdirAll(filepath.Dir(path), 0o755) != nil {
+		return
+	}
+	f, err := os.CreateTemp(filepath.Dir(path), ".ctx-*")
+	if err != nil {
+		return
+	}
+	defer os.Remove(f.Name())
+	_, err = f.Write(b)
+	closeErr := f.Close()
+	if err == nil && closeErr == nil {
+		_ = os.Rename(f.Name(), path)
+	}
+}
+
+// streamRG counts independently of bounded excerpts, filtering first.
+func (e *ctxEnv) streamRG(r io.Reader, q rgQuery) (rgResult, error) {
+	res := rgResult{Filtered: q.ViewFilters}
+	retain := func(path string, n int) bool {
+		if e.Skip[path] {
+			return false
+		}
+		if q.ViewFilters && !passTests(q.Tests, path) {
+			res.Hidden += n
+			return false
+		}
+		if q.ViewFilters && !e.passGen(q.Generated, path) {
+			res.HiddenG += n
+			return false
+		}
+		res.Total += n
+		return true
+	}
+	s := bufio.NewScanner(r)
+	s.Buffer(make([]byte, 64*1024), 8*1024*1024)
+	for s.Scan() {
+		line := s.Bytes()
+		if len(line) == 0 {
+			continue
+		}
+		if q.FilesOnly || q.Count {
+			path, n := string(line), 1
+			if q.Count {
+				i := strings.LastIndex(path, ":")
+				if i < 1 {
+					return res, fmt.Errorf("rg malformed count record")
+				}
+				var err error
+				n, err = strconv.Atoi(path[i+1:])
+				if err != nil || n < 0 {
+					return res, fmt.Errorf("rg malformed count record")
+				}
+				path = path[:i]
+			}
+			path = filepath.ToSlash(strings.TrimPrefix(path, "./"))
+			if !retain(path, n) {
+				continue
+			}
+			res.Rows++
+			if q.FilesOnly {
+				if len(res.Files) < ctxRgMax {
+					res.Files = append(res.Files, path)
+				} else {
+					res.Limited = true
+				}
+			} else {
+				if len(res.Counts) < ctxRgMax {
+					res.Counts = append(res.Counts, rgCount{path, n})
+				} else {
+					res.Limited = true
+				}
+			}
 			continue
 		}
 		var ev struct {
@@ -433,29 +596,54 @@ func parseRgJSON(out []byte, onlyMatching, multiline bool) []rgHit {
 				} `json:"submatches"`
 			} `json:"data"`
 		}
-		if json.Unmarshal([]byte(line), &ev) != nil || (ev.Type != "match") || ev.Data.Path.Text == "" {
-			continue
+		if json.Unmarshal(line, &ev) != nil || ev.Type == "" {
+			return res, fmt.Errorf("rg malformed JSON stream")
+		}
+		if ev.Type != "match" {
+			switch ev.Type {
+			case "summary":
+				res.Complete = true
+				continue
+			case "begin", "end", "context":
+				continue
+			}
+			return res, fmt.Errorf("rg unexpected event %q", ev.Type)
+		}
+		if ev.Data.Path.Text == "" || ev.Data.Line < 1 {
+			return res, fmt.Errorf("rg match is missing path or line")
 		}
 		path := filepath.ToSlash(strings.TrimPrefix(ev.Data.Path.Text, "./"))
-		text := strings.TrimSpace(strings.SplitN(strings.TrimRight(ev.Data.Lines.Text, "\r\n"), "\n", 2)[0])
-		if onlyMatching {
-			for _, s := range ev.Data.Subs {
-				hits = append(hits, rgHit{Path: path, Line: ev.Data.Line, Text: short(s.Match.Text, rgTextCap)})
+		texts := []string{strings.SplitN(strings.TrimRight(ev.Data.Lines.Text, "\r\n"), "\n", 2)[0]}
+		if q.OnlyMatching {
+			texts = nil
+			if len(ev.Data.Subs) == 0 {
+				return res, fmt.Errorf("rg match is missing submatches")
 			}
+			for _, sub := range ev.Data.Subs {
+				texts = append(texts, sub.Match.Text)
+			}
+		} else if q.Multiline {
+			texts = strings.Split(strings.TrimRight(ev.Data.Lines.Text, "\r\n"), "\n")
+		}
+		if !retain(path, len(texts)) {
 			continue
 		}
-		if multiline {
-			for i, l := range strings.Split(strings.TrimRight(ev.Data.Lines.Text, "\r\n"), "\n") {
-				hits = append(hits, rgHit{Path: path, Line: ev.Data.Line + i, Text: short(strings.TrimSpace(l), rgTextCap)})
+		for i, text := range texts {
+			if len(res.Hits) >= ctxRgMax {
+				res.Limited = true
+				break
 			}
-			continue
-		}
-		hits = append(hits, rgHit{Path: path, Line: ev.Data.Line, Text: short(text, rgTextCap)})
-		if len(hits) >= ctxRgMax {
-			break
+			n := ev.Data.Line
+			if q.Multiline && !q.OnlyMatching {
+				n += i
+			}
+			res.Hits = append(res.Hits, rgHit{path, n, short(strings.TrimSpace(text), rgTextCap)})
 		}
 	}
-	return hits
+	if err := s.Err(); err != nil {
+		return res, fmt.Errorf("rg incomplete stream (8 MiB record cap): %w; narrow with --glob or -p", err)
+	}
+	return res, nil
 }
 
 // Lines reads a file of the checkout into lines; nil if it cannot be read.

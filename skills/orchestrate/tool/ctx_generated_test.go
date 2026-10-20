@@ -190,7 +190,7 @@ status) echo '{"type":"status_result","indices":[{"snapshots":[{"revision":"`+he
 watch) printf 'Watch daemon running (pid 7)\n';;
 search) cat <<'EOF'
 {"type":"search_result","results":[
-{"result":{"sourcePosition":{"relativePath":"pay/pay.go"}},"content":"func A() {}","contentStartLine":1},
+{"result":{"sourcePosition":{"relativePath":"pay/pay.go"}},"content":"package pay","contentStartLine":1},
 {"result":{"sourcePosition":{"relativePath":"web/schema.d.ts"}},"content":"export type T = 1","contentStartLine":2},
 {"result":{"sourcePosition":{"relativePath":"ignored/x.go"}},"content":"package ignored","contentStartLine":1}]}
 EOF

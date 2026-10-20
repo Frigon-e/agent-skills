@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -44,7 +45,43 @@ var ctxHelps = map[string]ctxHelp{
 		[]string{"orch ctx brief task.md --owns internal/billing", "echo 'add a retry to StartCheckout' | orch ctx brief -"}},
 }
 
-func cmdCtx(a *app, args []string) error {
+// Mark this invocation's writer rather than global state, so concurrent CLI
+// tests and embedded callers cannot leak the JSON error mode to another call.
+type ctxJSONOutput struct{ io.Writer }
+
+func cmdCtx(a *app, args []string) (retErr error) {
+	for _, arg := range args {
+		if arg == "--" {
+			break
+		}
+		if arg == "--json" || arg == "--json=true" {
+			copy := *a
+			copy.out = ctxJSONOutput{a.out}
+			a = &copy
+			break
+		}
+	}
+	// Keep runtime setup/read failures in the selected result format as well.
+	// Errors already emitted by ctxErr/ctxView have an empty exitError message.
+	defer func() {
+		if retErr == nil {
+			return
+		}
+		var ee *exitError
+		code := 1
+		if errors.As(retErr, &ee) {
+			if ee.msg == "" {
+				return
+			}
+			code = ee.code
+		}
+		if _, ok := a.out.(ctxJSONOutput); ok {
+			_ = json.NewEncoder(a.out).Encode(map[string]any{"status": "failed", "error": retErr.Error()})
+		} else {
+			fmt.Fprintf(a.out, "error: %s\n", retErr)
+		}
+		retErr = &exitError{code: code}
+	}()
 	readonly := ctxReadOnly()
 	if len(args) > 0 && args[0] == "--readonly" {
 		readonly, args = true, args[1:]
@@ -99,6 +136,10 @@ func cmdCtx(a *app, args []string) error {
 
 // ctxErr prints a structured error on stdout and returns a usage error (exit 2).
 func ctxErr(a *app, msg string, help ...string) error {
+	if _, ok := a.out.(ctxJSONOutput); ok {
+		_ = json.NewEncoder(a.out).Encode(map[string]any{"status": "failed", "error": msg, "help": help})
+		return &exitError{code: 2}
+	}
 	fmt.Fprintf(a.out, "error: %s\n", msg)
 	switch len(help) {
 	case 0:
@@ -123,6 +164,11 @@ func flagName(n string) string {
 // writeHelp prints the concise reference of one subcommand.
 func writeHelp(a *app, name string, fs *flag.FlagSet) {
 	h := ctxHelps[name]
+	if name == "batch" {
+		for _, kind := range ctxKinds {
+			fmt.Fprintf(a.out, "%s_options: %s\n", kind, strings.Join(lookupOptionKeys(kind), ", "))
+		}
+	}
 	if name == "find" {
 		fmt.Fprint(a.out, ctxQueryGuide+"\n")
 	}
@@ -195,7 +241,7 @@ type ctxCommon struct {
 func addCommon(fs *flag.FlagSet) ctxCommon {
 	return ctxCommon{
 		json:    fs.Bool("json", false, "print JSON instead of TOON"),
-		full:    fs.Bool("full", false, "lift the caps on hits, line width and answer size"),
+		full:    fs.Bool("full", false, "raise bounded caps: default 1000 text hits/page, 600 columns, 48000 characters/answer; backend and batch caps still apply"),
 		fields:  fs.String("fields", "", "extra fields: "+strings.Join(ctxFieldNames, ", ")),
 		compact: fs.Bool("compact", false, "the shortest answer: counts, signatures and first lines, no context or callers"),
 	}
@@ -266,7 +312,11 @@ func ctxEnvFor(a *app) (*ctxEnv, error) {
 // prints the data, the notes and the sources as JSON instead.
 func (a *app) ctxEmit(e *ctxEnv, asJSON bool, body string, data any) error {
 	if asJSON {
-		b, err := json.MarshalIndent(map[string]any{"result": data, "notes": e.Notes(), "sources": e.Sources()}, "", "  ")
+		envelope := map[string]any{"result": data, "notes": e.Notes(), "sources": e.Sources()}
+		if views, ok := data.([]*ctxView); ok {
+			envelope["status"] = ctxBatchStatus(views)
+		}
+		b, err := json.MarshalIndent(envelope, "", "  ")
 		if err != nil {
 			return err
 		}
@@ -537,7 +587,7 @@ func which(bin string) string {
 func ctxFindCmd(a *app, args []string) error {
 	fs := a.flags("ctx find")
 	path := fs.String("p", "", "only files under this path")
-	limit := fs.Int("limit", 0, "results per page (default 8)")
+	limit := fs.Int("limit", 0, fmt.Sprintf("results per page (default %d; at most %d)", ctxFindPage, ctxRgMax))
 	maxN := fs.Int("max", 0, "same as --limit")
 	page := fs.Int("page", 0, "1-based page of the ranked list (default 1)")
 	tests := addTests(fs)
@@ -565,18 +615,29 @@ func ctxFindCmd(a *app, args []string) error {
 	if err := checkGenerated(a, *gen); err != nil {
 		return err
 	}
+	l := ctxLookup{Kind: "concept", Query: pos[0], Path: *path, Limit: *limit, Max: *maxN, Page: *page, Tests: *tests, Gen: *gen}
+	if err := l.validate(); err != nil {
+		return ctxErr(a, err.Error())
+	}
 	e, err := ctxEnvFor(a)
 	if err != nil {
 		return err
 	}
-	v := e.conceptLookup(ctxLookup{Kind: "concept", Query: pos[0], Path: *path, Limit: *limit, Max: *maxN, Page: *page, Tests: *tests, Gen: *gen}, f)
+	v := e.conceptLookup(l, f)
 	return a.ctxView(e, *common.json, f, v)
 }
 
 func (a *app) ctxView(e *ctxEnv, asJSON bool, f ctxFmt, v *ctxView) error {
 	var b strings.Builder
+	v.finishTruth()
 	v.write(&b, f, nil, 0, f.answerCap())
-	return a.ctxEmit(e, asJSON, b.String(), v)
+	if err := a.ctxEmit(e, asJSON, b.String(), v); err != nil {
+		return err
+	}
+	if v.Status == "failed" {
+		return &exitError{code: 1}
+	}
+	return nil
 }
 
 func ctxSymCmd(a *app, args []string) error {
@@ -658,10 +719,10 @@ func ctxTextCmd(a *app, args []string) error {
 	both("U", "multiline", &l.Multiline, "let a pattern match across lines")
 	both("o", "only-matching", &l.OnlyMatching, "print only the matched text")
 	fs.IntVar(&l.PerFile, "per-file", 0, "most matches per file")
-	fs.IntVar(&l.Limit, "limit", 0, "hits per page (default 10)")
+	fs.IntVar(&l.Limit, "limit", 0, fmt.Sprintf("hits per page (default %d; at most %d)", ctxTextPage, ctxRgMax))
 	fs.IntVar(&l.Max, "max", 0, "same as --limit")
 	fs.IntVar(&l.Page, "page", 0, "1-based page of the hits, sorted by path then line (default 1)")
-	fs.BoolVar(&l.All, "all", false, "also search lockfiles, generated, minified and vendored files")
+	fs.BoolVar(&l.All, "all", false, "lift default lockfile/generated/vendor globs; include generated files; still honor gitignore and hidden-file rules")
 	tests := addTests(fs)
 	gen := addGenerated(fs)
 	common := addCommon(fs)
@@ -734,14 +795,19 @@ func ctxBatchCmd(a *app, args []string) error {
 			return err
 		}
 		var plan struct {
-			Lookups []ctxLookup `json:"lookups"`
+			Lookups []ctxPlanLookup `json:"lookups"`
 		}
 		dec := json.NewDecoder(strings.NewReader(raw))
 		dec.DisallowUnknownFields()
 		if err := dec.Decode(&plan); err != nil {
 			return ctxErr(a, "the plan is not valid: "+err.Error(), `plan format: {"lookups":[{"kind":"concept|symbol|text|read","query":"...","why":"", ...options}]}`, "option keys: "+strings.Join(ctxOptionKeys, ", "))
 		}
-		lks = plan.Lookups
+		if err := dec.Decode(new(any)); err != io.EOF {
+			return ctxErr(a, "the plan must contain exactly one JSON object")
+		}
+		for _, l := range plan.Lookups {
+			lks = append(lks, ctxLookup(l))
+		}
 	}
 	for _, q := range inline {
 		l, err := parseInlineLookup(q)
@@ -757,8 +823,14 @@ func ctxBatchCmd(a *app, args []string) error {
 		return ctxErr(a, fmt.Sprintf("the plan holds %d lookups; at most %d at once", len(lks), ctxBatchMax))
 	}
 	for i := range lks {
-		if lks[i].Tests == "" && *tests != "none" {
+		if canonKind(lks[i].Kind) != "read" && lks[i].Tests == "" && *tests != "none" {
 			lks[i].Tests = *tests
+		}
+	}
+	// Validate before constructing the environment or discovering backends.
+	for i := range lks {
+		if err := lks[i].validate(); err != nil {
+			return ctxErr(a, fmt.Sprintf("lookup %d: %v", i+1, err))
 		}
 	}
 	e, err := ctxEnvFor(a)
@@ -769,7 +841,14 @@ func ctxBatchCmd(a *app, args []string) error {
 	if err != nil {
 		return ctxErr(a, err.Error(), "valid kinds: "+strings.Join(ctxKinds, ", "), "valid options: "+strings.Join(ctxOptionKeys, ", "))
 	}
-	return a.ctxEmit(e, *common.json, renderBatch(views, f), views)
+	body := renderBatch(views, f)
+	if err := a.ctxEmit(e, *common.json, body, views); err != nil {
+		return err
+	}
+	if ctxBatchStatus(views) == "failed" {
+		return &exitError{code: 1}
+	}
+	return nil
 }
 
 func readArg(a *app, name string) (string, error) {

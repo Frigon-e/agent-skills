@@ -174,8 +174,8 @@ func TestPlannerLookupsRunAndStayInsideTheRepo(t *testing.T) {
 	})
 	text := ds.text("api")
 	wantContains(t, text, "### 5. Lookups the planner asked for", "- [text] `SendTransfer` - who sends", "internal/store.go:3:",
-		"- [read] `internal/queue/queue.go:3-5`", "3: // Enqueue adds a transfer to the queue.", "no result (path outside the repo)",
-		"- [concept] `queue transfers`", "internal/store.go:3-10", "- [symbol] `Enqueue`", "`Enqueue` Function at `internal/queue/queue.go:4`", "unknown kind")
+		"- [read] `internal/queue/queue.go:3-5`", "3: // Enqueue adds a transfer to the queue.", "error: path outside the repo",
+		"- [concept] `queue transfers`", "no semantic candidates in the searched index window; this does not establish absence", "- [symbol] `Enqueue`", "`Enqueue` Function at `internal/queue/queue.go:4`", "unknown kind")
 	if strings.Count(text, "- [text] `SendTransfer`") != 1 {
 		t.Error("a duplicate lookup ran twice")
 	}

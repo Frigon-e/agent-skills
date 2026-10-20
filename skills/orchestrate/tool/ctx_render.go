@@ -32,7 +32,7 @@ const (
 
 // ctxFmt carries the output options shared by every command.
 type ctxFmt struct {
-	Full    bool            // lift the caps
+	Full    bool            // raise bounded caps
 	Compact bool            // the shortest answer: counts, signatures, first lines
 	Batch   bool            // the lookup runs inside orch ctx batch, so hints use -q keys
 	Fields  map[string]bool // src
@@ -53,7 +53,7 @@ func (f ctxFmt) width() int {
 func (f ctxFmt) answerCap() int {
 	switch {
 	case f.Full:
-		return 0
+		return ctxAnswerCap * 4
 	case f.Compact:
 		return ctxViewCapCompact
 	}
@@ -86,26 +86,90 @@ type ctxPart struct {
 }
 
 type ctxView struct {
-	Kind    string     `json:"kind"`
-	Query   string     `json:"query"`
-	Why     string     `json:"why,omitempty"`
-	Scope   string     `json:"scope,omitempty"`
-	Unit    string     `json:"unit"` // hits, matches, ...
-	Total   int        `json:"total"`
-	Shown   int        `json:"shown"`
-	Hidden  int        `json:"in_tests,omitempty"`     // hits left out by the tests filter
-	HiddenG int        `json:"in_generated,omitempty"` // hits left out because they are in generated files
-	Parts   []*ctxPart `json:"parts,omitempty"`
-	XPaths  []string   `json:"-"` // files this lookup touched, for cross-reference
-	Zero    string     `json:"zero,omitempty"`
-	Err     string     `json:"error,omitempty"`
-	Cut     string     `json:"cut,omitempty"`   // what the lookup left out and the flag that shows it
-	Pager   string     `json:"pager,omitempty"` // which page of a list this is and how to get the next
-	Tip     string     `json:"tip,omitempty"`   // advice on how to ask better, shown at most once per batch
-	TestsIn string     `json:"-"`               // the tests mode asked for
-	Head    string     `json:"head,omitempty"`
-	Context int        `json:"-"` // context lines around a hit
-	Bare    bool       `json:"-"` // a lookup with one answer: no header line outside a batch
+	Status        string     `json:"status,omitempty"`     // ok, empty, partial, failed
+	CountKind     string     `json:"count_kind,omitempty"` // exact, lower_bound, unknown
+	SearchedScope string     `json:"searched_scope,omitempty"`
+	Excluded      []string   `json:"excluded,omitempty"`
+	Errors        []string   `json:"errors,omitempty"`
+	Kind          string     `json:"kind"`
+	Query         string     `json:"query"`
+	Why           string     `json:"why,omitempty"`
+	Scope         string     `json:"scope,omitempty"`
+	Unit          string     `json:"unit"` // hits, matches, ...
+	Total         int        `json:"total"`
+	Shown         int        `json:"shown"`
+	Hidden        int        `json:"in_tests,omitempty"`     // hits left out by the tests filter
+	HiddenG       int        `json:"in_generated,omitempty"` // hits left out because they are in generated files
+	Parts         []*ctxPart `json:"parts,omitempty"`
+	XPaths        []string   `json:"-"` // files this lookup touched, for cross-reference
+	Zero          string     `json:"zero,omitempty"`
+	Err           string     `json:"error,omitempty"`
+	Cut           string     `json:"cut,omitempty"`   // what the lookup left out and the flag that shows it
+	Pager         string     `json:"pager,omitempty"` // which page of a list this is and how to get the next
+	Tip           string     `json:"tip,omitempty"`   // advice on how to ask better, shown at most once per batch
+	TestsIn       string     `json:"-"`               // the tests mode asked for
+	Head          string     `json:"head,omitempty"`
+	Context       int        `json:"-"` // context lines around a hit
+	Bare          bool       `json:"-"` // a lookup with one answer: no header line outside a batch
+}
+
+// finishTruth also covers views constructed by the symbol tier. Backend
+// producers may set partial/lower_bound explicitly; never overwrite them.
+func (v *ctxView) finishTruth() {
+	if v.Err == "" && len(v.Errors) > 0 {
+		v.Err = v.Errors[0]
+	}
+	if v.Status == "failed" && v.Err == "" {
+		v.Err = "lookup failed"
+	}
+	if v.Status == "" {
+		switch {
+		case v.Err != "" && !v.hasContent():
+			v.Status = "failed"
+		case v.Err != "" || len(v.Errors) > 0:
+			v.Status = "partial"
+		case v.Total == 0 && !v.hasContent():
+			v.Status = "empty"
+		default:
+			v.Status = "ok"
+		}
+	}
+	if v.CountKind == "" {
+		v.CountKind = "exact"
+		if v.Status == "failed" || v.Status == "partial" {
+			v.CountKind = "unknown"
+		}
+	}
+	if v.Err != "" && len(v.Errors) == 0 {
+		v.Errors = []string{v.Err}
+	}
+	if v.Status == "failed" || v.Status == "partial" {
+		v.Zero = ""
+	}
+}
+
+func ctxBatchStatus(views []*ctxView) string {
+	failed, empty, partial := 0, 0, false
+	for _, v := range views {
+		v.finishTruth()
+		if v.Status == "failed" {
+			failed++
+		}
+		if v.Status == "empty" {
+			empty++
+		}
+		partial = partial || v.Status == "partial"
+	}
+	if failed == len(views) && failed > 0 {
+		return "failed"
+	}
+	if failed > 0 || partial {
+		return "partial"
+	}
+	if empty == len(views) {
+		return "empty"
+	}
+	return "ok"
 }
 
 func (v *ctxView) part(i int) *ctxPart {
@@ -268,12 +332,24 @@ func (e *ctxEnv) conceptViewG(query, path, tests, gen string, hits []codeHit, f 
 			v.HiddenG++
 			continue
 		}
+		// Semantic content is a location hint, never source to splice into the
+		// checkout. Resolve even direct callers of conceptViewG here.
+		current, ok := e.checkoutHit(h)
+		if !ok {
+			v.Errors = append(v.Errors, fmt.Sprintf("cannot validate semantic range %s:%d-%d; use ctx text or refresh the index", h.Path, h.Start, h.End))
+			v.Status, v.CountKind = "partial", "unknown"
+			continue
+		}
+		h = current
 		body := h.Body
-		if len(body) == 0 || f.Compact {
+		if f.Compact {
 			body = h.Snippet
 		}
 		if f.Compact && len(body) > 3 {
 			body = body[:3]
+		}
+		if left := h.End - h.Start + 1 - len(body); left > 0 {
+			p.file(h.Path).Notes = append(p.file(h.Path).Notes, fmt.Sprintf("%d lines of this range not shown; concept excerpts are capped at %d lines (3 with --compact); use a native read for the checkout range", left, ctxBodyLines))
 		}
 		before, after := e.surround(h, len(body), f)
 		for i, l := range before {
@@ -306,13 +382,21 @@ func (e *ctxEnv) conceptViewG(query, path, tests, gen string, hits []codeHit, f 
 	}
 	v.Total = p.blocks()
 	v.Shown = v.Total
+	v.CountKind = "unknown" // ranked semantic candidates do not prove absence
 	return v
 }
 
 // textView builds the view of an rg search; max caps the matches shown, ctx
 // is the lines of context around each.
 func (e *ctxEnv) textView(q rgQuery, tests string, res rgResult, max, page, ctx int, f ctxFmt) *ctxView {
-	v := &ctxView{Kind: "text", Query: q.Pattern, Unit: "matches", TestsIn: tests, Context: ctx}
+	v := &ctxView{Kind: "text", Query: q.Pattern, Unit: "matches", TestsIn: tests, Context: ctx, CountKind: "exact"}
+	if res.Filtered {
+		v.Hidden, v.HiddenG = res.Hidden, res.HiddenG
+	}
+	if res.Limited {
+		v.Status = "partial"
+		v.Cut = fmt.Sprintf("retained excerpt cap %d; counting completed separately; narrow with --glob/-p (glob=/path= in batch); --full remains bounded", ctxRgMax)
+	}
 	if q.Path != "" {
 		v.Scope = "path " + q.Path
 	}
@@ -349,6 +433,9 @@ func (e *ctxEnv) textView(q rgQuery, tests string, res rgResult, max, page, ctx 
 			kept = append(kept, p)
 		}
 		v.Total = len(kept)
+		if res.Filtered {
+			v.Total = res.Total
+		}
 		lo, hi, past := pageRange(len(kept), max, page)
 		var list []string
 		for _, p := range kept[lo:hi] {
@@ -359,7 +446,7 @@ func (e *ctxEnv) textView(q rgQuery, tests string, res rgResult, max, page, ctx 
 		if len(list) > 0 {
 			v.part(0).Raw = append([]string{fmt.Sprintf("files[%d]:", len(list))}, list...)
 		}
-		pager(len(kept), lo, hi, past, "files")
+		pager(v.Total, lo, hi, past, "files")
 		return v
 	case q.Count:
 		var kept []rgCount
@@ -375,17 +462,24 @@ func (e *ctxEnv) textView(q rgQuery, tests string, res rgResult, max, page, ctx 
 			v.Total += c.Count
 			kept = append(kept, c)
 		}
+		if res.Filtered {
+			v.Total = res.Total
+		}
 		lo, hi, past := pageRange(len(kept), max, page)
 		var rows []string
 		for _, c := range kept[lo:hi] {
+			v.Shown += c.Count
 			rows = append(rows, fmt.Sprintf("  %s,%d", toonValue(c.Path), c.Count))
 			v.XPaths = append(v.XPaths, c.Path)
 		}
 		if len(rows) > 0 {
 			v.part(0).Raw = append([]string{fmt.Sprintf("counts[%d]{path,count}:", len(rows))}, rows...)
 		}
-		v.Shown = v.Total
-		pager(len(kept), lo, hi, past, "files")
+		rowsTotal := len(kept)
+		if res.Filtered && res.Rows > 0 {
+			rowsTotal = res.Rows
+		}
+		pager(rowsTotal, lo, hi, past, "files")
 		return v
 	}
 	p := v.part(0)
@@ -405,6 +499,9 @@ func (e *ctxEnv) textView(q rgQuery, tests string, res rgResult, max, page, ctx 
 		kept = append(kept, h)
 	}
 	v.Total = len(kept)
+	if res.Filtered {
+		v.Total = res.Total
+	}
 	lo, hi, past := pageRange(len(kept), max, page)
 	for _, h := range kept[lo:hi] {
 		ls := e.Lines(h.Path)
@@ -415,7 +512,7 @@ func (e *ctxEnv) textView(q rgQuery, tests string, res rgResult, max, page, ctx 
 	for _, fh := range p.Files {
 		v.XPaths = append(v.XPaths, fh.Path)
 	}
-	pager(len(kept), lo, hi, past, "hits")
+	pager(v.Total, lo, hi, past, "hits")
 	if v.Pager != "" && hi < len(kept) {
 		var left []string
 		for _, h := range kept[hi:] {
@@ -468,7 +565,7 @@ func (v *ctxView) header(num int) string {
 		label = " [" + v.Why + "]"
 	}
 	prefix := v.Kind + ": "
-	if v.Bare && v.Err == "" && v.Zero == "" {
+	if v.Bare && v.Err == "" && v.Zero == "" && v.Status != "partial" {
 		if num > 0 {
 			return fmt.Sprintf("#%d %s %s%s", num, v.Kind, quoteQuery(v.Query), label)
 		}
@@ -479,7 +576,7 @@ func (v *ctxView) header(num int) string {
 	}
 	b.WriteString(prefix)
 	switch {
-	case v.Err != "":
+	case v.Err != "" && v.Status != "partial":
 		return b.String() + "error: " + v.Err
 	case v.Zero != "":
 		return b.String() + v.Zero
@@ -495,6 +592,12 @@ func (v *ctxView) header(num int) string {
 		if files > 0 {
 			fmt.Fprintf(&b, " in %d file%s", files, plural(files))
 		}
+	}
+	if v.CountKind == "lower_bound" {
+		b.WriteString(" (count is a lower bound)")
+	}
+	if v.Status == "partial" {
+		b.WriteString(" (partial)")
 	}
 	if s := v.scope(); s != "" {
 		b.WriteString(" " + s)
@@ -519,7 +622,7 @@ func quoteQuery(q string) string { return `"` + strings.ReplaceAll(short(flat(q)
 
 // setZero states an empty result definitely.
 func (v *ctxView) setZero(wholeRepo string) {
-	if v.Total > 0 || v.Err != "" || v.Zero != "" || v.hasContent() {
+	if v.Total > 0 || v.Err != "" || v.Zero != "" || v.hasContent() || v.Status == "partial" || v.Status == "failed" {
 		return
 	}
 	where := wholeRepo
@@ -589,6 +692,7 @@ func (v *ctxView) sameLines() (drop map[string]bool, rows []string) {
 // lookup); seen collapses places an earlier lookup already printed; limit (0:
 // none) stops the output near that many characters and says what was left out.
 func (v *ctxView) write(b *strings.Builder, f ctxFmt, seen ctxSeen, num, limit int) {
+	v.finishTruth()
 	start := b.Len()
 	if h := v.header(num); h != "" {
 		b.WriteString(h + "\n")
@@ -712,7 +816,20 @@ parts:
 		b.WriteString(r + "\n")
 	}
 	if left := total - printed - skipped; left > 0 {
-		fmt.Fprintf(b, "cut at about %d characters: %d more lines (%d more files) not shown; --full lifts the cap\n", limit, left, filesLeft)
+		fmt.Fprintf(b, "cut at about %d characters: %d more lines (%d more files) not shown; --full raises the bounded cap, or narrow the lookup\n", limit, left, filesLeft)
+	}
+	for _, err := range v.Errors {
+		if v.Status == "partial" {
+			b.WriteString("error: " + err + "\n")
+		}
+	}
+	if v.Kind == "text" && v.Total == 0 && v.Err == "" {
+		if v.SearchedScope != "" {
+			b.WriteString("searched_scope: " + v.SearchedScope + "\n")
+		}
+		if len(v.Excluded) > 0 {
+			b.WriteString("excluded: " + strings.Join(v.Excluded, "; ") + "\n")
+		}
 	}
 	if v.Cut != "" {
 		b.WriteString("cut: " + v.Cut + "\n")
@@ -804,16 +921,18 @@ func commonFiles(views []*ctxView) []string {
 // shows it.
 func renderBatch(views []*ctxView, f ctxFmt) string {
 	var b strings.Builder
+	status := ctxBatchStatus(views)
 	empty, failed := 0, 0
 	for _, v := range views {
-		switch {
-		case v.Err != "":
+		switch v.Status {
+		case "failed":
 			failed++
-		case v.Zero != "":
+		case "empty":
 			empty++
 		}
 	}
 	fmt.Fprintf(&b, "batch: %d lookups, %d with results, %d empty, %d failed\n", len(views), len(views)-empty-failed, empty, failed)
+	fmt.Fprintf(&b, "status: %s\n", status)
 	if rows := commonFiles(views); len(rows) > 0 {
 		fmt.Fprintf(&b, "common[%d]{path,sources,lookups}:\n%s\n", len(rows), strings.Join(rows, "\n"))
 	}
@@ -822,7 +941,7 @@ func renderBatch(views []*ctxView, f ctxFmt) string {
 		viewCap, budget = ctxViewCapCompact, ctxBatchBudgetCmp
 	}
 	if f.Full {
-		viewCap, budget = 0, 0
+		viewCap, budget = ctxAnswerCap*4, ctxBatchBudget*4
 	}
 	seen := ctxSeen{}
 	tipShown := false
