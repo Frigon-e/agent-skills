@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -375,7 +376,27 @@ func TestGatePanePassesRunInPanesAndApplyLikeHeadless(t *testing.T) {
 	code, headOut := h.run("gate", "spec.md")
 	// The fake pane session holds a toolCall, so only the pane run reports turns.
 	paneOut = strings.Replace(paneOut, ", 3 turns, budget hits: soft 0, hard 0", "", 1)
-	if code != 1 || headOut != paneOut {
+	// B4 coverage notes arrive in concurrent pass-completion order. Compare
+	// their exact multiset while preserving every non-note byte and position.
+	orderedNotes := func(out string) string {
+		lines := strings.Split(out, "\n")
+		var notes []string
+		for _, line := range lines {
+			if strings.HasPrefix(line, "note: ") {
+				notes = append(notes, line)
+			}
+		}
+		slices.Sort(notes)
+		n := 0
+		for i, line := range lines {
+			if strings.HasPrefix(line, "note: ") {
+				lines[i] = notes[n]
+				n++
+			}
+		}
+		return strings.Join(lines, "\n")
+	}
+	if code != 1 || orderedNotes(headOut) != orderedNotes(paneOut) {
 		t.Fatalf("headless output differs from pane mode:\n--- pane\n%s\n--- headless\n%s", paneOut, headOut)
 	}
 }
