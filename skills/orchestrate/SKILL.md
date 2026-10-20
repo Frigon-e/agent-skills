@@ -100,12 +100,19 @@ fine spec, so the call is yours and the user's. Inside herdr the model passes al
 real pi or Claude agent in a pane named after it, which you can watch and attach to; a pass that
 failed keeps its session and output under `gate/<hash>/` for 7 days and
 for the newest 5 gate runs. After a run, with no model call, `orch gate`
-enriches its question cards (also on demand: `orch gate enrich <spec>`): near
-duplicates merge, spec lines and code from `jbcontext` that may already answer
-a question are attached, and a tag (`owner`, `lead-may-decide`, `unclear`)
-advises who should decide; for Go and TypeScript symbols a question names, `gopls` and the TypeScript 7 native server (`tsc --lsp`, found in the project's own `typescript@7` package under `web/node_modules/.pnpm`; override with `ORCH_TSLS`) add exact facts (definition, callers outside tests, test references, implementations). Read `gate/<hash>/questions/INDEX.md` first: counts,
-then a table per package with owner-tagged questions on top. The tag and the
-hints are advice; `orch ask --cards` still asks every card. `orch plan` then makes the
+enriches its question cards (also on demand: `orch gate enrich <spec>`): only
+exact duplicates after whitespace normalization share a card; related questions
+keep their IDs, routes and answer states. Original duplicate identities and text
+remain on the shared card. Spec lines and code from `jbcontext` are candidate
+hints, not proof that an answer exists or is absent. Each card's front matter
+and index give its route (`owner`, `lead-may-decide`, `unclear`) and action.
+Keep product choices with the owner; settle delegated technical choices with
+the lead (`settle-by-lead`), without forwarding them to the user again; never
+infer an answer from a hint. Enrichment preserves `questions/answered/` and does
+not reopen matching archived cards. For Go and TypeScript symbols a question names, `gopls` and the TypeScript 7 native server (`tsc --lsp`, found in the project's own `typescript@7` package under `web/node_modules/.pnpm`; override with `ORCH_TSLS`) add exact facts (definition, callers outside tests, test references, implementations). Read `gate/<hash>/questions/INDEX.md` first: counts,
+then a table per package with owner-tagged questions on top. Route delegated
+cards to the lead before preparing user decisions. The tag and hints are advice;
+`orch ask --cards` still asks every root card and does not filter by route. `orch plan` then makes the
 tasks and prints the waves: check and spawn the first wave, then each later
 wave when its dependencies are done.
 

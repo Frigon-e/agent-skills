@@ -146,12 +146,12 @@ func TestGateRunsOneGroupPassForRelatedPackages(t *testing.T) {
 func TestGateGroupWithoutAnEntryForAPackageIsUnverified(t *testing.T) {
 	h := setup(t)
 	h.commitSpec(threePkgSpec())
-	h.fakePi(gatePasses(map[string]string{"group": `{"packages":[{"id":"store"},{"id":"api"}]}`}))
+	h.fakePi(gatePasses(map[string]string{"group": `{"packages":[{"id":"store","will_change":[],"claims":[],"questions":[],"reuse":[]},{"id":"api","will_change":[],"claims":[],"questions":[],"reuse":[]}]}`}))
 	code, out := h.run("gate", "spec.md")
 	if code != 1 {
 		t.Fatalf("a group that skipped a package passed: %d %s", code, out)
 	}
-	wantContains(t, out, "gate: unverified", "pass_failed: group:store+2: no entry for docs")
+	wantContains(t, out, "gate: unverified", "pass_failed: group:store+2 -", "no entry for docs")
 }
 
 func TestGateRecordsAndPrintsPassTokens(t *testing.T) {
@@ -221,9 +221,8 @@ func TestApplyGroupFeedsEachPackageItsOwnEntry(t *testing.T) {
 	rec := &gateRecord{PassErrors: map[string]string{}}
 	reply := `Here you go: {"packages":[
 {"id":"api","will_change":["internal/store.go","internal/api.go"],"claims":[{"claim":"c","evidence":"internal/nope.go:1"}],
-"questions":[{"package":"api","question":"Soft delete?","changes_result":true},{"package":"store","question":"Other package","changes_result":true},{"package":"api","question":"  "}]},
-{"id":"store","will_change":["x.go"],"questions":[{"package":"store","question":"Not in this group?","changes_result":true}]},
-{"id":"docs","questions":[{"package":"docs","question":"Where?","changes_result":false}]}]}`
+"questions":[{"package":"api","question":"Soft delete?","changes_result":true},{"package":"api","question":"  ","changes_result":false}],"reuse":[]},
+{"id":"docs","will_change":[],"claims":[],"reuse":[],"questions":[{"package":"docs","question":"Where?","changes_result":false}]}]}`
 	if err := apply(reply, rec, repo, sp); err != nil {
 		t.Fatal(err)
 	}
@@ -237,18 +236,17 @@ func TestApplyGroupFeedsEachPackageItsOwnEntry(t *testing.T) {
 		t.Errorf("dropped = %d, errors = %v, want 1 and none", rec.Dropped, rec.PassErrors)
 	}
 
-	// A package of the group with no entry leaves a pass-level error; a
-	// missing half of an entry is just empty; an unparseable reply fails all.
+	// Incomplete valid JSON is rejected before applying any findings.
 	rec = &gateRecord{PassErrors: map[string]string{}}
-	if err := apply(`{"packages":[{"id":"api","will_change":["internal/store.go"]}]}`, rec, repo, sp); err != nil {
-		t.Fatal(err)
+	if err := apply(`{"packages":[{"id":"api","will_change":["internal/store.go"]}]}`, rec, repo, sp); err == nil {
+		t.Fatal("partial reply accepted")
 	}
-	if len(rec.Findings) != 1 || len(rec.Questions) != 0 || rec.PassErrors["group:api+1: no entry for docs"] == "" || len(rec.PassErrors) != 1 {
-		t.Errorf("partial reply: findings %d, questions %d, errors %v", len(rec.Findings), len(rec.Questions), rec.PassErrors)
+	if len(rec.Findings) != 0 || len(rec.Questions) != 0 {
+		t.Errorf("partial reply was applied: %+v", rec)
 	}
 	rec = &gateRecord{PassErrors: map[string]string{}}
-	if err := apply(`{}`, rec, repo, sp); err != nil || len(rec.PassErrors) != 2 {
-		t.Errorf("empty object: err %v, errors %v", err, rec.PassErrors)
+	if err := apply(`{}`, rec, repo, sp); err == nil {
+		t.Error("empty object accepted")
 	}
 	if err := apply("no json here", &gateRecord{PassErrors: map[string]string{}}, repo, sp); err == nil {
 		t.Error("an unparseable reply was not an error")
@@ -358,7 +356,7 @@ func TestGateQuestionAnsweredBySpecLineCountsAndFakeLinesDoNot(t *testing.T) {
 		}
 	}
 	rec := &gateRecord{}
-	reply := fmt.Sprintf(`{"packages":[{"id":"api","questions":[{"package":"api","question":"One queue?","answered_by":"spec.md:%d","changes_result":true},{"package":"api","question":"Beyond?","answered_by":"spec.md:%d","changes_result":true}]}]}`, n, len(specLines(src))+50)
+	reply := fmt.Sprintf(`{"packages":[{"id":"api","will_change":[],"claims":[],"reuse":[],"questions":[{"package":"api","question":"One queue?","answered_by":"spec.md:%d","changes_result":true},{"package":"api","question":"Beyond?","answered_by":"spec.md:%d","changes_result":true}]}]}`, n, len(specLines(src))+50)
 	if err := applyGroup("group:api", []string{"api"})(reply, rec, repo, sp); err != nil {
 		t.Fatal(err)
 	}
@@ -470,8 +468,8 @@ func TestApplyGroupSalvagesRepliesThatAreNotValidJSON(t *testing.T) {
 	// The shape seen in a real run: the scope object is never closed before
 	// the next key, so the whole reply is invalid although every part is whole.
 	rec, err := apply(`{"packages":[{"id":"api","scope":{"will_change":["internal/store.go"],"claims":[{"claim":"c","evidence":"internal/store.go:3"}],"questions":[{"question":"Soft delete?","answered_by":"","changes_result":true}]},{"id":"docs","will_change":[],"claims":[],"questions":[{"question":"Where?","changes_result":false}]}]}`)
-	if err != nil {
-		t.Fatal(err)
+	if err == nil {
+		t.Fatal("salvaged reply must not establish completion")
 	}
 	if len(rec.Findings) != 1 || rec.Findings[0].Severity != "blocker" || len(rec.Questions) != 2 || rec.Questions[0].Package != "api" || !rec.Questions[0].blocks() || rec.Questions[1].Package != "docs" {
 		t.Errorf("findings %+v questions %+v", rec.Findings, rec.Questions)
@@ -482,7 +480,7 @@ func TestApplyGroupSalvagesRepliesThatAreNotValidJSON(t *testing.T) {
 
 	// A reply cut short keeps what was complete before the cut.
 	rec, err = apply(`{"packages":[{"id":"api","will_change":["internal/store.go"],"claims":[{"claim":"c","evid`)
-	if err != nil || len(rec.Findings) != 1 || rec.PassErrors["group:api+1: no entry for docs"] == "" || len(rec.Salvaged) != 1 {
+	if err == nil || len(rec.Findings) != 1 || len(rec.Salvaged) != 1 {
 		t.Errorf("truncated reply: err %v findings %+v errors %v salvaged %v", err, rec.Findings, rec.PassErrors, rec.Salvaged)
 	}
 
@@ -491,16 +489,16 @@ func TestApplyGroupSalvagesRepliesThatAreNotValidJSON(t *testing.T) {
 		t.Error("a reply with nothing decodable was not an error")
 	}
 	rec, err = apply(`{"packages":[{"id":"api"},{"id":"docs"}]}`)
-	if err != nil || len(rec.Salvaged) != 0 {
-		t.Errorf("valid JSON: err %v salvaged %v", err, rec.Salvaged)
+	if err == nil || len(rec.Salvaged) != 0 {
+		t.Errorf("incomplete valid JSON: err %v salvaged %v", err, rec.Salvaged)
 	}
 
 	// The real failing reply of a one-package group (no id in the old shape).
 	one := parseSpec(planHeader + planPkg("crm1-orders", "kind: ship\nowns: internal/crm/orders/", "") + planTail)
 	rec = &gateRecord{PassErrors: map[string]string{}}
 	raw := mustRead(t, "testdata/gate-reply-unclosed-scope.txt")
-	if err := applyGroup("group:crm1-orders", []string{"crm1-orders"})(string(raw), rec, repo, one); err != nil {
-		t.Fatal(err)
+	if err := applyGroup("group:crm1-orders", []string{"crm1-orders"})(string(raw), rec, repo, one); err == nil {
+		t.Fatal("real salvaged reply must not establish completion")
 	}
 	if len(rec.Salvaged) != 1 || len(rec.Findings) < 10 || len(rec.Questions) < 1 || rec.Questions[0].Package != "crm1-orders" || rec.Dropped < 1 {
 		t.Errorf("real reply: salvaged %v findings %d questions %d dropped %d", rec.Salvaged, len(rec.Findings), len(rec.Questions), rec.Dropped)
@@ -570,11 +568,10 @@ func TestApplyGroupTurnsReuseIntoConcerns(t *testing.T) {
 	writeFiles(t, repo, map[string]string{"internal/store.go": "package internal\n\nfunc Put() {}\n"})
 	sp := parseSpec(threePkgSpec())
 	rec := &gateRecord{PassErrors: map[string]string{}}
-	reply := `{"packages":[{"id":"api","reuse":[
+	reply := `{"packages":[{"id":"api","will_change":[],"claims":[],"questions":[],"reuse":[
 {"builds":"internal/put.go","existing":"Put in store.go","evidence":"internal/store.go:3","why":"same write"},
 {"builds":"a queue table","existing":"imaginary","evidence":"internal/nope.go:9"},
-{"builds":"  ","existing":"ignored","evidence":"internal/store.go:1"}]},
-{"id":"store","reuse":[{"builds":"not in this group","existing":"x","evidence":"internal/store.go:1"}]}]}`
+{"builds":"  ","existing":"ignored","evidence":"internal/store.go:1"}]}]}`
 	if err := applyGroup("group:api", []string{"api"})(reply, rec, repo, sp); err != nil {
 		t.Fatal(err)
 	}
@@ -591,8 +588,8 @@ func TestApplyGroupTurnsReuseIntoConcerns(t *testing.T) {
 
 	// The salvage decoder reads reuse as one more key.
 	rec = &gateRecord{PassErrors: map[string]string{}}
-	if err := applyGroup("group:api", []string{"api"})(`{"packages":[{"id":"api","scope":{"reuse":[{"builds":"b","existing":"e","evidence":"internal/store.go:3"}]},`, rec, repo, sp); err != nil {
-		t.Fatal(err)
+	if err := applyGroup("group:api", []string{"api"})(`{"packages":[{"id":"api","scope":{"reuse":[{"builds":"b","existing":"e","evidence":"internal/store.go:3"}]},`, rec, repo, sp); err == nil {
+		t.Fatal("salvaged reuse must not establish completion")
 	}
 	if len(rec.Findings) != 1 || len(rec.Salvaged) != 1 {
 		t.Errorf("salvaged reuse: findings %+v salvaged %v", rec.Findings, rec.Salvaged)

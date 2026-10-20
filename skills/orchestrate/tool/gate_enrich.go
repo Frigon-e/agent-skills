@@ -8,18 +8,17 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 )
 
 // Enrichment makes the gate's question cards easier to settle, with no model
-// call: near-duplicate questions are merged, spec lines that may already
-// answer one are attached, jbcontext (semantic code search) adds code that may
-// answer it, and a routing tag advises who should decide. Every question stays;
-// the tag and the hints are advice, never a verdict.
+// call: only whitespace-normalized exact duplicates share a card. Related
+// questions keep independent cards and routes. Spec and code hints are bounded
+// search results, not proof that an answer is absent or that a question is settled.
 
 const (
-	enrichSimilar    = 0.6 // token Jaccard at which two questions in a package merge
 	enrichSpecShare  = 0.6 // share of a question's identifiers a spec line must hold
 	enrichMaxHints   = 3
 	enrichSnippet    = ctxSnippet
@@ -66,16 +65,20 @@ type specHint struct {
 }
 
 type enrichedQuestion struct {
-	N       int // the question's card number in the gate
-	Q       gateQuestion
-	Merged  []string // other wordings merged into this card
-	Tag     string
-	Why     string
-	Spec    []specHint
-	Code    []codeHit
-	Facts   []symFact
-	Card    string // file name without .md
-	Blocker bool
+	N          int // the question's card number in the gate
+	Record     int // one-based position in gate.json, stable for this gate run
+	Q          gateQuestion
+	Merged     []string           // original text of exact normalized duplicates
+	Members    []enrichedQuestion // each duplicate's original identity and route
+	Answer     string             // archived card or the gate's answer evidence, never inferred from hints
+	CodeReview string             // what the bounded code search actually established
+	Tag        string
+	Why        string
+	Spec       []specHint
+	Code       []codeHit
+	Facts      []symFact
+	Card       string // file name without .md
+	Blocker    bool
 }
 
 type enrichResult struct {
@@ -84,6 +87,7 @@ type enrichResult struct {
 	SpecHints, CodeHits  int
 	SymbolFacts          int
 	Minor                []enrichedQuestion
+	Answered             []enrichedQuestion
 	Items                []enrichedQuestion
 	Notes                []string
 }
@@ -270,67 +274,198 @@ func mayDecidePhrases(sp *spec) []string {
 	return out
 }
 
-// dedupeQuestions clusters one package's questions whose token sets overlap
-// by enrichSimilar or more, or that name the same two or more identifiers. The
-// longest wording of a cluster leads (the earliest on a tie).
+// dedupeQuestions only collapses identical text after whitespace normalization,
+// within a package and answer state. Do not discard punctuation, case, negation,
+// word order or additional evidence needs. The first identity remains canonical.
 func dedupeQuestions(items []enrichedQuestion) []enrichedQuestion {
-	n := len(items)
-	parent := make([]int, n)
-	for i := range parent {
-		parent[i] = i
+	type identity struct {
+		pkg, question, answer, archive string
+		decisive                       bool
 	}
-	var find func(int) int
-	find = func(i int) int {
-		for parent[i] != i {
-			parent[i] = parent[parent[i]]
-			i = parent[i]
+	seen := map[identity]int{}
+	var out []enrichedQuestion
+	for _, it := range items {
+		key := identity{it.Q.Package, flat(it.Q.Question), it.Q.AnsweredBy, it.Answer, it.Q.Decisive}
+		if i, ok := seen[key]; ok {
+			out[i].Merged = append(out[i].Merged, it.Q.Question)
+			out[i].Members = append(out[i].Members, it)
+			if routeRank(it.Tag) < routeRank(out[i].Tag) {
+				out[i].Tag, out[i].Why = it.Tag, it.Why
+			}
+			continue
 		}
-		return i
+		seen[key] = len(out)
+		it.Members = []enrichedQuestion{it}
+		out = append(out, it)
 	}
-	toks := make([]map[string]bool, n)
-	ids := make([]string, n)
-	for i, it := range items {
-		toks[i] = questionTokens(it.Q.Question)
-		if idl := questionIdentifiers(it.Q.Question); len(idl) >= 2 {
-			sort.Strings(idl)
-			ids[i] = strings.Join(idl, "|")
+	return out
+}
+
+func routeRank(tag string) int {
+	switch tag {
+	case "owner":
+		return 0
+	case "lead-may-decide":
+		return 2
+	default:
+		return 1
+	}
+}
+
+func questionAction(tag string) string {
+	switch tag {
+	case "owner":
+		return "settle-by-owner"
+	case "lead-may-decide":
+		return "settle-by-lead"
+	default:
+		return "clarify-authority"
+	}
+}
+
+// archivedAnswer checks identity as well as the filename. Old similar-question
+// cards are not evidence that all questions formerly merged into them are answered.
+func archivedAnswer(qdir string, it enrichedQuestion) (string, error) {
+	path := filepath.Join(qdir, "answered", it.Card+".md")
+	b, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	record, err := questionRecord(string(b))
+	if err != nil || (record != 0 && record != it.Record) {
+		return "", nil
+	}
+	c, err := parseCard(string(b))
+	if err == nil && flat(c.question) == flat(it.Q.Question) {
+		return "answered/" + it.Card + ".md", nil
+	}
+	return "", nil
+}
+
+var gateCardNumber = regexp.MustCompile(`^q([1-9][0-9]*)(?:-.+)?\.md$`)
+var gateQuestionRecord = regexp.MustCompile(`(?m)^gate-question: ([1-9][0-9]*)$`)
+
+func questionRecord(src string) (int, error) {
+	src = strings.ReplaceAll(src, "\r\n", "\n")
+	header, _, _ := strings.Cut(strings.TrimPrefix(src, "---\n"), "\n---")
+	if m := gateQuestionRecord.FindStringSubmatch(header); m != nil {
+		return strconv.Atoi(m[1])
+	}
+	return 0, nil
+}
+
+// When gate.json records an answer, retain the original card and its identity
+// before removing it from the open queue. Existing archives are never rewritten.
+func preserveRecordedAnswers(qdir string, answered []enrichedQuestion) error {
+	for _, it := range answered {
+		if it.Q.AnsweredBy == "" || it.Card == "" {
+			continue
+		}
+		b, err := os.ReadFile(filepath.Join(qdir, it.Card+".md"))
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		dir := filepath.Join(qdir, "answered")
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return err
+		}
+		path := filepath.Join(dir, it.Card+".md")
+		f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+		if os.IsExist(err) {
+			answer, readErr := archivedAnswer(qdir, it)
+			if readErr != nil {
+				return readErr
+			}
+			if answer == "" {
+				return fmt.Errorf("answer archive %s has a different question identity; preserve it and resolve the conflict before enriching", path)
+			}
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		_, err = f.Write(append(b, []byte("\n## Answer evidence\n"+it.Q.AnsweredBy+"\n")...))
+		closeErr := f.Close()
+		if err != nil {
+			_ = os.Remove(path)
+			return err
+		}
+		if closeErr != nil {
+			_ = os.Remove(path)
+			return closeErr
 		}
 	}
-	for i := 0; i < n; i++ {
-		for j := i + 1; j < n; j++ {
-			if jaccard(toks[i], toks[j]) >= enrichSimilar || (ids[i] != "" && ids[i] == ids[j]) {
-				if a, b := find(i), find(j); a != b {
-					parent[max(a, b)] = min(a, b)
+	return nil
+}
+
+// questionNumbers reuses existing exact identities, including archived cards.
+// Older gates numbered only unresolved questions. Reusing their filenames keeps
+// those runs compatible without renumbering survivors when an answer is recorded.
+func questionNumbers(qdir string, qs []gateQuestion) ([]int, error) {
+	numbers := make([]int, len(qs))
+	used := map[int]bool{}
+	for _, dir := range []string{filepath.Join(qdir, "answered"), qdir} {
+		paths, err := filepath.Glob(filepath.Join(dir, "*.md"))
+		if err != nil {
+			return nil, err
+		}
+		for _, path := range paths {
+			base := filepath.Base(path)
+			m := gateCardNumber.FindStringSubmatch(base)
+			if m == nil {
+				continue
+			}
+			n, err := strconv.Atoi(m[1])
+			if err != nil || used[n] {
+				continue
+			}
+			b, err := os.ReadFile(path)
+			if err != nil {
+				return nil, err
+			}
+			c, err := parseCard(string(b))
+			if err != nil {
+				continue
+			}
+			// Additive metadata distinguishes identical wordings after one record
+			// is answered. Legacy cards fall back to exact text and filename.
+			record, err := questionRecord(string(b))
+			if err != nil || record > len(qs) {
+				continue
+			}
+			for i, q := range qs {
+				if record != 0 && record != i+1 {
+					continue
+				}
+				if q.Decisive && numbers[i] == 0 && base == cardKey(n, q.Package)+".md" && flat(c.question) == flat(q.Question) {
+					numbers[i], used[n] = n, true
+					break
 				}
 			}
 		}
 	}
-	members := map[int][]int{}
-	var roots []int
-	for i := range items {
-		r := find(i)
-		if _, ok := members[r]; !ok {
-			roots = append(roots, r)
+	ordinal := 0
+	for i, q := range qs {
+		if !q.blocks() {
+			continue
 		}
-		members[r] = append(members[r], i)
+		ordinal++
+		if numbers[i] != 0 {
+			continue
+		}
+		n := ordinal
+		for used[n] {
+			n++
+		}
+		numbers[i], used[n] = n, true
 	}
-	var out []enrichedQuestion
-	for _, r := range roots {
-		lead := members[r][0]
-		for _, i := range members[r] {
-			if len(items[i].Q.Question) > len(items[lead].Q.Question) {
-				lead = i
-			}
-		}
-		it := items[lead]
-		for _, i := range members[r] {
-			if i != lead {
-				it.Merged = append(it.Merged, strings.Join(strings.Fields(items[i].Q.Question), " "))
-			}
-		}
-		out = append(out, it)
-	}
-	return out
+	return numbers, nil
 }
 
 // enrichGate rewrites the question cards of a gate run in dir and writes
@@ -350,44 +485,46 @@ func enrichGate(dir, code, src, rel string, sp *spec) (*enrichResult, error) {
 	lines := specLines(src)
 	may := mayDecidePhrases(sp)
 
-	// Card numbers follow the order of the blocking questions, as writeGate numbers them.
-	byPkg := map[string][]enrichedQuestion{}
-	var pkgs []string
-	var minor []enrichedQuestion
-	n := 0
-	for _, q := range rec.Questions {
-		if q.blocks() {
-			n++
-			if _, ok := byPkg[q.Package]; !ok {
-				pkgs = append(pkgs, q.Package)
+	qdir := filepath.Join(dir, "questions")
+	numbers, err := questionNumbers(qdir, rec.Questions)
+	if err != nil {
+		return nil, err
+	}
+	var items, minor []enrichedQuestion
+	for i, q := range rec.Questions {
+		it := enrichedQuestion{Q: q, Blocker: q.blocks(), N: numbers[i], Record: i + 1}
+		if it.N != 0 {
+			it.Card = cardKey(it.N, q.Package)
+		}
+		it.Tag, it.Why = routeQuestion(q.Question, may)
+		it.Spec = specHints(lines, questionIdentifiers(q.Question))
+		it.Answer = q.AnsweredBy
+		if it.Answer == "" && it.Card != "" {
+			var err error
+			it.Answer, err = archivedAnswer(qdir, it)
+			if err != nil {
+				return nil, err
 			}
-			byPkg[q.Package] = append(byPkg[q.Package], enrichedQuestion{N: n, Q: q, Blocker: true})
-		} else if q.AnsweredBy == "" {
-			minor = append(minor, enrichedQuestion{Q: q})
+		}
+		if it.Answer != "" {
+			res.Answered = append(res.Answered, it)
+		} else if q.blocks() {
+			res.Total++
+			items = append(items, it)
+		} else {
+			minor = append(minor, it)
 		}
 	}
-	res.Total = n
-	var items []enrichedQuestion
-	for _, p := range pkgs {
-		items = append(items, dedupeQuestions(byPkg[p])...)
-	}
-	sort.SliceStable(items, func(i, j int) bool { return items[i].N < items[j].N })
+	items = dedupeQuestions(items)
 	res.Cards = len(items)
-	for _, set := range [][]enrichedQuestion{items, minor} {
-		for i := range set {
-			it := &set[i]
-			it.Tag, it.Why = routeQuestion(it.Q.Question, may)
-			it.Spec = specHints(lines, questionIdentifiers(it.Q.Question))
-		}
-	}
-	for i := range items {
-		items[i].Card = cardKey(items[i].N, items[i].Q.Package)
-	}
 
 	// Code search: one jbcontext call per card, a few at a time.
 	cfg, _ := loadConfig(code)
 	env := newCtxEnv(code, ctxOpts{Cfg: cfg, Skip: []string{rel}})
 	if why := env.jbMissing(); why != "" {
+		for i := range items {
+			items[i].CodeReview = "Code search did not run: " + why
+		}
 		if env.NoJB {
 			res.Notes = append(res.Notes, why)
 		} else {
@@ -408,17 +545,20 @@ func enrichGate(dir, code, src, rel string, sp *spec) (*enrichResult, error) {
 				stop := fails >= enrichMaxFails
 				mu.Unlock()
 				if stop {
+					it.CodeReview = "Code search skipped after earlier search failures."
 					return
 				}
 				hits, err := env.Concept(short(strings.Join(strings.Fields(it.Q.Question), " "), enrichQueryChars), "", 3)
 				mu.Lock()
 				defer mu.Unlock()
 				if err != nil {
+					it.CodeReview = "Code search failed: " + flat(err.Error())
 					if fails++; fails == 1 {
 						res.Notes = append(res.Notes, "no code hints for some questions: "+err.Error())
 					}
 					return
 				}
+				it.CodeReview = fmt.Sprintf("Bounded semantic search of the checkout for %q returned %d candidate(s), excluding the spec. This is not an exhaustive answer search.", short(flat(it.Q.Question), enrichQueryChars), len(hits))
 				for _, h := range hits {
 					if len(it.Code) < enrichMaxHints {
 						it.Code = append(it.Code, h)
@@ -460,10 +600,22 @@ func enrichGate(dir, code, src, rel string, sp *spec) (*enrichResult, error) {
 	}
 	res.Items, res.Minor = items, minor
 
-	qdir := filepath.Join(dir, "questions")
-	_ = os.RemoveAll(qdir)
 	if err := os.MkdirAll(qdir, 0o755); err != nil {
 		return nil, err
+	}
+	if err := preserveRecordedAnswers(qdir, res.Answered); err != nil {
+		return nil, err
+	}
+	// Only replace root cards. In particular, never delete answered/ and its
+	// original cards, answers or attachments when enrichment is rerun.
+	paths, err := filepath.Glob(filepath.Join(qdir, "*.md"))
+	if err != nil {
+		return nil, err
+	}
+	for _, path := range paths {
+		if err := os.Remove(path); err != nil {
+			return nil, err
+		}
 	}
 	for _, it := range items {
 		if err := os.WriteFile(filepath.Join(qdir, it.Card+".md"), []byte(enrichedCard(it, rel)), 0o644); err != nil {
@@ -481,19 +633,42 @@ func enrichGate(dir, code, src, rel string, sp *spec) (*enrichResult, error) {
 
 func flat(s string) string { return strings.Join(strings.Fields(s), " ") }
 
+// gateQuestionCard is also used before enrichment, so the initial card cannot
+// claim a repo-wide absence that neither review nor enrichment established.
+func gateQuestionCard(q gateQuestion) string {
+	tag, _ := routeQuestion(q.Question, nil)
+	return questionCardText(q, tag, 0)
+}
+
+func questionCardText(q gateQuestion, tag string, record int) string {
+	identity := ""
+	if record != 0 {
+		identity = fmt.Sprintf("gate-question: %d\n", record)
+	}
+	return fmt.Sprintf("---\nquestion: %s\nroute: %s\nauthority: %s\naction: %s\n%s---\n## Context\nRaised by the spec gate for package `%s`. The review reported this question as unresolved. Hints do not establish an answer or prove that one is absent.\n",
+		flat(q.Question), tag, tag, questionAction(tag), identity, q.Package)
+}
+
 func enrichedCard(it enrichedQuestion, rel string) string {
 	var b strings.Builder
-	q := flat(it.Q.Question)
-	if len(it.Merged) > 0 {
-		q += fmt.Sprintf(" (+%d similar)", len(it.Merged))
+	b.WriteString(questionCardText(it.Q, it.Tag, it.Record))
+	fmt.Fprintf(&b, "\n## Tag\n%s (%s). Action: %s. Routing advice only; it does not settle the question.\n", it.Tag, it.Why, questionAction(it.Tag))
+	b.WriteString("\n## Original questions\n")
+	members := it.Members
+	if len(members) == 0 {
+		members = []enrichedQuestion{it}
 	}
-	fmt.Fprintf(&b, "---\nquestion: %s\n---\n## Context\nRaised by the spec gate for package `%s`. No file in the repo answers it.\n", q, it.Q.Package)
-	fmt.Fprintf(&b, "\n## Tag\n%s (%s). This is advice; the card is yours to settle.\n", it.Tag, it.Why)
-	if len(it.Merged) > 0 {
-		b.WriteString("\n## Merged similar questions\n")
-		for _, m := range it.Merged {
-			fmt.Fprintf(&b, "- %s\n", m)
-		}
+	for _, member := range members {
+		fmt.Fprintf(&b, "- %s [%s; %s]: %s\n", cardKey(member.N, member.Q.Package), member.Tag, questionAction(member.Tag), member.Q.Question)
+	}
+	b.WriteString("\n## Review evidence\n")
+	if len(questionIdentifiers(it.Q.Question)) < 2 {
+		fmt.Fprintf(&b, "Spec hint search in `%s` skipped: fewer than two identifiers.\n", rel)
+	} else {
+		fmt.Fprintf(&b, "Scanned `%s` for co-occurring question identifiers in three-line windows; attached %d candidate spec hint(s). This heuristic does not establish absence.\n", rel, len(it.Spec))
+	}
+	if it.CodeReview != "" {
+		fmt.Fprintf(&b, "\n%s\n", it.CodeReview)
 	}
 	if len(it.Spec) > 0 {
 		b.WriteString("\n## The spec may already answer this\nA hint only; read the lines before relying on them.\n")
@@ -504,7 +679,8 @@ func enrichedCard(it enrichedQuestion, rel string) string {
 	if len(it.Facts) > 0 {
 		b.WriteString("\n## Exact symbol facts\n")
 		for _, l := range factLines(it.Facts) {
-			b.WriteString(l + "\n")
+			b.WriteString(l)
+			b.WriteByte('\n')
 		}
 	}
 	if len(it.Code) > 0 {
@@ -527,7 +703,7 @@ func cell(s string) string { return strings.ReplaceAll(s, "|", "/") }
 
 func enrichedIndex(res *enrichResult, rel string) string {
 	var b strings.Builder
-	b.WriteString("# Gate questions\n\n")
+	fmt.Fprintf(&b, "# Gate questions\n\nSpec: `%s`\n\n", rel)
 	fmt.Fprintf(&b, "%s\n\n", res.summary())
 	for _, n := range res.Notes {
 		fmt.Fprintf(&b, "Note: %s\n\n", n)
@@ -540,17 +716,34 @@ func enrichedIndex(res *enrichResult, rel string) string {
 		}
 		byPkg[it.Q.Package] = append(byPkg[it.Q.Package], it)
 	}
-	rank := map[string]int{"owner": 0, "unclear": 1, "lead-may-decide": 2}
 	for _, p := range pkgs {
 		set := byPkg[p]
-		sort.SliceStable(set, func(i, j int) bool { return rank[set[i].Tag] < rank[set[j].Tag] })
-		fmt.Fprintf(&b, "## %s\n\n| card | tag | question | spec hint | code hits | go facts |\n|---|---|---|---|---|---|\n", p)
+		sort.SliceStable(set, func(i, j int) bool { return routeRank(set[i].Tag) < routeRank(set[j].Tag) })
+		fmt.Fprintf(&b, "## %s\n\n| card | tag | question | spec hint | code hits | go facts | action |\n|---|---|---|---|---|---|---|\n", p)
 		for _, it := range set {
 			q := short(flat(it.Q.Question), 100)
 			if len(it.Merged) > 0 {
-				q += fmt.Sprintf(" (+%d similar)", len(it.Merged))
+				q += fmt.Sprintf(" (+%d exact duplicates)", len(it.Merged))
 			}
-			fmt.Fprintf(&b, "| %s | %s | %s | %s | %s | %s |\n", it.Card, it.Tag, cell(q), yesNo(len(it.Spec) > 0), yesNo(len(it.Code) > 0), yesNo(len(it.Facts) > 0))
+			fmt.Fprintf(&b, "| %s | %s | %s | %s | %s | %s | %s |\n", it.Card, it.Tag, cell(q), yesNo(len(it.Spec) > 0), yesNo(len(it.Code) > 0), yesNo(len(it.Facts) > 0), questionAction(it.Tag))
+		}
+		b.WriteString("\n")
+		for _, it := range set {
+			if len(it.Members) > 1 {
+				for _, member := range it.Members {
+					fmt.Fprintf(&b, "Member %s [%s; %s], shared card %s: %s\n\n", cardKey(member.N, member.Q.Package), member.Tag, questionAction(member.Tag), it.Card, member.Q.Question)
+				}
+			}
+		}
+	}
+	if len(res.Answered) > 0 {
+		b.WriteString("## Answer history (not reopened by enrichment)\n\n")
+		for _, it := range res.Answered {
+			id := it.Card
+			if id == "" {
+				id = it.Q.Package + " (no prior card)"
+			}
+			fmt.Fprintf(&b, "- %s [%s]: %s (answer: `%s`)\n", id, it.Tag, it.Q.Question, it.Answer)
 		}
 		b.WriteString("\n")
 	}
@@ -574,9 +767,11 @@ func addReportSection(path string, res *enrichResult) error {
 	if i := strings.Index(text, "## Question cards\n"); i >= 0 {
 		text = strings.TrimRight(text[:i], "\n") + "\n\n"
 	}
-	text += "## Question cards\n" + res.summary() + "\n"
+	var section strings.Builder
+	section.WriteString(text)
+	fmt.Fprintf(&section, "## Question cards\n%s\n", res.summary())
 	for _, n := range res.Notes {
-		text += "Note: " + n + "\n"
+		fmt.Fprintf(&section, "Note: %s\n", n)
 	}
-	return os.WriteFile(path, []byte(text), 0o644)
+	return os.WriteFile(path, []byte(section.String()), 0o644)
 }

@@ -386,8 +386,10 @@ func cmdPlan(a *app, args []string) error {
 	}
 	sp := parseSpec(string(src))
 	sp.validate()
-	if !*skipGate && !gatePassed(s.root, src) {
-		sp.add("the gate has not passed for this version of the spec: run `orch gate %s`, fix what it reports, and rerun (or pass --skip-gate with the user's agreement)", pos[0])
+	if !*skipGate {
+		if passed, reason := gateApproval(s.root, top, src); !passed {
+			sp.add("the gate has not passed for this version of the spec and checkout (%s): run `orch gate %s`, fix what it reports, and rerun (or pass --skip-gate with the user's agreement)", reason, pos[0])
+		}
 	}
 
 	baseBranch := s.cfg.BaseBranch

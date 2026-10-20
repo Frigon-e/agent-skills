@@ -25,12 +25,7 @@ type benchSubjectMove struct {
 	Basis    string    `json:"basis"`
 	Evidence string    `json:"evidence"`
 }
-type benchRepo struct {
-	Name      string `json:"name"`
-	Path      string `json:"path"`
-	Origin    string `json:"origin"`
-	CommonDir string `json:"common_dir"`
-}
+type benchRepo = repositoryIdentity
 type benchDirty struct {
 	State      string   `json:"state"`
 	Untracked  []string `json:"untracked"`
@@ -130,25 +125,7 @@ func benchMakeItemset(origin, spec string, items []gateItem) benchItemset {
 	b, _ := benchCanonicalItems(items)
 	return benchItemset{SchemaVersion: 1, ID: benchHash(b)[:16], Origin: origin, Spec: spec, Items: items}
 }
-func benchSubjectID(s benchSubject) string {
-	id := "s-" + s.Spec.Hash + "-" + orDefault(benchPrefix(s.Commit, 7), "nocommit")
-	if s.Dirty.State == "modified" {
-		id += "-dirty"
-	}
-	dirty := s.Dirty
-	// Patch storage details are added after capture, not part of its identity.
-	dirty.DiffBlob, dirty.DiffBytes = "", 0
-	dirty.Untracked = append([]string{}, dirty.Untracked...)
-	dirty.Modified = append([]string{}, dirty.Modified...)
-	sort.Strings(dirty.Untracked)
-	sort.Strings(dirty.Modified)
-	facts, _ := json.Marshal(struct {
-		Repo                        benchRepo
-		Dirty                       benchDirty
-		CommitBasis, CommitEvidence string
-	}{s.Repo, dirty, s.CommitBasis, s.CommitEvidence})
-	return id + "-" + benchHash(facts)[:6]
-}
+func benchSubjectID(s benchSubject) string { return subjectBenchID(s) }
 func benchDescribe(s benchSubject, v *benchSpecVersion) string {
 	commit := "commit not recorded"
 	if s.Commit != "" {
@@ -192,25 +169,7 @@ func benchDescribe(s benchSubject, v *benchSpecVersion) string {
 	}
 	return fmt.Sprintf("%s %s; %s; %s.", orDefault(s.Repo.Name, "repository unknown"), commit, dirty, spec)
 }
-func benchRepoInfo(code string) benchRepo {
-	r := benchRepo{Path: code}
-	if code == "" {
-		return r
-	}
-	r.Name = filepath.Base(code)
-	r.Origin, _ = git(code, "remote", "get-url", "origin")
-	r.CommonDir, _ = git(code, "rev-parse", "--path-format=absolute", "--git-common-dir")
-	// A linked worktree is its main repository: name it after that, so runs made
-	// in a throwaway worktree compare with runs made in the main checkout.
-	if r.CommonDir != "" {
-		if filepath.Base(r.CommonDir) == ".git" {
-			r.Name = filepath.Base(filepath.Dir(r.CommonDir))
-		} else {
-			r.Name = strings.TrimSuffix(filepath.Base(r.CommonDir), ".git")
-		}
-	}
-	return r
-}
+func benchRepoInfo(code string) benchRepo { return subjectRepoInfo(code) }
 func benchSpecFromText(text, path string, repo benchRepo, now time.Time) (benchSpecVersion, benchItemset) {
 	sp := parseSpec(text)
 	hash := specHash([]byte(text))

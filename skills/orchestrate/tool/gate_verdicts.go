@@ -24,7 +24,7 @@ const retryItemsSchema = `{"packages":[{"id":"","items":[{"item":"<package>#<n>"
 // retryItemsPass asks only for the items a group pass left without a verdict.
 // It is of the same class as the group pass, so it shares the prefix; its
 // text is the packages' text and the checklist of just the missing items.
-func retryItemsPass(key, pkgShared, joined string, ids []string, missing []gateItem, dos *dossierSet) gatePass {
+func retryItemsPass(key, pkgShared, joined string, missing []gateItem, dos *dossierSet) gatePass {
 	seen := map[string]bool{}
 	var pk, mid []string
 	for _, it := range missing {
@@ -45,9 +45,12 @@ func retryItemsPass(key, pkgShared, joined string, ids []string, missing []gateI
 // that are still empty.
 func applyItemsOnly(name string, ids []string, missing []gateItem) func(string, *gateRecord, string, *spec) error {
 	return func(raw string, rec *gateRecord, repo string, sp *spec) error {
-		entries, ok := retryAnswers(raw, ids)
+		entries, ok := retryAnswers(raw)
 		if !ok {
 			return fmt.Errorf("no item verdicts in the reply")
+		}
+		if err := validateEntries(entries, ids, itemMap(missing), true); err != nil {
+			return err
 		}
 		for _, e := range entries {
 			var its []gateItem

@@ -13,32 +13,295 @@ func eq(id int, pkg, text string) enrichedQuestion {
 	return enrichedQuestion{N: id, Q: gateQuestion{Package: pkg, Question: text, Decisive: true}}
 }
 
-func TestDedupeMergesNearDuplicatesAndKeepsDistinctQuestionsApart(t *testing.T) {
+func TestDedupeOnlyExactNormalizedDuplicates(t *testing.T) {
 	items := []enrichedQuestion{
 		eq(1, "api", "Should the refund endpoint return 404 or 410 when the order is already deleted?"),
 		eq(2, "api", "Which table holds the session rows?"),
 		eq(3, "api", "Does the refund endpoint return 404 or 410 when an order was already deleted, and which body does it send?"),
-		// Different wording, same two identifiers: merged by the identifier rule.
 		eq(4, "api", "Where is `settings.Key` resolved against `store/queries.sql` at start-up?"),
 		eq(5, "api", "Is the lookup of `store/queries.sql` through `settings.Key` cached between requests, and for how long?"),
+		eq(6, "api", "Which table\n  holds the session rows?"),
+		eq(7, "other", "Which table holds the session rows?"),
 	}
 	got := dedupeQuestions(items)
-	if len(got) != 3 {
-		t.Fatalf("%d cards, want 3: %+v", len(got), got)
+	if len(got) != 6 {
+		t.Fatalf("%d cards, want 6: %+v", len(got), got)
 	}
-	if got[0].N != 3 || len(got[0].Merged) != 1 || !strings.Contains(got[0].Merged[0], "Should the refund endpoint") {
-		t.Errorf("the longest wording should lead and list the variant: %+v", got[0])
+	for i, n := range []int{1, 2, 3, 4, 5, 7} {
+		if got[i].N != n {
+			t.Errorf("card %d has ID %d, want %d", i, got[i].N, n)
+		}
 	}
-	if got[1].N != 2 || len(got[1].Merged) != 0 {
-		t.Errorf("a distinct question was merged: %+v", got[1])
+	if len(got[1].Merged) != 1 || got[1].Merged[0] != items[5].Q.Question || len(got[1].Members) != 2 || got[1].Members[1].N != 6 {
+		t.Errorf("exact duplicate lost its original text or identity: %+v", got[1])
 	}
-	if got[2].N != 5 || len(got[2].Merged) != 1 {
-		t.Errorf("identifier rule: %+v", got[2])
+	// Negation, word order, case-sensitive identifiers and punctuation are not normalization.
+	for _, q := range []string{"Do not retain `Cache`?", "Do retain `Cache`?", "Do retain `cache`?", "Retain do `cache`?", "Do retain `cache`!"} {
+		items = append(items, eq(len(items)+1, "api", q))
 	}
-	// The same wording in two packages is not merged: each package has its own card.
-	other := []enrichedQuestion{eq(1, "a", "Which table holds the session rows?"), eq(2, "b", "Which table holds the session rows?")}
-	if n := len(dedupeQuestions(other[:1])) + len(dedupeQuestions(other[1:])); n != 2 {
-		t.Errorf("per-package dedupe: %d", n)
+	if got := dedupeQuestions(items); len(got) != 11 {
+		t.Errorf("different decisions collapsed: %+v", got)
+	}
+	answered := eq(8, "api", items[0].Q.Question)
+	answered.Q.AnsweredBy = "spec.md:3"
+	if got := dedupeQuestions([]enrichedQuestion{items[0], answered}); len(got) != 2 {
+		t.Errorf("different answer states collapsed: %+v", got)
+	}
+}
+
+func TestDedupeKeepsMostRestrictiveMemberAuthority(t *testing.T) {
+	items := []enrichedQuestion{eq(1, "api", "Which test layout?"), eq(2, "api", "Which test layout?")}
+	items[0].Tag, items[0].Why = "lead-may-decide", "delegated"
+	items[1].Tag, items[1].Why = "owner", "declared owner"
+	got := dedupeQuestions(items)
+	if len(got) != 1 || got[0].Tag != "owner" || len(got[0].Members) != 2 || got[0].Members[0].Tag != "lead-may-decide" {
+		t.Fatalf("member authority lost: %+v", got)
+	}
+	wantContains(t, enrichedCard(got[0], "spec.md"), "q1-api", "q2-api", "settle-by-lead", "owner")
+}
+
+// Exercise the gate, card reader and enrich rerun as an orchestrator uses them.
+func TestGateEnrichQuestionAuthorityAndAnswerHistory(t *testing.T) {
+	for _, path := range []string{"src/cache.py", "src/cache.ts"} {
+		t.Run(filepath.Ext(path), func(t *testing.T) {
+			h := setup(t)
+			src := strings.Replace(threePkgSpec(), "May decide: names", "May decide: names, test layout", 1)
+			src = strings.Replace(src, "One queue per panel.", "One queue per panel. `"+path+"` uses `cache_days`.", 1)
+			if err := os.MkdirAll(filepath.Join(h.repo, "src"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			body := "export const cache_days = 30;\n"
+			if filepath.Ext(path) == ".py" {
+				body = "cache_days = 30\n"
+			}
+			writeFiles(t, h.repo, map[string]string{path: body})
+			h.commitSpec(src)
+			bin, _, _ := fakeJbcontext(t)
+			t.Setenv("ORCH_JBCONTEXT", bin)
+			qs := []gateQuestion{
+				{Question: "What retention applies to `" + path + "` and `cache_days`?", Decisive: true},
+				{Question: "Which test layout should verify `" + path + "` and `cache_days` using deterministic fixtures and isolated clocks?", Decisive: true},
+			}
+			reply, err := json.Marshal(map[string]any{
+				"id": "api", "will_change": []string{}, "claims": []any{}, "reuse": []any{}, "questions": qs,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			h.fakePi(gatePasses(map[string]string{"package-api": string(reply)}))
+			code, out := h.run("gate", "spec.md")
+			if code != 1 || !strings.Contains(out, "questions: 2 need a decision") {
+				t.Fatalf("gate did not accept both unresolved questions (exit %d): %s", code, out)
+			}
+			gdir := filepath.Join(runRoot(h.repo), "gate", specHash(mustRead(t, filepath.Join(h.repo, "spec.md"))))
+			qdir := filepath.Join(gdir, "questions")
+			owner := string(mustRead(t, filepath.Join(qdir, "q1-api.md")))
+			lead := string(mustRead(t, filepath.Join(qdir, "q2-api.md")))
+			wantContains(t, owner, "route: owner", "## The spec may already answer this", qs[0].Question)
+			wantContains(t, lead, "route: lead-may-decide", "settle-by-lead", qs[1].Question)
+			for _, card := range []string{owner, lead} {
+				if strings.Contains(card, "No file in the repo answers") || strings.Contains(card, "no answer exists") {
+					t.Errorf("unsupported absence claim: %s", card)
+				}
+			}
+			index := string(mustRead(t, filepath.Join(qdir, "INDEX.md")))
+			wantContains(t, index, "| q1-api | owner |", "| q2-api | lead-may-decide |", "settle-by-lead")
+			// The existing ask contract still renders every root card, including delegated cards.
+			wantContains(t, h.must("ask", "--cards", qdir), "questions: 2")
+			before := string(mustRead(t, filepath.Join(gdir, "gate.json")))
+			answered := filepath.Join(qdir, "answered", "q1-api.md")
+			if err := os.MkdirAll(filepath.Dir(answered), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			writeFiles(t, qdir, map[string]string{"answered/q1-api.md": owner + "\n## Answer\nKeep for 30 days.\n"})
+			if err := os.Remove(filepath.Join(qdir, "q1-api.md")); err != nil {
+				t.Fatal(err)
+			}
+			h.must("gate", "enrich", "spec.md")
+			wantContains(t, string(mustRead(t, answered)), "Keep for 30 days.", qs[0].Question)
+			if exists(filepath.Join(qdir, "q1-api.md")) {
+				t.Error("enrichment reopened the answered question")
+			}
+			wantContains(t, string(mustRead(t, filepath.Join(qdir, "q2-api.md"))), qs[1].Question, "route: lead-may-decide")
+			wantContains(t, h.must("ask", "--cards", qdir), "questions: 1")
+			if after := string(mustRead(t, filepath.Join(gdir, "gate.json"))); after != before {
+				t.Error("enrichment changed the original questions or answer evidence in gate.json")
+			}
+		})
+	}
+}
+
+func TestEnrichKeepsLegacyCardIDsAndRecordedAnswers(t *testing.T) {
+	t.Setenv("ORCH_JBCONTEXT", filepath.Join(t.TempDir(), "absent"))
+	qs := []gateQuestion{
+		{Package: "api", Question: "Already answered in the spec?", Decisive: true, AnsweredBy: "spec.md:3"},
+		{Package: "api", Question: "How long is retention?", Decisive: true},
+		{Package: "api", Question: "Where should the test layout put fixtures?", Decisive: true},
+	}
+	dir, code, src, sp := enrichFixture(t, qs)
+	rec := gateRecord{Questions: qs}
+	// Initial/legacy gate output numbers only unresolved questions.
+	if err := writeGate(dir, &rec); err != nil {
+		t.Fatal(err)
+	}
+	sp.sections["Authority"] = "May decide: test layout"
+	res, err := enrichGate(dir, code, src, "spec.md", sp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Items) != 2 || res.Items[0].N != 1 || res.Items[1].N != 2 {
+		t.Fatalf("legacy card filenames changed: %+v", res.Items)
+	}
+	qs[1].AnsweredBy = "spec.md:7"
+	b, err := json.Marshal(rec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeFiles(t, dir, map[string]string{"gate.json": string(b)})
+	res, err = enrichGate(dir, code, src, "spec.md", sp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Items) != 1 || res.Items[0].N != 2 || res.Items[0].Tag != "lead-may-decide" || len(res.Answered) != 2 {
+		t.Fatalf("one recorded answer renumbered or closed another question: %+v", res)
+	}
+	qdir := filepath.Join(dir, "questions")
+	if exists(filepath.Join(qdir, "q1-api.md")) {
+		t.Error("recorded answer stayed open")
+	}
+	wantContains(t, string(mustRead(t, filepath.Join(qdir, "q2-api.md"))), qs[2].Question)
+	wantContains(t, string(mustRead(t, filepath.Join(qdir, "INDEX.md"))), qs[0].AnsweredBy, qs[1].AnsweredBy, "| q2-api | lead-may-decide |")
+	if got := string(mustRead(t, filepath.Join(dir, "gate.json"))); got != string(b) {
+		t.Error("enrichment rewrote answer history")
+	}
+}
+
+func TestEnrichExactDuplicatesKeepIndependentAnswerState(t *testing.T) {
+	t.Setenv("ORCH_JBCONTEXT", filepath.Join(t.TempDir(), "absent"))
+	qs := []gateQuestion{
+		{Package: "api", Question: "How long is retention?", Decisive: true},
+		{Package: "api", Question: "How long\n  is retention?", Decisive: true},
+	}
+	dir, code, src, sp := enrichFixture(t, qs)
+	res, err := enrichGate(dir, code, src, "spec.md", sp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Cards != 1 || len(res.Items[0].Members) != 2 {
+		t.Fatalf("exact duplicate: %+v", res)
+	}
+	qdir := filepath.Join(dir, "questions")
+	card := string(mustRead(t, filepath.Join(qdir, "q1-api.md")))
+	wantContains(t, card, "q1-api", "q2-api", qs[1].Question)
+	wantContains(t, string(mustRead(t, filepath.Join(qdir, "INDEX.md"))), "Member q2-api [owner; settle-by-owner]")
+	if err := os.MkdirAll(filepath.Join(qdir, "answered"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	answered := filepath.Join(qdir, "answered", "q1-api.md")
+	if err := os.Rename(filepath.Join(qdir, "q1-api.md"), answered); err != nil {
+		t.Fatal(err)
+	}
+	res, err = enrichGate(dir, code, src, "spec.md", sp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Cards != 1 || res.Items[0].N != 2 || len(res.Answered) != 1 {
+		t.Fatalf("member answer leaked: %+v", res)
+	}
+	if got := string(mustRead(t, answered)); got != card {
+		t.Error("archived original was rewritten")
+	}
+	wantContains(t, string(mustRead(t, filepath.Join(qdir, "q2-api.md"))), "route: owner")
+}
+
+func TestEnrichRecordedDuplicateAnswerKeepsSurvivorIDAcrossReruns(t *testing.T) {
+	t.Setenv("ORCH_JBCONTEXT", filepath.Join(t.TempDir(), "absent"))
+	qs := []gateQuestion{
+		{Package: "api", Question: "How long is retention?", Decisive: true},
+		{Package: "api", Question: "How long is retention?", Decisive: true},
+	}
+	dir, code, src, sp := enrichFixture(t, qs)
+	if _, err := enrichGate(dir, code, src, "spec.md", sp); err != nil {
+		t.Fatal(err)
+	}
+	qs[0].AnsweredBy = "spec.md:8"
+	b, err := json.Marshal(gateRecord{Questions: qs})
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeFiles(t, dir, map[string]string{"gate.json": string(b)})
+	for i := 0; i < 3; i++ {
+		res, err := enrichGate(dir, code, src, "spec.md", sp)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(res.Items) != 1 || res.Items[0].N != 2 || res.Items[0].Record != 2 || len(res.Answered) != 1 || res.Answered[0].N != 1 {
+			t.Fatalf("rerun %d changed member identity/state: %+v", i, res)
+		}
+	}
+	wantContains(t, string(mustRead(t, filepath.Join(dir, "questions", "answered", "q1-api.md"))), "gate-question: 1", "## Answer evidence\n"+qs[0].AnsweredBy)
+	wantContains(t, string(mustRead(t, filepath.Join(dir, "questions", "q2-api.md"))), "gate-question: 2")
+}
+
+func TestEnrichArchiveConflictPreservesBothOriginalCards(t *testing.T) {
+	t.Setenv("ORCH_JBCONTEXT", filepath.Join(t.TempDir(), "absent"))
+	qs := []gateQuestion{{Package: "api", Question: "How long is retention?", Decisive: true}}
+	dir, code, src, sp := enrichFixture(t, qs)
+	if _, err := enrichGate(dir, code, src, "spec.md", sp); err != nil {
+		t.Fatal(err)
+	}
+	qdir := filepath.Join(dir, "questions")
+	original := string(mustRead(t, filepath.Join(qdir, "q1-api.md")))
+	if err := os.MkdirAll(filepath.Join(qdir, "answered"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	legacy := "---\nquestion: An unrelated old question?\n---\n## Answer\nKeep this history.\n"
+	writeFiles(t, qdir, map[string]string{"answered/q1-api.md": legacy})
+	qs[0].AnsweredBy = "spec.md:9"
+	b, err := json.Marshal(gateRecord{Questions: qs})
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeFiles(t, dir, map[string]string{"gate.json": string(b)})
+	if _, err := enrichGate(dir, code, src, "spec.md", sp); err == nil || !strings.Contains(err.Error(), "different question identity") {
+		t.Fatalf("archive collision: %v", err)
+	}
+	if got := string(mustRead(t, filepath.Join(qdir, "answered", "q1-api.md"))); got != legacy {
+		t.Error("existing archive overwritten")
+	}
+	if got := string(mustRead(t, filepath.Join(qdir, "q1-api.md"))); got != original {
+		t.Error("original card deleted on archive conflict")
+	}
+}
+
+func TestEnrichInitialCardDoesNotClaimAbsence(t *testing.T) {
+	q := gateQuestion{Package: "api", Question: "How long is retention?", Decisive: true}
+	card := gateQuestionCard(q)
+	wantContains(t, card, "route: owner", "authority: owner", "action: settle-by-owner", "review reported this question as unresolved")
+	if strings.Contains(card, "No file in the repo answers") || strings.Contains(card, "no answer exists") {
+		t.Errorf("unsupported initial-card claim: %s", card)
+	}
+}
+
+func TestEnrichLegacyMergedArchiveDoesNotAnswerMembers(t *testing.T) {
+	t.Setenv("ORCH_JBCONTEXT", filepath.Join(t.TempDir(), "absent"))
+	qs := fixtureQuestions()[:3]
+	dir, code, src, sp := enrichFixture(t, qs)
+	qdir := filepath.Join(dir, "questions")
+	if err := os.MkdirAll(filepath.Join(qdir, "answered"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	legacy := "---\nquestion: " + qs[2].Question + " (+1 similar)\n---\n## Answer\nUse 404.\n"
+	writeFiles(t, qdir, map[string]string{"answered/q3-api.md": legacy})
+	res, err := enrichGate(dir, code, src, "spec.md", sp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Cards != 3 || len(res.Answered) != 0 {
+		t.Fatalf("ambiguous merged answer closed a member: %+v", res)
+	}
+	if got := string(mustRead(t, filepath.Join(qdir, "answered", "q3-api.md"))); got != legacy {
+		t.Error("legacy answer history lost")
 	}
 }
 
@@ -169,28 +432,26 @@ func TestEnrichRewritesCardsWithTagsHintsAndAnIndex(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res.Total != 4 || res.Cards != 3 || res.Owner != 1 || res.Unclear != 2 || res.CodeHits != 3 || len(res.Minor) != 1 {
+	if res.Total != 4 || res.Cards != 4 || res.Owner != 2 || res.Unclear != 2 || res.CodeHits != 4 || len(res.Minor) != 1 {
 		t.Fatalf("result = %+v", res)
 	}
-	wantSummary := "4 -> 3 after merging; owner 1, lead-may-decide 0, unclear 2; spec hints 0; code hits 3; symbol facts 0"
+	wantSummary := "4 -> 4 after merging; owner 2, lead-may-decide 0, unclear 2; spec hints 0; code hits 4; symbol facts 0"
 	if res.summary() != wantSummary {
 		t.Errorf("summary %q, want %q", res.summary(), wantSummary)
 	}
 
 	qdir := filepath.Join(dir, "questions")
 	entries, _ := filepath.Glob(filepath.Join(qdir, "*.md"))
-	if len(entries) != 4 { // 3 cards and INDEX.md; the merged duplicate has no card of its own
+	if len(entries) != 5 { // Four independent cards and INDEX.md.
 		t.Fatalf("files = %v", entries)
 	}
 	card := string(mustRead(t, filepath.Join(qdir, "q3-api.md")))
-	wantContains(t, card, "(+1 similar)", "## Merged similar questions", "Should the refund endpoint", "## Tag\nowner (mentions refund)", "## Possibly relevant code",
+	wantContains(t, card, "Does the refund endpoint", "## Tag\nowner (mentions refund)", "## Possibly relevant code",
 		"- `internal/store.go:3-10`", "func Put() {}")
 	if strings.Contains(card, "spec text") || strings.Contains(card, "line7") {
 		t.Errorf("a spec hit or more than %d snippet lines leaked:\n%s", enrichSnippet, card)
 	}
-	if exists(filepath.Join(qdir, "q1-api.md")) {
-		t.Error("the merged duplicate kept its own card")
-	}
+	wantContains(t, string(mustRead(t, filepath.Join(qdir, "q1-api.md"))), "Should the refund endpoint", "route: owner")
 	for _, f := range entries {
 		if filepath.Base(f) == "INDEX.md" {
 			continue
@@ -201,7 +462,7 @@ func TestEnrichRewritesCardsWithTagsHintsAndAnIndex(t *testing.T) {
 		}
 	}
 	index := string(mustRead(t, filepath.Join(qdir, "INDEX.md")))
-	wantContains(t, index, wantSummary, "## api", "| q3-api | owner |", "(+1 similar)", "## Minor open questions", "store [unclear]: Minor thing about names?")
+	wantContains(t, index, wantSummary, "## api", "| q1-api | owner |", "| q3-api | owner |", "## Minor open questions", "store [unclear]: Minor thing about names?")
 	wantContains(t, string(mustRead(t, filepath.Join(dir, "report.md"))), "## Question cards\n"+wantSummary)
 
 	// A rerun reads the same input, stacks nothing, and the cache avoids new searches.
@@ -215,8 +476,8 @@ func TestEnrichRewritesCardsWithTagsHintsAndAnIndex(t *testing.T) {
 	if n := strings.Count(string(mustRead(t, filepath.Join(dir, "report.md"))), "## Question cards"); n != 1 {
 		t.Errorf("report has %d question sections", n)
 	}
-	if n := strings.Count(before, "search --limit 3 --json-output"); n != 3 {
-		t.Errorf("%d searches, want one per card (3)", n)
+	if n := strings.Count(before, "search --limit 3 --json-output"); n != 4 {
+		t.Errorf("%d searches, want one per card (4)", n)
 	}
 }
 
@@ -263,7 +524,7 @@ func TestGateEnrichesItsCardsAndAskStillParsesThem(t *testing.T) {
 	h.commitSpec(threePkgSpec())
 	bin, _, _ := fakeJbcontext(t)
 	t.Setenv("ORCH_JBCONTEXT", bin)
-	h.fakePi(gatePasses(map[string]string{"package-api": `{"id":"api","questions":[{"question":"What refund policy applies to a deleted order?","answered_by":"","changes_result":true}]}`}))
+	h.fakePi(gatePasses(map[string]string{"package-api": `{"id":"api","will_change":[],"claims":[],"reuse":[],"questions":[{"question":"What refund policy applies to a deleted order?","answered_by":"","changes_result":true}]}`}))
 	code, out := h.run("gate", "spec.md")
 	if code != 1 {
 		t.Fatalf("exit %d: %s", code, out)

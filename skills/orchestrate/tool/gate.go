@@ -73,6 +73,7 @@ type gateFinding struct {
 	Why      string `json:"why,omitempty"`
 	Source   string `json:"source"`
 	Verified bool   `json:"verified"`
+	Support  string `json:"support,omitempty"` // structural ownership is proven by the spec graph
 }
 
 type gateQuestion struct {
@@ -87,17 +88,21 @@ type gateQuestion struct {
 func (q gateQuestion) blocks() bool { return q.Decisive && q.AnsweredBy == "" }
 
 type gateRecord struct {
+	Subject           *gateSubject          `json:"subject,omitempty"`
+	ReviewPolicy      *gateReviewPolicy     `json:"review_policy,omitempty"`
+	SubjectStale      []string              `json:"subject_stale,omitempty"`
 	BenchBuild        benchBuild            `json:"bench_build,omitempty"`
 	BenchInputs       benchInputs           `json:"bench_inputs,omitempty"`
 	BenchConfig       benchConfig           `json:"bench_config,omitempty"`
 	Spec              string                `json:"spec"`
 	Hash              string                `json:"hash"`
 	At                int64                 `json:"at"`
-	Status            string                `json:"status"` // pass, fail or unverified
+	Status            string                `json:"status"`            // pass, fail or unverified
+	Reasons           []string              `json:"reasons,omitempty"` // incomplete review or execution failures
 	CtxTool           string                `json:"ctx_tool"`
 	ContextFiles      string                `json:"context_files"`
 	CtxProfile        string                `json:"ctx_profile,omitempty"` // a named orch ctx tuning, empty for the default
-	CtxShell          string                `json:"ctx_shell,omitempty"`   // "ctx-only" when the pass shell was limited to orch ctx
+	CtxShell          string                `json:"ctx_shell,omitempty"`   // effective shell policy: open or ctx-only
 	TreeChanged       []string              `json:"tree_changed,omitempty"`
 	TreeChangedPasses []string              `json:"tree_changed_passes,omitempty"`
 	TreeCheckError    string                `json:"tree_check_error,omitempty"`
@@ -279,14 +284,11 @@ func specHash(src []byte) string {
 
 func gateDir(root, hash string) string { return filepath.Join(root, "gate", hash) }
 
-// gatePassed reports whether the gate passed for exactly this spec text.
-func gatePassed(root string, src []byte) bool {
-	b, err := os.ReadFile(filepath.Join(gateDir(root, specHash(src)), "gate.json"))
-	if err != nil {
-		return false
-	}
-	var r gateRecord
-	return json.Unmarshal(b, &r) == nil && r.Status == gateStatePass
+// gatePassed reports whether approval is bound to this exact current subject.
+// The short spec hash is a storage locator only, never approval identity.
+func gatePassed(root, code string, src []byte) bool {
+	passed, _ := gateApproval(root, code, src)
+	return passed
 }
 
 var (
@@ -945,7 +947,7 @@ func buildGatePasses(code, src, rel string, sp *spec, groups map[string][]string
 			p.items = gitems
 			if len(gitems) > 0 {
 				p.retry = func(missing []gateItem) gatePass {
-					return retryItemsPass(key, pkgShared, joined, ids, missing, dos)
+					return retryItemsPass(key, pkgShared, joined, missing, dos)
 				}
 			}
 			return p
@@ -1194,9 +1196,11 @@ func cmdGate(a *app, args []string) error {
 	}
 	rec := &gateRecord{Spec: pos[0], Hash: hash, At: a.now().Unix(), PassErrors: map[string]string{}, PassSeconds: map[string]int{}, PassKept: map[string]string{}, PassTokens: map[string]passTokens{}, Groups: map[string][]string{},
 		Dossier: opts.dossier, Cache: cacheName, SpecRel: rel, CtxTool: onOff(opts.ctxTool), ContextFiles: onOff(opts.contextFiles)}
+	rec.CtxShell = "open"
 	if opts.ctxOnly {
 		rec.CtxShell = "ctx-only"
 	}
+	rec.ReviewPolicy = &gateReviewPolicy{Version: gateReviewPolicyVersion, CtxTool: rec.CtxTool, ContextFiles: rec.ContextFiles, CtxShell: rec.CtxShell, CtxProfile: opts.ctxProfile, Dossier: opts.dossier, Verdicts: opts.verdicts}
 	rec.CtxProfile = opts.ctxProfile
 	rec.BenchBuild = benchBuildNow()
 	v := opts.verdicts
@@ -1215,6 +1219,10 @@ func cmdGate(a *app, args []string) error {
 	if opts.guard != nil {
 		stamp = opts.guard.before
 		rec.BenchInputs.Commit = strings.TrimSpace(stamp.head)
+		rec.Subject, err = gateSubjectFromStamp(code, []byte(src), stamp)
+		if err != nil {
+			guardErr = err
+		}
 	}
 	if e := benchWriteGateSubject(runDir, code, filepath.Join(code, rel), src, a.now(), stamp, guardErr); e != nil {
 		rec.Notes = append(rec.Notes, "subject capture: "+e.Error())
@@ -1322,6 +1330,7 @@ func cmdGate(a *app, args []string) error {
 	if opts.guard != nil {
 		opts.guard.finish(rec)
 	}
+	finishGateSubject(rec, code, filepath.Join(code, rel))
 	blockers, unanswered := 0, 0
 	for _, f := range rec.Findings {
 		if f.Verified && f.Severity == "blocker" {
@@ -1334,7 +1343,7 @@ func cmdGate(a *app, args []string) error {
 		}
 	}
 	switch {
-	case len(rec.TreeChanged) > 0 || rec.TreeCheckError != "":
+	case len(rec.SubjectStale) > 0, len(rec.TreeChanged) > 0 || rec.TreeCheckError != "":
 		rec.Status = "unverified"
 	case experiment:
 		rec.Status = "experiment"
@@ -1346,6 +1355,16 @@ func cmdGate(a *app, args []string) error {
 		rec.Status = "unverified"
 	default:
 		rec.Status = gateStatePass
+	}
+	// finish also sets unverified on checkout failure. Preserve its refusal
+	// here and expose precise execution/coverage failures additively.
+	var failedPasses []string
+	for name := range rec.PassErrors {
+		failedPasses = append(failedPasses, name)
+	}
+	sort.Strings(failedPasses)
+	for _, name := range failedPasses {
+		rec.Reasons = append(rec.Reasons, name+": "+rec.PassErrors[name])
 	}
 	if err := writeGate(runDir, rec); err != nil {
 		return err
@@ -1511,8 +1530,9 @@ func runGatePasses(dir, code, model string, passes []gatePass, rec *gateRecord, 
 				if opts.guard.ctx.Err() != nil {
 					return
 				}
+				passCtx, cancelPass := context.WithTimeout(opts.guard.ctx, gateTimeout)
 				run1 := func(q gatePass) (string, string, error) {
-					q.ctxTool, q.ctxOnly, q.ctxProfile, q.contextFiles, q.ctx = opts.ctxTool, opts.ctxOnly, opts.ctxProfile, opts.contextFiles, opts.guard.ctx
+					q.ctxTool, q.ctxOnly, q.ctxProfile, q.contextFiles, q.ctx = opts.ctxTool, opts.ctxOnly, opts.ctxProfile, opts.contextFiles, passCtx
 					out, hit, used, err := opts.runner.run(func(choice profile) (string, string, error) {
 						return opts.guard.run(q.name, func() (string, string, error) {
 							if pool != nil {
@@ -1542,9 +1562,12 @@ func runGatePasses(dir, code, model string, passes []gatePass, rec *gateRecord, 
 					return out, err
 				}
 				out, err := run()
-				// A group pass that hit the wall cap or stalled gets one fresh try.
+				// Stall, schema repair and coverage share one retry slot and
+				// the original deadline. A second reply never gets a third try.
+				retried := false
 				var limit *passLimit
 				if p.class == "package" && errors.As(err, &limit) {
+					retried = true
 					first := err
 					if out, err = run(); err != nil {
 						err = fmt.Errorf("%v; retried once and failed again: %v", first, err)
@@ -1557,24 +1580,26 @@ func runGatePasses(dir, code, model string, passes []gatePass, rec *gateRecord, 
 					tokens.BudgetHit = hit
 					rec.PassTokens[p.name] = tokens
 				}
+				var schemaErr error
 				if err == nil {
-					err = p.apply(out, rec, code, sp)
+					schemaErr = p.apply(out, rec, code, sp)
+					err = schemaErr
 				}
-				if err != nil {
-					rec.PassErrors[p.name] = err.Error()
-					rec.PassKept[p.name] = keptFiles(dir, p.name, pool != nil)
-				} else {
-					dropPassFiles(dir, p.name, opts.keep)
-				}
-				// Coverage: every item of the checklist needs a verdict. One
-				// retry pass asks only for the ones the reply left out.
-				var missing []gateItem
-				if err == nil && len(p.items) > 0 {
-					missing = rec.missingItems(p.items)
-				}
+				missing := rec.missingItems(p.items)
 				mu.Unlock()
-				if len(missing) > 0 && p.retry != nil {
+				var repair *gatePass
+				if !retried && schemaErr != nil {
+					rp := p
+					rp.name = p.name + "#retry"
+					rp.task += "\nSchema repair: the earlier reply was incomplete or invalid: " + schemaErr.Error() + ". Return a complete replacement matching the schema above, with every required array explicitly present (use [] when empty)."
+					rp.prompt = rp.shared + rp.task
+					repair = &rp
+				} else if !retried && err == nil && len(missing) > 0 && p.retry != nil {
 					rp := p.retry(missing)
+					repair = &rp
+				}
+				if repair != nil {
+					rp := *repair
 					rstart := time.Now()
 					rout, _, rerr := run1(rp)
 					rtokens, rhave := sessionTokens(filepath.Join(dir, "sessions", passFile(rp.name)))
@@ -1587,20 +1612,34 @@ func runGatePasses(dir, code, model string, passes []gatePass, rec *gateRecord, 
 						rerr = rp.apply(rout, rec, code, sp)
 					}
 					if rerr != nil {
-						rec.Notes = append(rec.Notes, fmt.Sprintf("%s: the coverage retry for %d item(s) failed: %v", p.name, len(missing), rerr))
+						err = fmt.Errorf("repair exhausted: %v", rerr)
 						rec.PassKept[rp.name] = keptFiles(dir, rp.name, pool != nil)
 					} else {
+						err = nil
 						dropPassFiles(dir, rp.name, opts.keep)
 					}
 					mu.Unlock()
 				}
-				if len(p.items) > 0 {
-					mu.Lock()
-					if left := rec.missingItems(p.items); len(left) > 0 && err == nil {
-						rec.Notes = append(rec.Notes, fmt.Sprintf("%s: %d items had no verdict", p.name, len(left)))
+				mu.Lock()
+				if left := rec.missingItems(p.items); len(left) > 0 {
+					var ids []string
+					for _, it := range left {
+						ids = append(ids, it.ID)
 					}
-					mu.Unlock()
+					detail := ""
+					if err != nil {
+						detail = "; " + err.Error()
+					}
+					err = fmt.Errorf("incomplete review: %d items had no verdict or unsupported candidates: %s%s", len(left), strings.Join(ids, ", "), detail)
 				}
+				if err != nil {
+					rec.PassErrors[p.name] = err.Error()
+					rec.PassKept[p.name] = keptFiles(dir, p.name, pool != nil)
+				} else {
+					dropPassFiles(dir, p.name, opts.keep)
+				}
+				mu.Unlock()
+				cancelPass()
 			}
 		}(i, pane)
 	}
@@ -1734,12 +1773,8 @@ func salvageEntries(raw string, ids []string) (entries []groupEntry, ok bool) {
 }
 
 // applyGroup decodes one group pass and feeds each package's entry to the
-// scope and question checks. Both only keep what concerns that package, so an
-// entry for a package outside the group is ignored. A package of the group
-// with no entry leaves a pass-level error, so the gate cannot pass without
-// having looked at it; a missing part of an entry is just empty. A reply that
-// is not valid JSON is salvaged where it can be and noted in the report; only
-// one with nothing decodable fails the pass.
+// scope and question checks only after validating the complete response.
+// Salvaged fragments remain diagnostic and cannot establish coverage.
 func applyGroup(key string, ids []string) func(string, *gateRecord, string, *spec) error {
 	return applyGroupItems(key, ids, nil)
 }
@@ -1747,27 +1782,27 @@ func applyGroup(key string, ids []string) func(string, *gateRecord, string, *spe
 // applyGroupItems is applyGroup for a pass with a reuse checklist: it also
 // records the verdict of each item of the packages (items by package id).
 func applyGroupItems(key string, ids []string, items map[string][]gateItem) func(string, *gateRecord, string, *spec) error {
+	if len(items) == 0 {
+		items = nil
+	}
 	return func(raw string, rec *gateRecord, repo string, sp *spec) error {
 		var r struct {
 			Packages []groupEntry `json:"packages"`
 		}
-		if err := extractJSON(raw, &r); err != nil {
-			var ok bool
-			if r.Packages, ok = salvageEntries(raw, ids); !ok {
-				return err
-			}
-			rec.Salvaged = append(rec.Salvaged, key)
-		}
-		in := map[string]bool{}
 		for _, id := range ids {
-			in[id] = false
 			rec.ensureItems(items[id])
 		}
-		for _, e := range r.Packages {
-			if _, ok := in[e.ID]; !ok {
-				continue
+		decodeErr := extractJSON(raw, &r)
+		if decodeErr != nil {
+			var ok bool
+			if r.Packages, ok = salvageEntries(raw, ids); !ok {
+				return decodeErr
 			}
-			in[e.ID] = true
+			rec.Salvaged = append(rec.Salvaged, key)
+		} else if err := validateEntries(r.Packages, ids, items, false); err != nil {
+			return err
+		}
+		for _, e := range r.Packages {
 			scopeFor(e.ID, scopeReply{WillChange: e.WillChange, Claims: e.Claims}, rec, repo, sp)
 			for i := range e.Questions {
 				if e.Questions[i].Package == "" {
@@ -1786,12 +1821,12 @@ func applyGroupItems(key string, ids []string, items map[string][]gateItem) func
 				}
 				rec.Findings = append(rec.Findings, f)
 			}
-			rec.applyVerdicts(key, repo, items[e.ID], e.Items)
-		}
-		for _, id := range ids {
-			if !in[id] {
-				rec.PassErrors[key+": no entry for "+id] = "the reply had no entry for this package"
+			if decodeErr == nil {
+				rec.applyVerdicts(key, repo, items[e.ID], e.Items)
 			}
+		}
+		if decodeErr != nil {
+			return fmt.Errorf("incomplete review: salvaged reply: %w", decodeErr)
 		}
 		return nil
 	}
@@ -1819,16 +1854,16 @@ func scopeFor(only string, r scopeReply, rec *gateRecord, repo string, sp *spec)
 		}
 		// Another package's file is a blocker unless that package builds on this
 		// one: then it wires this package in, and the finding asks it to.
-		sev, note := "concern", ""
+		sev, note, support := "concern", "", ""
 		if o := sp.ownerOf(f); o != nil && o.id != pkg.id {
-			sev, note = "blocker", ", owned by "+o.id
+			sev, note, support = "blocker", ", owned by "+o.id, "structural"
 			if sp.relation(pkg, o) == relDownstream {
 				sev, note = "concern", ", owned by "+o.id+", which uses this package and wires it in: confirm that it does"
 			}
 		}
 		rec.Findings = append(rec.Findings, gateFinding{Severity: sev, Where: "package " + pkg.id,
 			Claim: "the work must change " + f + ", which the package does not own" + note, Evidence: f + ":1", Source: "scope",
-			Verified: evidenceHolds(repo, f+":1")})
+			Support: support, Verified: support == "structural" || evidenceHolds(repo, f+":1")})
 	}
 }
 
@@ -1848,21 +1883,43 @@ func questionsFor(only string, qs []gateQuestion, rec *gateRecord, repo string) 
 func applyFindings(source string) func(string, *gateRecord, string, *spec) error {
 	return func(raw string, rec *gateRecord, repo string, sp *spec) error {
 		var r struct {
-			Findings []gateFinding `json:"findings"`
+			Findings []json.RawMessage `json:"findings"`
 		}
-		if err := extractJSON(raw, &r); err != nil {
-			return err
-		}
-		for _, f := range r.Findings {
-			if f.Severity != "blocker" && f.Severity != "concern" {
-				f.Severity = "concern"
+		decodeErr := extractJSON(raw, &r)
+		if decodeErr != nil {
+			m := regexp.MustCompile(`"findings"\s*:`).FindStringIndex(raw)
+			if m == nil || json.NewDecoder(strings.NewReader(raw[m[1]:])).Decode(&r.Findings) != nil {
+				return decodeErr
 			}
-			f.Source = source
+			rec.Salvaged = append(rec.Salvaged, source)
+		}
+		if r.Findings == nil {
+			return fmt.Errorf("findings must be an explicit array")
+		}
+		var findings []gateFinding
+		for _, entry := range r.Findings {
+			if err := checkReplyObject(entry, map[string]string{"severity": "string", "where": "string", "claim": "string", "evidence": "string", "why?": "string"}); err != nil {
+				return fmt.Errorf("invalid finding: %w", err)
+			}
+			var f gateFinding
+			if err := json.Unmarshal(entry, &f); err != nil {
+				return err
+			}
+			if f.Severity != "blocker" && f.Severity != "concern" {
+				return fmt.Errorf("invalid finding severity %q", f.Severity)
+			}
+			findings = append(findings, f)
+		}
+		for _, f := range findings {
+			f.Source, f.Support = source, ""
 			f.Verified = evidenceHolds(repo, f.Evidence)
 			if !f.Verified {
 				rec.Dropped++
 			}
 			rec.Findings = append(rec.Findings, f)
+		}
+		if decodeErr != nil {
+			return fmt.Errorf("incomplete review: salvaged findings: %w", decodeErr)
 		}
 		return nil
 	}
@@ -1889,8 +1946,7 @@ func writeGate(dir string, rec *gateRecord) error {
 		}
 		n++
 		key := cardKey(n, q.Package)
-		card := fmt.Sprintf("---\nquestion: %s\n---\n## Context\nRaised by the spec gate for package `%s`. No file in the repo answers it.\n",
-			strings.Join(strings.Fields(q.Question), " "), q.Package)
+		card := gateQuestionCard(q)
 		if err := os.WriteFile(filepath.Join(qdir, key+".md"), []byte(card), 0o644); err != nil {
 			return err
 		}
@@ -1927,6 +1983,7 @@ func writeGate(dir string, rec *gateRecord) error {
 		}
 		r.WriteString("\n")
 	}
+	section("Approval reasons", rec.Reasons)
 	section("Deterministic issues", rec.Deterministic)
 	var verified, unverified []string
 	for _, f := range rec.Findings {

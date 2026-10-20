@@ -130,6 +130,15 @@ type itemVerdict struct {
 	Verdict   string  `json:"verdict"`
 	Candidate flexStr `json:"candidate"`
 	Why       string  `json:"why"`
+	fields    map[string]json.RawMessage
+}
+
+func (v *itemVerdict) UnmarshalJSON(b []byte) error {
+	type plain itemVerdict
+	if err := json.Unmarshal(b, (*plain)(v)); err != nil {
+		return err
+	}
+	return json.Unmarshal(b, &v.fields)
 }
 
 // gateItemResult is one item in gate.json: its verdict and where it came from.
@@ -184,7 +193,7 @@ func (r *gateRecord) ensureItems(items []gateItem) {
 // itemFindings turns the verdicts of one package into results and findings.
 // reuse stays a "reuse" finding (a concern); extend is an "extend" finding of
 // severity note that names where the variation goes. An item that already has
-// a verdict is left alone, so a retry only fills gaps.
+// a supported verdict is left alone, so a retry only fills gaps.
 func (r *gateRecord) applyVerdicts(pass, repo string, items []gateItem, vs []itemVerdict) {
 	byID := map[string]itemVerdict{}
 	for _, v := range vs {
@@ -201,10 +210,11 @@ func (r *gateRecord) applyVerdicts(pass, repo string, items []gateItem, vs []ite
 		}
 		for i := range r.Items {
 			res := &r.Items[i]
-			if res.ID != it.ID || res.Verdict != "" {
+			if res.ID != it.ID || res.covered() {
 				continue
 			}
 			res.Verdict, res.Candidate, res.Why, res.Pass = verdict, strings.TrimSpace(string(v.Candidate)), v.Why, pass
+			res.Verified = false
 			if res.Candidate == "null" {
 				res.Candidate = ""
 			}
@@ -226,11 +236,22 @@ func (r *gateRecord) applyVerdicts(pass, repo string, items []gateItem, vs []ite
 	}
 }
 
-// missingItems lists the items of items that have no verdict yet.
+// covered requires a valid candidate for reuse/extend, not just a verdict word.
+func (r gateItemResult) covered() bool {
+	switch r.Verdict {
+	case verdictReuse, verdictExtend:
+		return r.Verified
+	case verdictNew, verdictUnclr:
+		return true
+	}
+	return false
+}
+
+// missingItems lists the items that still need a supported verdict.
 func (r *gateRecord) missingItems(items []gateItem) []gateItem {
 	done := map[string]bool{}
 	for _, res := range r.Items {
-		if res.Verdict != "" {
+		if res.covered() {
 			done[res.ID] = true
 		}
 	}
@@ -251,7 +272,7 @@ func (r *gateRecord) coverageLine() string {
 	n := map[string]int{}
 	none := 0
 	for _, it := range r.Items {
-		if it.Verdict == "" {
+		if !it.covered() {
 			none++
 		} else {
 			n[it.Verdict]++
@@ -266,12 +287,14 @@ type itemsReply struct {
 	Packages []groupEntry `json:"packages"`
 }
 
-// retryAnswers decodes the reply of a coverage retry: items of the packages
-// asked about, salvaged when the reply is not valid JSON.
-func retryAnswers(raw string, ids []string) ([]groupEntry, bool) {
+// retryAnswers decodes a coverage retry; only a complete JSON reply can
+// establish coverage.
+func retryAnswers(raw string) ([]groupEntry, bool) {
 	var r itemsReply
 	if err := extractJSON(raw, &r); err == nil {
 		return r.Packages, true
 	}
-	return salvageEntries(raw, ids)
+	// A fragment can be retained for diagnosis by the group decoder, but
+	// cannot establish review completion or item coverage.
+	return nil, false
 }

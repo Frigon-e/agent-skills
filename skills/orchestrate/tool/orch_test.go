@@ -686,8 +686,8 @@ cat "` + dir + `/$f.json"
 var gateClean = map[string]string{
 	// package answers every package pass; package-api answers the api one, so a
 	// package never reports another package's files.
-	"package":     `{"id":"@ID@","will_change":[],"claims":[{"claim":"store has Put","evidence":"internal/store.go:3"}],"questions":[]}`,
-	"package-api": `{"id":"api","will_change":["internal/api.go"],"claims":[{"claim":"store has Put","evidence":"internal/store.go:3"}],"questions":[{"package":"api","question":"Which table?","answered_by":"internal/store.go:3"}]}`,
+	"package":     `{"id":"@ID@","will_change":[],"claims":[{"claim":"store has Put","evidence":"internal/store.go:3"}],"questions":[],"reuse":[]}`,
+	"package-api": `{"id":"api","will_change":["internal/api.go"],"claims":[{"claim":"store has Put","evidence":"internal/store.go:3"}],"questions":[{"package":"api","question":"Which table?","answered_by":"internal/store.go:3","changes_result":false}],"reuse":[]}`,
 	"adv-a":       `{"findings":[]}`,
 	"adv-b":       `{"findings":[]}`,
 }
@@ -739,7 +739,7 @@ func TestGateQuestionsScopeAndFailures(t *testing.T) {
 	gdir := filepath.Join(filepath.Dir(h.dir("x")), "gate", hash)
 
 	// An unanswered question fails the gate and becomes a card orch ask renders.
-	h.fakePi(gatePasses(map[string]string{"package-api": `{"id":"api","questions":[{"package":"api","question":"Soft or hard delete?","answered_by":"","changes_result":true}]}`}))
+	h.fakePi(gatePasses(map[string]string{"package-api": `{"id":"api","will_change":[],"claims":[],"reuse":[],"questions":[{"package":"api","question":"Soft or hard delete?","answered_by":"","changes_result":true}]}`}))
 	code, out := h.run("gate", "spec.md")
 	if code != 1 {
 		t.Fatalf("an open question passed the gate: %d %s", code, out)
@@ -748,17 +748,17 @@ func TestGateQuestionsScopeAndFailures(t *testing.T) {
 	wantContains(t, h.must("ask", "--cards", filepath.Join(gdir, "questions")), "questions: 1")
 
 	// A question whose answer changes nothing visible does not block.
-	h.fakePi(gatePasses(map[string]string{"package-api": `{"id":"api","questions":[{"package":"api","question":"Where does sub go?","answered_by":"","changes_result":false}]}`}))
+	h.fakePi(gatePasses(map[string]string{"package-api": `{"id":"api","will_change":[],"claims":[],"reuse":[],"questions":[{"package":"api","question":"Where does sub go?","answered_by":"","changes_result":false}]}`}))
 	wantContains(t, h.must("gate", "spec.md"), "gate: pass", "questions: 0 need a decision")
 
 	// An answer that cites a line the repo does not have is no answer.
-	h.fakePi(gatePasses(map[string]string{"package-api": `{"id":"api","questions":[{"package":"api","question":"Which table?","answered_by":"internal/store.go:99","changes_result":true}]}`}))
+	h.fakePi(gatePasses(map[string]string{"package-api": `{"id":"api","will_change":[],"claims":[],"reuse":[],"questions":[{"package":"api","question":"Which table?","answered_by":"internal/store.go:99","changes_result":true}]}`}))
 	if code, out := h.run("gate", "spec.md"); code != 1 || !strings.Contains(out, "questions: 1 need a decision") {
 		t.Fatalf("a fake answer counted: %d %s", code, out)
 	}
 
 	// A package that must change a file another package owns is a blocker.
-	h.fakePi(gatePasses(map[string]string{"package-api": `{"id":"api","will_change":["internal/store.go"],"claims":[]}`}))
+	h.fakePi(gatePasses(map[string]string{"package-api": `{"id":"api","will_change":["internal/store.go"],"claims":[],"questions":[],"reuse":[]}`}))
 	if code, out := h.run("gate", "spec.md"); code != 1 || !strings.Contains(out, "blockers: 1 verified") {
 		t.Fatalf("ownership conflict passed: %d %s", code, out)
 	}
