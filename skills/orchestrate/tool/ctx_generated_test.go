@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -198,7 +199,11 @@ EOF
 esac
 `), 0o755)
 	def := c.must("ctx", "find", "anything")
-	wantContains(t, def, "pay/pay.go", "(+1 in generated; --generated include|only)")
+	wantContains(t, def, "pay/pay.go")
+	result := decodedOutput(t, []byte(def), outputAgent).(map[string]any)["result"].(map[string]any)
+	if result["in_generated"] != float64(1) {
+		t.Fatalf("generated exclusion count changed: %#v", result)
+	}
 	if strings.Contains(def, "schema.d.ts") || strings.Contains(def, "ignored/x.go") {
 		t.Errorf("default find:\n%s", def)
 	}
@@ -254,18 +259,23 @@ func TestConceptTipForNounListsAndWeakAnswers(t *testing.T) {
 func TestFindShowsTheTipOnceAndHelpCarriesTheGuide(t *testing.T) {
 	c := newCtxHarness(t)
 	out := c.must("ctx", "find", "checkout gateway")
-	wantContains(t, out, conceptTipText)
+	result := decodedOutput(t, []byte(out), outputAgent).(map[string]any)["result"].(map[string]any)
+	if result["tip"] != conceptTipText {
+		t.Fatalf("missing concept guide: %#v", result)
+	}
 	if strings.Contains(c.must("ctx", "find", "Code that starts a hosted checkout session for an invoice"), "tip:") {
 		t.Error("the tip was shown for a sentence")
 	}
 	batch := c.must("ctx", "batch", "-q", "find:checkout gateway", "-q", "find:payment gateway", "-q", "text:StartCheckout")
-	if n := strings.Count(batch, conceptTipText); n != 1 {
+	decoded := decodedOutput(t, []byte(batch), outputAgent)
+	if n := strings.Count(fmt.Sprint(decoded), conceptTipText); n != 1 {
 		t.Errorf("tip shown %d times in a batch:\n%s", n, batch)
 	}
 	help := c.must("ctx", "find", "--help")
 	wantContains(t, help, "search one behavior at a time in plain language", "Code that <action> on <entity>, when <trigger>, producing <result>", "Weak: `authentication`", "Better: `Code that checks a user's credentials")
-	if !strings.HasPrefix(help, "guide:") {
-		t.Errorf("the guide is not at the top of the help:\n%s", help)
+	helpInfo := decodedOutput(t, []byte(help), outputAgent).(map[string]any)
+	if guide, ok := helpInfo["query_guide"].(string); !ok || !strings.HasPrefix(guide, "guide:") {
+		t.Errorf("the help omits its dedicated query guide:\n%s", help)
 	}
 	wantContains(t, c.must("ctx"), "describe one behavior in plain language")
 	wantContains(t, planTask([]string{"api"}), "must not contain invented identifiers", "Code that <action> <entity>, when <trigger>, producing <result>")
