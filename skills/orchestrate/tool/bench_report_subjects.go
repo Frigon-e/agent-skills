@@ -106,11 +106,7 @@ func benchSaveReport(a *app, suite string, h benchHistory) error {
 		if e := benchMkdir(dir); e != nil {
 			return e
 		}
-		base := a.now().UTC().Format("20060102-1504") + "-history"
-		name := base + ".md"
-		for i := 2; benchExists(filepath.Join(dir, name)); i++ {
-			name = fmt.Sprintf("%s-%d.md", base, i)
-		}
+		name := "history-" + benchHash([]byte(b.String())) + ".md"
 		if e := benchImmutable(filepath.Join(dir, name), []byte(b.String())); e != nil {
 			return e
 		}
@@ -122,6 +118,15 @@ func benchSaveReport(a *app, suite string, h benchHistory) error {
 		if e != nil && !os.IsNotExist(e) {
 			return e
 		}
-		return benchWrite(path, append(old, []byte(fmt.Sprintf("- [%s](%s)\n", name, name))...))
+		entry := fmt.Sprintf("- [%s](%s)\n", name, name)
+		if strings.Contains(string(old), entry) {
+			return nil
+		}
+		// Retain historical index text and append a stable entry once. Only
+		// this derived index may change; existing report bytes never do.
+		if len(old) > 0 && old[len(old)-1] != '\n' {
+			old = append(old, '\n')
+		}
+		return benchWrite(path, append(old, []byte(entry)...))
 	})
 }

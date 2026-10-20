@@ -240,6 +240,40 @@ func benchArmScoped(r *benchRun, snap string, rec *gateRecord, packages map[stri
 	ad.rows = rows
 	return ad
 }
+
+// Rankings need the same measured population and execution coverage. Permission
+// to display cross-subject data is not permission to declare a winner.
+func benchRankingCompatibility(a, b *benchRun) string {
+	if a.Subject == "" || b.Subject == "" {
+		return "subject unknown"
+	}
+	if a.Subject != b.Subject {
+		return "different subjects"
+	}
+	if a.Itemset == "" || b.Itemset == "" {
+		return "item population unknown"
+	}
+	if a.Itemset != b.Itemset {
+		return "different item populations"
+	}
+	if strings.Join(benchSortedKeys(a.Groups), "\x00") != strings.Join(benchSortedKeys(b.Groups), "\x00") {
+		return "different pass coverage"
+	}
+	for g, x := range a.Groups {
+		px, py := map[string]bool{}, map[string]bool{}
+		for _, p := range x.Packages {
+			px[p] = true
+		}
+		for _, p := range b.Groups[g].Packages {
+			py[p] = true
+		}
+		if strings.Join(benchSortedKeys(px), "\x00") != strings.Join(benchSortedKeys(py), "\x00") {
+			return "different package populations"
+		}
+	}
+	return ""
+}
+
 func benchOnlyGroupKeys(r *benchRun) map[string]bool {
 	out := map[string]bool{}
 	for g := range r.Groups {

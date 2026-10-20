@@ -12,19 +12,77 @@ import (
 	"time"
 )
 
-// Shared by gate compare and bench: a deterministic maximum one-to-one
-// matching of reported locations to the key's locations. Sorting and augmenting
-// paths avoid map iteration order changing scores when ranges overlap.
+// Shared by gate compare and bench. Current scores count keyed behaviors;
+// the explicitly legacy scorer below retains deterministic location matching.
 type locationScore struct {
-	Found     int      `json:"found"`
-	Total     int      `json:"total"`
-	Match     int      `json:"match"`
-	Precision *float64 `json:"precision"`
-	Recall    *float64 `json:"recall"`
-	F1        *float64 `json:"f1"`
+	Found       int      `json:"found"`
+	Total       int      `json:"total"`
+	Match       int      `json:"match"`
+	Precision   *float64 `json:"precision"`
+	Recall      *float64 `json:"recall"`
+	F1          *float64 `json:"f1"`
+	Denominator string   `json:"denominator,omitempty"`
+	Excluded    int      `json:"excluded,omitempty"`
+	Unavailable string   `json:"unavailable,omitempty"`
 }
 
+// scoreLocations is now behavior-based. Evidence ranges are acceptable targets,
+// never identities. Precision conditions on supported answers; recall retains
+// every keyed behavior, including missing and unsupported answers.
 func scoreLocations(a *armData, ref map[string]refEntry, judge, kind string) locationScore {
+	s := locationScore{Denominator: "precision: supported predicted behaviors in mapped key; recall: all keyed behaviors of class; non-key predictions excluded"}
+	issues := referenceIssues(ref)
+	if len(issues) > 0 {
+		s.Unavailable = strings.Join(issues, "; ")
+	}
+	for id, r := range ref {
+		if normVerdict(r.Verdict) == kind {
+			s.Total++
+		}
+		answer := a.answer(judge, id)
+		if !answer.Present || !answer.Valid || !answer.Supported {
+			s.Excluded++
+			continue
+		}
+		if answer.Verdict != kind {
+			continue
+		}
+		s.Found++
+		if normVerdict(r.Verdict) != kind {
+			continue
+		}
+		if kind == verdictNew || kind == verdictUnclr {
+			s.Match++
+			continue
+		}
+		for _, target := range r.targets() {
+			if sameLocation(answer.Candidate, target) {
+				s.Match++
+				break
+			}
+		}
+	}
+	if s.Unavailable != "" {
+		return s
+	}
+	if s.Found > 0 {
+		v := float64(s.Match) / float64(s.Found)
+		s.Precision = &v
+	}
+	if s.Total > 0 {
+		v := float64(s.Match) / float64(s.Total)
+		s.Recall = &v
+	}
+	if s.Found+s.Total > 0 {
+		v := 2 * float64(s.Match) / float64(s.Found+s.Total)
+		s.F1 = &v
+	}
+	return s
+}
+
+// Historical range-overlap heuristics are retained only as explicitly legacy
+// output. They neither establish behavior accuracy nor participate in rankings.
+func scoreLegacyLocations(a *armData, ref map[string]refEntry, judge, kind string) locationScore {
 	pos := a.locations[judge][kind]
 	targets := map[string]bool{}
 	for _, r := range ref {
@@ -48,7 +106,7 @@ func scoreLocations(a *armData, ref map[string]refEntry, judge, kind string) loc
 		}
 		return false
 	}
-	s := locationScore{Found: len(ps), Total: len(ts)}
+	s := locationScore{Found: len(ps), Total: len(ts), Denominator: "legacy unique locations, not behavior identities"}
 	for _, p := range ps {
 		if match(p, map[string]bool{}) {
 			s.Match++
@@ -247,7 +305,11 @@ func benchComparison(suite string, s benchSuite, runs []*benchRun, base *benchRu
 	}
 	for _, r := range runs {
 		t.Runs = append(t.Runs, r.Label)
+		if reason := benchRankingCompatibility(base, r); reason != "" {
+			t.Notes = append(t.Notes, r.Label+": no comparative ranking ("+reason+")")
+		}
 	}
+	t.Notes = append(t.Notes, "Performance denominators: printed groups/passes only; wall clock is full-run elapsed time. Quality denominators: keyed behaviors in those packages, not distinct ranges. Missing/invalid/unsupported answers remain in coverage; conditional accuracy excludes them. Legacy location heuristics are labeled and excluded from rankings.")
 	add := func(name, metric string, values []string, nums []*float64, baseline *float64) {
 		any := false
 		for _, v := range values {
@@ -265,7 +327,11 @@ func benchComparison(suite string, s benchSuite, runs []*benchRun, base *benchRu
 				if i < len(nums) {
 					v = nums[i]
 				}
-				row.Changes = append(row.Changes, r.Label+": "+benchRatio(baseline, v, metric))
+				change := benchRatio(baseline, v, metric)
+				if reason := benchRankingCompatibility(base, r); reason != "" {
+					change = "not comparable: " + reason
+				}
+				row.Changes = append(row.Changes, r.Label+": "+change)
 			}
 		}
 		t.Rows = append(t.Rows, row)
@@ -395,9 +461,21 @@ func benchComparison(suite string, s benchSuite, runs []*benchRun, base *benchRu
 			}
 			vs = append(vs, v)
 		}
-		add(field, field, vs, nil, nil)
+		name := field
+		if field != "ctx_tool" && field != "runner" {
+			name += " (whole recorded run)"
+		}
+		add(name, field, vs, nil, nil)
 	}
 	if key != nil {
+		t.Notes = append(t.Notes, "New scores: "+benchScorerSchema+" / "+benchScorerProfile+" recomputed read-only; original recorded scores below remain legacy evidence, not current approval.")
+		for _, class := range []string{"duplicate", "variation_site", "none", "unknown"} {
+			var vs []string
+			for _, r := range runs {
+				vs = append(vs, benchOriginalScoreText(r, key.ID, class))
+			}
+			add("old recorded "+class+" score (legacy, unversioned)", class, vs, nil, nil)
+		}
 		scores := make([]benchScore, len(runs))
 		for i, r := range runs {
 			scoped := *r
@@ -417,25 +495,29 @@ func benchComparison(suite string, s benchSuite, runs []*benchRun, base *benchRu
 				t.Notes = append(t.Notes, r.Label+": "+v.ItemNote)
 			}
 		}
-		for _, class := range []string{"duplicate", "variation_site"} {
-			for _, metric := range []string{"found / total", "precision", "recall", "F1"} {
+		for _, class := range []string{"duplicate", "variation_site", "none", "unknown"} {
+			for _, metric := range []string{"supported found / key behaviors", "precision", "recall", "F1"} {
 				var vs []string
 				for _, score := range scores {
 					c, known := score.Classes[class]
-					if !known {
-						vs = append(vs, "not recorded")
+					if !known || c.Unavailable != "" {
+						v := "not recorded"
+						if score.Unavailable != "" {
+							v = "unavailable (see notes)"
+						}
+						vs = append(vs, v)
 						continue
 					}
 					v := "not recorded"
 					switch metric {
-					case "found / total":
-						v = fmt.Sprintf("%d / %d (%d matched)", c.Found, c.Total, c.Match)
+					case "supported found / key behaviors":
+						v = fmt.Sprintf("%d / %d (%d matched; %d missing/invalid/unsupported excluded from precision)", c.Found, c.Total, c.Match, c.Excluded)
 					case "precision":
-						v = benchPercent(c.Precision)
+						v = fmt.Sprintf("%s (%d/%d supported predictions; non-key/missing/invalid/unsupported excluded)", benchPercent(c.Precision), c.Match, c.Found)
 					case "recall":
-						v = benchPercent(c.Recall)
+						v = fmt.Sprintf("%s (%d/%d all keyed behaviors of class)", benchPercent(c.Recall), c.Match, c.Total)
 					case "F1":
-						v = benchPercent(c.F1)
+						v = fmt.Sprintf("%s (2*%d/(%d+%d) supported predictions + keyed behaviors)", benchPercent(c.F1), c.Match, c.Found, c.Total)
 					}
 					vs = append(vs, v)
 				}
@@ -450,26 +532,34 @@ func benchComparison(suite string, s benchSuite, runs []*benchRun, base *benchRu
 					vs = append(vs, "not recorded")
 					continue
 				}
-				v := fmt.Sprintf("%d / %d (%s)", c.Seen, c.Total, pct(c.Seen, c.Total))
-				if c.Hint > 0 {
-					v += fmt.Sprintf(", %d only through an author hint", c.Hint)
-				}
+				v := fmt.Sprintf("rendered %d/%d; retrieved %d/%d; author hint %d/%d; unknown visibility %d/%d; unknown retrieval %d/%d", c.Seen, c.Total, c.Retrieved, c.Total, c.Hint, c.Total, c.Unknown, c.Total, c.RetrievalUnknown, c.Total)
 				vs = append(vs, v)
 			}
-			add(class+" key targets seen by the judges", class, vs, nil, nil)
+			add(class+" key target visibility (all keyed targets)", class, vs, nil, nil)
 		}
 		for _, j := range []string{"group", "decider", "flash"} {
 			var vs []string
 			for _, score := range scores {
 				k, ok := score.KeyAgree[j]
-				if !ok || k.Both == 0 {
+				if !ok {
 					vs = append(vs, "not recorded")
 					continue
 				}
-				vs = append(vs, fmt.Sprintf("%d/%d (%s); targets seen %d/%d (%s), not seen %d/%d (%s)", k.Agree, k.Both, pct(k.Agree, k.Both),
-					k.SeenAgree, k.SeenBoth, pct(k.SeenAgree, k.SeenBoth), k.UnseenAgree, k.UnseenBoth, pct(k.UnseenAgree, k.UnseenBoth)))
+				vs = append(vs, keyAgreeText(k))
 			}
 			add("Agreement with the key ("+j+")", j, vs, nil, nil)
+		}
+		for _, class := range []string{"duplicate", "variation_site"} {
+			var vs []string
+			for _, score := range scores {
+				c, known := score.LegacyClasses[class]
+				if !known {
+					vs = append(vs, "not recorded")
+					continue
+				}
+				vs = append(vs, fmt.Sprintf("%d/%d matched unique locations (legacy precision %s, recall %s; not behavior quality)", c.Match, c.Total, benchPercent(c.Precision), benchPercent(c.Recall)))
+			}
+			add("legacy "+class+" location heuristic", class, vs, nil, nil)
 		}
 		judges := map[string]bool{}
 		for _, score := range scores {
@@ -588,19 +678,24 @@ type benchQuality struct {
 	CostPerDuplicate *float64  `json:"cost_per_duplicate"`
 	CostPerVariation *float64  `json:"cost_per_variation"`
 	Pareto           bool      `json:"pareto"`
+	Eligible         bool      `json:"eligible"`
+	Exclusion        string    `json:"exclusion,omitempty"`
+	Population       []string  `json:"population"`
+	Coverage         keyAgree  `json:"coverage"`
 }
 type benchHistory struct {
-	Suite    string                `json:"suite"`
-	Key      *benchKey             `json:"key"`
-	Headline benchTable            `json:"headline"`
-	Changes  []string              `json:"headline_changes"`
-	Runs     []*benchRun           `json:"runs"`
-	Scores   map[string]benchScore `json:"scores"`
-	Diffs    []benchConfigDiff     `json:"config_diffs"`
-	Lanes    []benchLane           `json:"cost_time"`
-	Quality  []benchQuality        `json:"quality"`
-	Caveats  []string              `json:"caveats"`
-	Subjects []benchSubjectSummary `json:"subjects"`
+	RecordedScoreBasis string                `json:"recorded_score_basis"`
+	Suite              string                `json:"suite"`
+	Key                *benchKey             `json:"key"`
+	Headline           benchTable            `json:"headline"`
+	Changes            []string              `json:"headline_changes"`
+	Runs               []*benchRun           `json:"runs"`
+	Scores             map[string]benchScore `json:"scores"`
+	Diffs              []benchConfigDiff     `json:"config_diffs"`
+	Lanes              []benchLane           `json:"cost_time"`
+	Quality            []benchQuality        `json:"quality"`
+	Caveats            []string              `json:"caveats"`
+	Subjects           []benchSubjectSummary `json:"subjects"`
 }
 
 func benchDiff(a, b *benchRun) benchConfigDiff {
@@ -626,7 +721,7 @@ func benchDiff(a, b *benchRun) benchConfigDiff {
 	return d
 }
 func benchHistoryBuild(suite string, s benchSuite, runs []*benchRun, base *benchRun, key *benchKey) (benchHistory, error) {
-	h := benchHistory{Suite: suite, Key: key, Runs: runs, Scores: map[string]benchScore{}, Subjects: benchHistorySubjects(runs, key)}
+	h := benchHistory{Suite: suite, Key: key, Runs: runs, Scores: map[string]benchScore{}, Subjects: benchHistorySubjects(runs, key), RecordedScoreBasis: "Old runs[].scores are preserved historical originals; unversioned heuristic scores are legacy, not current behavior quality. New scores use " + benchScorerSchema + " / " + benchScorerProfile + "; read-only in-memory computations are in scores."}
 	headlineRuns := []*benchRun{base}
 	if last := runs[len(runs)-1]; last.ID != base.ID {
 		headlineRuns = append(headlineRuns, last)
@@ -714,8 +809,19 @@ func benchHistoryBuild(suite string, s benchSuite, runs []*benchRun, base *bench
 			if score.ItemNote != "" {
 				h.Caveats = append(h.Caveats, r.Label+": "+score.ItemNote)
 			}
-			q := benchQuality{Run: r.ID, Cost: cost, DuplicateMatches: score.Classes["duplicate"].Match, VariationMatches: score.Classes["variation_site"].Match}
-			if cost.USD != nil && cost.Missing == 0 {
+			q := benchQuality{Run: r.ID, Cost: cost, DuplicateMatches: score.Classes["duplicate"].Match, VariationMatches: score.Classes["variation_site"].Match, Population: score.Population, Coverage: score.KeyAgree["group"]}
+			q.Exclusion = benchRankingCompatibility(base, r)
+			if score.Unavailable != "" {
+				q.Exclusion = score.Unavailable
+			}
+			if q.Coverage.Items == 0 || q.Coverage.Supported != q.Coverage.Items {
+				q.Exclusion = "incomplete supported-answer coverage"
+			}
+			if cost.USD == nil || cost.Missing != 0 {
+				q.Exclusion = "unknown or incomplete cost coverage"
+			}
+			q.Eligible = q.Exclusion == ""
+			if cost.USD != nil && cost.Missing == 0 && score.Unavailable == "" {
 				if q.DuplicateMatches > 0 {
 					v := *cost.USD / float64(q.DuplicateMatches)
 					q.CostPerDuplicate = &v
@@ -724,7 +830,7 @@ func benchHistoryBuild(suite string, s benchSuite, runs []*benchRun, base *bench
 					v := *cost.USD / float64(q.VariationMatches)
 					q.CostPerVariation = &v
 				}
-				q.Pareto = true
+				q.Pareto = q.Eligible
 			}
 			h.Quality = append(h.Quality, q)
 			for old := range r.Scores {
@@ -741,13 +847,20 @@ func benchHistoryBuild(suite string, s benchSuite, runs []*benchRun, base *bench
 		if !q.Pareto {
 			continue
 		}
+		peers := 0
 		for j, p := range h.Quality {
-			if i == j || p.Cost.USD == nil || p.Cost.Missing > 0 {
+			if i == j || !p.Eligible || strings.Join(p.Population, "\x00") != strings.Join(q.Population, "\x00") {
 				continue
 			}
+			peers++
 			if *p.Cost.USD <= *q.Cost.USD && p.DuplicateMatches >= q.DuplicateMatches && p.VariationMatches >= q.VariationMatches && (*p.Cost.USD < *q.Cost.USD || p.DuplicateMatches > q.DuplicateMatches || p.VariationMatches > q.VariationMatches) {
 				h.Quality[i].Pareto = false
 			}
+		}
+		if peers == 0 {
+			h.Quality[i].Pareto = false
+			h.Quality[i].Eligible = false
+			h.Quality[i].Exclusion = "no compatible peer with complete cost and supported-answer coverage"
 		}
 	}
 	if key != nil {
@@ -762,7 +875,7 @@ func benchHistoryBuild(suite string, s benchSuite, runs []*benchRun, base *bench
 	return h, nil
 }
 func benchPrintHistory(w io.Writer, h benchHistory) {
-	fmt.Fprintf(w, "# Benchmark history: %s\n\n", h.Suite)
+	fmt.Fprintf(w, "# Benchmark history: %s\n\n%s\n\n", h.Suite, h.RecordedScoreBasis)
 	if len(h.Subjects) > 0 {
 		fmt.Fprintln(w, "## 0. Subjects")
 		for _, s := range h.Subjects {
@@ -781,8 +894,13 @@ func benchPrintHistory(w io.Writer, h benchHistory) {
 		dup, variation, shadow := "not recorded", "not recorded", "not recorded"
 		if s, ok := h.Scores[r.ID]; ok {
 			d, v := s.Classes["duplicate"], s.Classes["variation_site"]
-			dup = fmt.Sprintf("%d / %s / %s", d.Found, benchPercent(d.Precision), benchPercent(d.Recall))
-			variation = fmt.Sprintf("%d / %s", v.Found, benchPercent(v.Recall))
+			if s.Unavailable == "" {
+				dup = fmt.Sprintf("%d/%d supported matches; precision %s; recall %s", d.Match, d.Total, benchPercent(d.Precision), benchPercent(d.Recall))
+				variation = fmt.Sprintf("%d/%d supported matches; recall %s", v.Match, v.Total, benchPercent(v.Recall))
+			} else {
+				dup = "unavailable (see caveats)"
+				variation = dup
+			}
 			var js []string
 			for _, j := range benchSortedKeys(s.Judges) {
 				x := s.Judges[j]
@@ -797,7 +915,19 @@ func benchPrintHistory(w io.Writer, h benchHistory) {
 	for _, r := range h.Runs {
 		fmt.Fprintln(w, "\n"+r.Label+": "+benchTestedOn(r))
 		if h.Key != nil {
-			fmt.Fprintf(w, "\nScored with %s (%d items; key subject %s); %s.\n", h.Key.ID, len(h.Key.Items), h.Key.Subject, h.Scores[r.ID].Coverage)
+			fmt.Fprintf(w, "\nNew scores: %s / %s with %s (%d items; key subject %s); %s.\n", benchScorerSchema, benchScorerProfile, h.Key.ID, len(h.Key.Items), h.Key.Subject, h.Scores[r.ID].Coverage)
+			for _, class := range []string{"duplicate", "variation_site", "none", "unknown"} {
+				fmt.Fprintf(w, "Old recorded %s score (legacy, unversioned): %s.\n", class, benchOriginalScoreText(r, h.Key.ID, class))
+			}
+			score := h.Scores[r.ID]
+			fmt.Fprintf(w, "\n%s. %s.\n", score.ItemNote, keyAgreeText(score.KeyAgree["group"]))
+			for _, class := range []string{"duplicate", "variation_site"} {
+				c, known := score.LegacyClasses[class]
+				if !known {
+					continue
+				}
+				fmt.Fprintf(w, "legacy %s location heuristic: %d/%d unique locations matched, precision %s, recall %s. Not behavior quality or ranking input.\n", class, c.Match, c.Total, benchPercent(c.Precision), benchPercent(c.Recall))
+			}
 		}
 		if r.WallSeconds.Value != nil {
 			fmt.Fprintf(w, "\nWall clock: %.0f s (basis: %s). Pass seconds, summed: %s.\n", *r.WallSeconds.Value, r.WallSeconds.Basis, benchGroupText(r, "wall", nil, true))
@@ -832,7 +962,7 @@ func benchPrintHistory(w io.Writer, h benchHistory) {
 		fmt.Fprintf(w, "| Total (known costs only) | all | $%.4f | %d | %d | %d | %d |\n", usd, seconds, reported, none, missing)
 	}
 	if len(h.Quality) > 0 {
-		fmt.Fprintln(w, "\n## 5. Quality against cost\n\nPareto: not beaten on cost and both true-match counts. Unknown or partial costs are excluded.\n\n| Run | USD / true duplicate | USD / variation site | Pareto |\n| --- | --- | --- | --- |")
+		fmt.Fprintln(w, "\n## 5. Quality against cost\n\nPareto is restricted to identical subjects, item populations and pass/package coverage, complete supported-answer coverage, and known complete costs. No compatible peer means no ranking. Cost denominators are supported correct key behaviors, not unique locations.\n\n| Run | USD / true duplicate | USD / variation site | Pareto |\n| --- | --- | --- | --- |")
 		for _, q := range h.Quality {
 			money := func(p *float64) string {
 				if p == nil {
@@ -840,7 +970,11 @@ func benchPrintHistory(w io.Writer, h benchHistory) {
 				}
 				return fmt.Sprintf("$%.4f", *p)
 			}
-			fmt.Fprintf(w, "| %s | %s | %s | %t |\n", q.Run, money(q.CostPerDuplicate), money(q.CostPerVariation), q.Pareto)
+			ranking := fmt.Sprintf("%t", q.Pareto)
+			if !q.Eligible {
+				ranking = "not ranked: " + q.Exclusion
+			}
+			fmt.Fprintf(w, "| %s | %s | %s | %s |\n", q.Run, money(q.CostPerDuplicate), money(q.CostPerVariation), benchMD(ranking))
 		}
 	}
 	shadowHeader := false
@@ -868,7 +1002,7 @@ func benchPrintHistory(w io.Writer, h benchHistory) {
 	if h.Key != nil {
 		fmt.Fprintf(w, "Key: %s, %d items; duplicate %d, variation_site %d, none %d, unknown %d.\n\n", h.Key.ID, len(h.Key.Items), h.Key.Counts["duplicate"], h.Key.Counts["variation_site"], h.Key.Counts["none"], h.Key.Counts["unknown"])
 	}
-	fmt.Fprintln(w, "Pass wall times are not end-to-end elapsed time. Total wall is the sum of selected pass seconds; total context is the maximum, not a sum. Location scores count unique locations, not item IDs. Group comparison scope is printed above; all-run history and lane totals include every recorded pass. Unknown values are never treated as zero.")
+	fmt.Fprintln(w, "Pass wall times are not end-to-end elapsed time. Total wall is the sum of selected pass seconds; total context is the maximum, not a sum. Quality scores count keyed behaviors; multiple behaviors may share evidence. Precision conditions on supported predicted behaviors; recall includes all key behaviors of the class. Legacy scores alone count unique locations. Conditional accuracy excludes missing, invalid and unsupported answers, which remain in answer-coverage denominators. Group comparison scope is printed above; all-run history and lane totals include every recorded pass. Unknown values are never treated as zero.")
 	for _, c := range h.Caveats {
 		fmt.Fprintln(w, "- "+c)
 	}
@@ -1013,6 +1147,14 @@ func cmdBenchReport(a *app, command string, args []string) error {
 	return nil
 }
 
+// A negative internal count means unmeasured, never a negative observation.
+func benchShellCount(p sessionProfile, count int) int {
+	if p.Shell == nil && (p.Calls == nil || p.Calls["bash"] > 0) {
+		return -1
+	}
+	return count
+}
+
 // benchToolRows count what the agents called, from the exploration profile of
 // each group: orch ctx against the raw shell and the native read tool.
 var benchToolRows = []struct {
@@ -1020,17 +1162,32 @@ var benchToolRows = []struct {
 	count func(sessionProfile) int
 }{
 	{"orch ctx calls", func(p sessionProfile) int {
-		return p.Shell["orch ctx batch"] + p.Shell["orch ctx"] + p.Shell["orch ctx batch piped"] + p.Shell["orch ctx piped"]
+		return benchShellCount(p, p.Shell["orch ctx batch"]+p.Shell["orch ctx"]+p.Shell["orch ctx batch piped"]+p.Shell["orch ctx piped"])
 	}},
 	{"orch ctx lookups (a batch counts each -q)", func(p sessionProfile) int {
-		return p.BatchLookups + p.Shell["orch ctx"] + p.Shell["orch ctx piped"]
+		if p.Shell["orch ctx batch"]+p.Shell["orch ctx batch piped"] > 0 && p.BatchLookups == 0 {
+			return -1
+		}
+		return benchShellCount(p, p.BatchLookups+p.Shell["orch ctx"]+p.Shell["orch ctx piped"])
 	}},
-	{"orch ctx piped into another tool", func(p sessionProfile) int { return p.Shell["orch ctx piped"] + p.Shell["orch ctx batch piped"] }},
-	{"Raw shell search (grep, rg, find, ls)", func(p sessionProfile) int { return p.Shell["shell search"] }},
-	{"Raw shell read (sed, cat, head, tail)", func(p sessionProfile) int { return p.Shell["shell read"] }},
-	{"Other shell calls", func(p sessionProfile) int { return p.Shell["shell other"] }},
-	{"Native reads", func(p sessionProfile) int { return p.RangedReads + p.WholeReads }},
-	{"Native reads with a range", func(p sessionProfile) int { return p.RangedReads }},
+	{"orch ctx piped into another tool", func(p sessionProfile) int {
+		return benchShellCount(p, p.Shell["orch ctx piped"]+p.Shell["orch ctx batch piped"])
+	}},
+	{"Raw shell search (grep, rg, find, ls)", func(p sessionProfile) int { return benchShellCount(p, p.Shell["shell search"]) }},
+	{"Raw shell read (sed, cat, head, tail)", func(p sessionProfile) int { return benchShellCount(p, p.Shell["shell read"]) }},
+	{"Other shell calls", func(p sessionProfile) int { return benchShellCount(p, p.Shell["shell other"]) }},
+	{"Native reads", func(p sessionProfile) int {
+		if n, known := p.totalReads(); known {
+			return n
+		}
+		return -1
+	}},
+	{"Native reads with a range", func(p sessionProfile) int {
+		if p.rangedReadsKnown() {
+			return p.RangedReads
+		}
+		return -1
+	}},
 }
 
 // benchToolSum adds a count over the selected groups; it is nil when a group
@@ -1043,10 +1200,16 @@ func benchToolSum(r *benchRun, groups []string, count func(sessionProfile) int) 
 	sum := 0.0
 	for _, n := range names {
 		e := r.Groups[n].Exploration
-		if e == nil || (e.Shell == nil && e.Calls["bash"] > 0) {
+		if e == nil {
 			return nil
 		}
-		sum += float64(count(*e))
+		// Native total reads can predate shell/range instrumentation. Do not
+		// discard that actual counter, or infer a missing range breakdown.
+		v := count(*e)
+		if v < 0 {
+			return nil
+		}
+		sum += float64(v)
 	}
 	return &sum
 }

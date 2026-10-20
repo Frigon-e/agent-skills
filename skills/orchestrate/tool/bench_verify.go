@@ -33,16 +33,18 @@ func benchSnapshotCheck(r *benchRun, b []byte) error {
 }
 
 func benchVerifyRun(r *benchRun, snap string) error {
-	s, e := benchSubjectLoad(r.Subject)
-	if e != nil {
-		return e
-	}
-	if r.Inputs.SpecHash != s.Spec.Hash {
-		return fail("run spec hash differs from subject")
-	}
-	if s.Spec.State != "unknown" || objectHas("spec", s.Spec.Hash) {
-		if _, e := objectGet("spec", s.Spec.Hash); e != nil {
+	if r.Subject != "" {
+		s, e := benchSubjectLoad(r.Subject)
+		if e != nil {
 			return e
+		}
+		if r.Inputs.SpecHash != s.Spec.Hash {
+			return fail("run spec hash differs from subject")
+		}
+		if s.Spec.State != "unknown" || objectHas("spec", s.Spec.Hash) {
+			if _, e := objectGet("spec", s.Spec.Hash); e != nil {
+				return e
+			}
 		}
 	}
 	if r.Itemset != "" {
@@ -206,8 +208,7 @@ func benchVerify(suite string) ([]benchFinding, error) {
 		for _, r := range runs {
 			path := filepath.Join(r.dir, "run.json")
 			if r.Subject == "" {
-				add("error", path, fail("missing subject; run bench migrate"))
-				continue
+				add("info", path, fail("legacy unbound subject: unknown; migration proposals do not bind original evidence"))
 			}
 			add("error", path, benchVerifyRun(r, filepath.Join(r.dir, "snapshot")))
 			for _, raw := range r.Raw {
@@ -226,10 +227,18 @@ func benchVerify(suite string) ([]benchFinding, error) {
 		}
 		for _, k := range keys {
 			path := filepath.Join(benchDir(), name, "keys", k.ID+".json")
-			_, e := benchSubjectLoad(k.Subject)
-			add("error", path, e)
-			_, e = objectGet("itemset", k.Itemset)
-			add("error", path, e)
+			if k.Subject == "" {
+				add("info", path, fail("legacy key subject unknown; no current approval inferred"))
+			} else {
+				_, e := benchSubjectLoad(k.Subject)
+				add("error", path, e)
+			}
+			if k.Itemset == "" {
+				add("info", path, fail("legacy key itemset unknown; identity-dependent quality unavailable"))
+			} else {
+				_, e := objectGet("itemset", k.Itemset)
+				add("error", path, e)
+			}
 			for _, id := range k.PromptBlobs {
 				_, e := objectGet("blob", id)
 				add("error", path, e)
@@ -253,6 +262,31 @@ func benchVerify(suite string) ([]benchFinding, error) {
 	}
 	return findings, nil
 }
+
+// Explicit writes validate an isolated store before publishing any score.
+// Informational legacy unknowns are not validation failures or current approval.
+func benchValidateRescore(suite string) error {
+	var store struct {
+		Schema int `json:"schema_version"`
+	}
+	if e := benchReadJSON(filepath.Join(benchDir(), "store.json"), &store); e != nil {
+		return fail("isolated rescore validation failed: store metadata: %s; source store unchanged", e)
+	}
+	if store.Schema != 1 && store.Schema != 2 {
+		return fail("isolated rescore validation failed: unsupported store schema %d; source store unchanged", store.Schema)
+	}
+	rows, e := benchVerify(suite)
+	if e != nil {
+		return e
+	}
+	for _, row := range rows {
+		if row.Level == "error" {
+			return fail("isolated rescore validation failed: %s: %s; source store unchanged", row.Path, row.Message)
+		}
+	}
+	return nil
+}
+
 func cmdBenchVerify(a *app, args []string) error {
 	fs := a.flags("bench verify")
 	suite := fs.String("suite", "", "verify this suite (objects are global)")

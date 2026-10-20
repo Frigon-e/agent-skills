@@ -97,10 +97,74 @@ type sessionProfile struct {
 	// Shell splits the bash calls by what they ran (see shellKind);
 	// BatchLookups counts the -q lookups inside orch ctx batch calls; the
 	// reads are split by whether they named a range.
-	Shell        map[string]int `json:"shell,omitempty"`
-	BatchLookups int            `json:"batch_lookups,omitempty"`
-	RangedReads  int            `json:"ranged_reads,omitempty"`
-	WholeReads   int            `json:"whole_reads,omitempty"`
+	Shell               map[string]int `json:"shell,omitempty"`
+	BatchLookups        int            `json:"batch_lookups,omitempty"`
+	RangedReads         int            `json:"ranged_reads"`
+	WholeReads          int            `json:"whole_reads"`
+	readBreakdownKnown  bool
+	rangedReadsRecorded bool
+	wholeReadsRecorded  bool
+}
+
+// Preserve presence independently from value. Historical profiles can record
+// total read calls without measuring their range breakdown.
+func (p *sessionProfile) UnmarshalJSON(b []byte) error {
+	type plain sessionProfile
+	var v plain
+	if err := json.Unmarshal(b, &v); err != nil {
+		return err
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(b, &fields); err != nil {
+		return err
+	}
+	*p = sessionProfile(v)
+	var calls map[string]json.RawMessage
+	if json.Unmarshal(fields["calls"], &calls) == nil {
+		for name, value := range calls {
+			if string(value) == "null" {
+				delete(p.Calls, name)
+			}
+		}
+	}
+	p.rangedReadsRecorded = fields["ranged_reads"] != nil && string(fields["ranged_reads"]) != "null"
+	p.wholeReadsRecorded = fields["whole_reads"] != nil && string(fields["whole_reads"]) != "null"
+	return nil
+}
+
+func (p sessionProfile) MarshalJSON() ([]byte, error) {
+	type plain sessionProfile
+	b, err := json.Marshal(plain(p))
+	if err != nil {
+		return nil, err
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(b, &fields); err != nil {
+		return nil, err
+	}
+	if !p.rangedReadsKnown() {
+		delete(fields, "ranged_reads")
+	}
+	if !p.wholeReadsKnown() {
+		delete(fields, "whole_reads")
+	}
+	return json.Marshal(fields)
+}
+func (p sessionProfile) rangedReadsKnown() bool {
+	return p.readBreakdownKnown || p.rangedReadsRecorded || p.RangedReads > 0
+}
+func (p sessionProfile) wholeReadsKnown() bool {
+	return p.readBreakdownKnown || p.wholeReadsRecorded || p.WholeReads > 0
+}
+func (p sessionProfile) rangeReadsKnown() bool { return p.rangedReadsKnown() && p.wholeReadsKnown() }
+func (p sessionProfile) totalReads() (int, bool) {
+	if n, ok := p.Calls["read"]; ok {
+		return n, true
+	}
+	if p.rangeReadsKnown() {
+		return p.RangedReads + p.WholeReads, true
+	}
+	return 0, false
 }
 
 var (
@@ -140,7 +204,7 @@ func shellKind(cmd string) string {
 // repo-relative path ("" if unknown). It reports false when dir holds no
 // assistant message.
 func profileSession(dir, specRel string) (sessionProfile, bool) {
-	p := sessionProfile{Calls: map[string]int{}, Shell: map[string]int{}}
+	p := sessionProfile{Calls: map[string]int{}, Shell: map[string]int{}, readBreakdownKnown: true}
 	reads := map[string]int{}
 	var results []bigResult
 	eachSessionEvent(dir, func(e *piEvent) {
@@ -236,8 +300,15 @@ func (p sessionProfile) String() string {
 	}
 	out := fmt.Sprintf("requests %d; calls: %s; result chars %d; largest: %s; read more than once: %s; spec reads %d",
 		p.Requests, orNone(calls), p.ResultChars, orNone(big), orNone(rep), p.SpecReads)
-	if len(shell) > 0 || p.RangedReads+p.WholeReads > 0 {
-		out += fmt.Sprintf("; bash: %s; reads: %d ranged, %d whole file", orNone(shell), p.RangedReads, p.WholeReads)
+	if len(shell) > 0 {
+		out += fmt.Sprintf("; bash: %s", orNone(shell))
+	}
+	if p.rangeReadsKnown() {
+		out += fmt.Sprintf("; reads: %d ranged, %d whole file", p.RangedReads, p.WholeReads)
+	} else if total, known := p.totalReads(); known {
+		out += fmt.Sprintf("; reads: %d total; range breakdown not recorded", total)
+	} else {
+		out += "; reads: not recorded"
 	}
 	return out
 }

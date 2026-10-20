@@ -566,22 +566,23 @@ func TestCompareShowsItemColumnsAgreementAndReferenceScores(t *testing.T) {
 		t.Fatalf("%v %v", entries, err)
 	}
 	ref := resolveReference(entries, items)
-	if len(ref) != 2 || normVerdict(ref["p#1"].Verdict) != "reuse" || normVerdict(ref["p#2"].Verdict) != "extend" {
-		t.Fatalf("reference matched %v", ref)
+	if len(ref) != 3 || len(referenceIssues(ref)) != 3 {
+		t.Fatalf("legacy references without revisions/maps must remain in the denominator, not fuzzy-match: %v", ref)
 	}
 	var sb strings.Builder
 	printItemComparison(&sb, []*armData{a, b}, ref, true)
 	out := sb.String()
 	wantContains(t, out,
-		`p#1 "Build a retry queue for failed sends" | A [group=reuse decider=reuse flash=extend] | B [group=reuse decider=- flash=-] | reference=reuse`,
-		"agreement A.group ~ A.decider: 2/3 (66%)",
-		"agreement A.decider ~ A.flash: 1/2 (50%)",
+		`p#1 "Build a retry queue for failed sends" | A [group=reuse decider=reuse flash=extend] | B [group=- decider=- flash=-] | reference=-`,
+		"legacy raw agreement A.group ~ A.decider: 2/3 (66%;",
+		"legacy raw agreement A.decider ~ A.flash: 1/2 (50%;",
 		`p#2 "Add the gateway webhook table": new vs extend`,
-		"agreement A.decider ~ reference: 2/2 (100%)",
+		"dependent quality unavailable",
+		"answer coverage 0/3 (0%)",
 		"judge A.decider: 1 rows",
-		"reference reuse, A.group (locations): 1 found, 1 in the reference, 1 match; precision 100%, recall 100%",
-		"reference reuse, B.group (locations): 2 found, 1 in the reference, 1 match; precision 50%, recall 100%",
-		"reference extend, A.decider (locations): 1 found, 1 in the reference, 1 match; precision 100%, recall 100%")
+		"legacy reference reuse, A.group (locations, not behavior quality): 1 found, 1 in the reference, 1 match; precision 100%, recall 100%",
+		"legacy reference reuse, B.group (locations, not behavior quality): 2 found, 1 in the reference, 1 match; precision 50%, recall 100%",
+		"legacy reference extend, A.decider (locations, not behavior quality): 1 found, 1 in the reference, 1 match; precision 100%, recall 100%")
 	if _, err := loadReference(filepath.Join(t.TempDir(), "none.json")); err == nil {
 		t.Error("a missing reference file was accepted")
 	}
@@ -614,8 +615,8 @@ func TestGateCompareCommandReadsItemsShadowRowsAndReference(t *testing.T) {
 	ref := filepath.Join(h.tmp, "ref.json")
 	os.WriteFile(ref, []byte(`[{"package":"api","item":"api#1","verdict":"duplicate","candidate":"internal/store.go:3"}]`), 0o644)
 	out := h.must("gate", "compare", "spec.md", "e1", "e2", "--reference", ref)
-	wantContains(t, out, "coverage A: items: 2, with a verdict 2", "per-item verdicts (2 items", `api#1 "Build api." | A [group=reuse decider=reuse flash=-] | B [group=- decider=reuse flash=-] | reference=reuse`,
-		"reference: 1 entries, 1 matched to items", "judge B.decider: 1 rows", "reference reuse, A.group (locations): 1 found, 1 in the reference, 1 match; precision 100%, recall 100%")
+	wantContains(t, out, "coverage A: items: 2, with a verdict 2", "per-item verdicts (2 items", `api#1 "Build api." | A [group=reuse decider=reuse flash=-] | B [group=- decider=reuse flash=-] | reference=-`,
+		"reference A: 1 entries, 0 mapped to items; 1 unmapped/ambiguous", "judge B.decider: 1 rows", "legacy reference reuse, A.group (locations, not behavior quality): 1 found, 1 in the reference, 1 match; precision 100%, recall 100%")
 	if code, out := h.run("gate", "compare", "spec.md", "e1", "e2", "--reference", filepath.Join(h.tmp, "nope.json")); code == 0 {
 		t.Errorf("a missing reference file passed: %s", out)
 	}

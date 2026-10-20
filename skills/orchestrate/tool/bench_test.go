@@ -448,13 +448,13 @@ func TestBenchKeyFormatsCoverageAndSharedScorer(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
-	if score.Classes["duplicate"].Total != 1 || score.Classes["duplicate"].Match != 1 {
-		t.Fatalf("score: %+v", score)
+	if score.Classes["duplicate"].Total != 1 || score.Classes["duplicate"].Match != 0 || score.LegacyClasses["duplicate"].Match != 1 || score.Unavailable == "" {
+		t.Fatalf("historical findings must be legacy, not supported behavior judgments: %+v", score)
 	}
 	wantContains(t, score.Coverage, "1 of 2")
 	rec := readRecord(t, filepath.Join(r.dir, "snapshot"))
 	ad := loadArm(filepath.Join(r.dir, "snapshot"), rec.Experiment, filepath.Join(r.dir, "snapshot"), &rec)
-	ref := resolveReference([]refEntry{{Package: "api", Item: "Save a record", Verdict: verdictReuse, Candidate: "internal/store.go:3"}}, ad.items)
+	ref := resolveReference(benchKeyReferences(&benchKey{Items: k.Items[:1], Itemset: k.Itemset}), ad.items)
 	if want := scoreLocations(ad, ref, "group", verdictReuse); !reflect.DeepEqual(score.Classes["duplicate"], want) {
 		t.Fatalf("bench and gate scores differ: %+v %+v", score.Classes["duplicate"], want)
 	}
@@ -649,14 +649,14 @@ func TestBenchReportReadmeWallClockAndUnknowns(t *testing.T) {
 	if e := benchReadme(); e != nil {
 		t.Fatal(e)
 	}
-	files, _ := os.ReadDir(filepath.Join(benchDir(), "fixture", "reports"))
-	if len(files) != 2 {
+	files, _ := filepath.Glob(filepath.Join(benchDir(), "fixture", "reports", "history-*.md"))
+	if len(files) != 1 || !benchExists(filepath.Join(benchDir(), "fixture", "reports", "index.md")) {
 		t.Fatal(files)
 	}
 	h.must("bench", "report", "fixture", "--save")
-	files, _ = os.ReadDir(filepath.Join(benchDir(), "fixture", "reports"))
-	if len(files) != 3 {
-		t.Fatal(files)
+	files, _ = filepath.Glob(filepath.Join(benchDir(), "fixture", "reports", "history-*.md"))
+	if len(files) != 1 {
+		t.Fatal("identical saved report created a duplicate", files)
 	}
 	wantContains(t, h.must("bench", "show", "fixture/"+b.ID), "tested_on")
 	secs, e := benchConsoleSeconds("22:03:42\n", "output\n22:21:57\n")
@@ -793,12 +793,31 @@ func TestBenchConsoleSessionsPromptCapAndCorrection(t *testing.T) {
 	}
 	head, _ := git(h.repo, "rev-parse", "HEAD")
 	h.must("bench", "migrate", "--suite", "fixture", "--run", r.ID, "--commit", head, "--commit-basis", "user", "--commit-evidence", "fixture assertion")
-	corrected, e := benchRunLoad("fixture", r.ID)
+	unchanged, e := benchRunLoad("fixture", r.ID)
 	if e != nil {
 		t.Fatal(e)
 	}
+	if unchanged.Subject != r.Subject || len(unchanged.SubjectHistory) != 0 {
+		t.Fatal("correction rewrote historical binding")
+	}
+	files, e := filepath.Glob(filepath.Join(r.dir, "migrations", "*.json"))
+	if e != nil || len(files) != 1 {
+		t.Fatalf("correction proposal: %v %v", files, e)
+	}
+	var proposal benchMigration
+	if e := benchReadJSON(files[0], &proposal); e != nil {
+		t.Fatal(e)
+	}
+	b, e := json.Marshal(proposal.Run)
+	if e != nil {
+		t.Fatal(e)
+	}
+	var corrected benchRun
+	if e := json.Unmarshal(b, &corrected); e != nil {
+		t.Fatal(e)
+	}
 	if corrected.Subject == r.Subject || len(corrected.SubjectHistory) != 1 || !reflect.DeepEqual(corrected.Blobs, r.Blobs) || corrected.WallSeconds.Value == nil || *corrected.WallSeconds.Value != 1095 {
-		t.Fatalf("correction lost evidence: %+v", corrected)
+		t.Fatalf("correction proposal lost evidence: %+v", corrected)
 	}
 	h.must("bench", "verify", "--suite", "fixture")
 }

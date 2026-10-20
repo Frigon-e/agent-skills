@@ -10,8 +10,11 @@ import (
 )
 
 func sameLocation(a, b string) bool {
+	if a == "" || b == "" {
+		return false
+	}
 	if a == b {
-		return true
+		return pointerRe.MatchString(a)
 	}
 	x, y := pointerRe.FindStringSubmatch(a), pointerRe.FindStringSubmatch(b)
 	if x == nil || y == nil || x[1] != y[1] {
@@ -30,6 +33,27 @@ func sameLocation(a, b string) bool {
 		endY, _ = strconv.Atoi(y[3])
 	}
 	return startX <= endY && startY <= endX
+}
+
+// Rendered evidence must contain the entire requested behavior span. Mere
+// overlap, a signature, or an author hint cannot prove the body was delivered.
+func evidenceContainsTarget(e evidenceRecord, target string) bool {
+	m := pointerRe.FindStringSubmatch(target)
+	if m == nil || e.Path != m[1] || e.LocatorValid == nil || !*e.LocatorValid {
+		return false
+	}
+	if e.Range == nil {
+		return true
+	} // explicitly rendered whole source
+	if e.Range.Validate() != nil || e.Range.StartColumn != nil || e.Range.EndColumn != nil || m[2] == "" {
+		return false
+	}
+	start, _ := strconv.Atoi(m[2])
+	end := start
+	if m[3] != "" {
+		end, _ = strconv.Atoi(m[3])
+	}
+	return start > 0 && end >= start && e.Range.StartLine <= start && e.Range.EndLine >= end
 }
 
 func (a *armData) addLocation(judge, kind, loc string) {

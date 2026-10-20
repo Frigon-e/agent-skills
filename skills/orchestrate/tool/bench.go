@@ -165,7 +165,24 @@ func benchSuiteWrite(name string, s benchSuite) error {
 	if e := toml.NewEncoder(&b).Encode(s); e != nil {
 		return e
 	}
-	return benchWrite(filepath.Join(benchDir(), name, "suite.toml"), []byte(b.String()))
+	path := filepath.Join(benchDir(), name, "suite.toml")
+	if e := benchSafe(path); e != nil {
+		return e
+	}
+	data := []byte(b.String())
+	old, e := os.ReadFile(path)
+	if e != nil && !os.IsNotExist(e) {
+		return e
+	}
+	if e == nil {
+		if string(old) == string(data) {
+			return nil
+		}
+		// A new run may suggest another arm/default, but it cannot replace
+		// a historical suite definition. Reports never apply this proposal.
+		path = filepath.Join(benchDir(), name, "reports", "suite-proposals", benchHash(data)+".toml")
+	}
+	return benchImmutable(path, data)
 }
 func benchBuildNow() benchBuild {
 	b := benchBuild{Version: "unknown"}
@@ -290,7 +307,7 @@ func benchCopy(src, dst string) error {
 		if e != nil {
 			return e
 		}
-		return benchWrite(target, b)
+		return benchImmutable(target, b)
 	})
 }
 
@@ -544,9 +561,6 @@ func benchRecordWith(a *app, source, suite, label, arm string, opts benchRecordO
 			}
 			sort.Strings(s.Groups)
 		}
-		if e := benchSuiteWrite(suite, s); e != nil {
-			return e
-		}
 		if e := benchMkdir(filepath.Join(root, "runs")); e != nil {
 			return e
 		}
@@ -611,9 +625,9 @@ func benchRecordWith(a *app, source, suite, label, arm string, opts benchRecordO
 		}
 		if s.Subject.Default == "" {
 			s.Subject.Default = r.Subject
-			if e := benchSuiteWrite(suite, s); e != nil {
-				return e
-			}
+		}
+		if e := benchSuiteWrite(suite, s); e != nil {
+			return e
 		}
 		keys, e := benchKeys(suite)
 		if e != nil {
@@ -657,12 +671,14 @@ func benchRecordWith(a *app, source, suite, label, arm string, opts benchRecordO
 
 // A key keeps the complete original entries as well as normalized scoring fields.
 type benchKeyItem struct {
-	ID        string          `json:"id"`
-	Package   string          `json:"package"`
-	Item      string          `json:"item"`
-	Class     string          `json:"class"`
-	Candidate string          `json:"candidate"`
-	Original  json.RawMessage `json:"original"`
+	Revision   string          `json:"revision,omitempty"`
+	Candidates []string        `json:"candidates,omitempty"`
+	ID         string          `json:"id"`
+	Package    string          `json:"package"`
+	Item       string          `json:"item"`
+	Class      string          `json:"class"`
+	Candidate  string          `json:"candidate"`
+	Original   json.RawMessage `json:"original"`
 }
 type benchKey struct {
 	Format         string         `json:"format"`
@@ -931,14 +947,18 @@ func benchKeyAdd(a *app, suite, file, note, prompt string, from bool, options ..
 }
 
 type benchScore struct {
-	Classes      map[string]locationScore `json:"classes"`
-	Judges       map[string]benchJudge    `json:"judges"`
-	Coverage     string                   `json:"coverage"`
-	KeySubject   string                   `json:"key_subject"`
-	MatchedItems int                      `json:"matched_items"`
-	ItemNote     string                   `json:"item_note,omitempty"`
-	// Seen counts the key's targets that were among the candidates or hints the
-	// judges were shown; KeyAgree is each judge's agreement with the key.
+	LegacyClasses map[string]locationScore `json:"legacy_classes,omitempty"`
+	Unavailable   string                   `json:"unavailable,omitempty"`
+	MappingIssues []string                 `json:"mapping_issues,omitempty"`
+	Population    []string                 `json:"population,omitempty"`
+	Classes       map[string]locationScore `json:"classes"`
+	Judges        map[string]benchJudge    `json:"judges"`
+	Coverage      string                   `json:"coverage"`
+	KeySubject    string                   `json:"key_subject"`
+	MatchedItems  int                      `json:"matched_items"`
+	ItemNote      string                   `json:"item_note,omitempty"`
+	// Seen separates retrieval, hints, rendered spans and unknown visibility.
+	// KeyAgree includes coverage for missing, invalid and unsupported answers.
 	Seen     map[string]seenCount `json:"seen,omitempty"`
 	KeyAgree map[string]keyAgree  `json:"key_agree,omitempty"`
 }
@@ -951,30 +971,74 @@ type benchJudge struct {
 	Seconds   float64                   `json:"seconds"`
 }
 
-func benchScoreArm(ad *armData, k *benchKey) benchScore {
-	refs := make([]refEntry, 0, len(k.Items))
+func benchKeyReferences(k *benchKey) []refEntry {
+	var set benchItemset
+	if path, err := benchObjectPath("itemset", k.Itemset); err == nil {
+		_ = benchReadJSON(path, &set)
+	}
+	var refs []refEntry
 	for _, it := range k.Items {
 		v := judgeVerdict(it.Class)
 		if it.Class == "unknown" {
 			v = verdictUnclr
 		}
-		refs = append(refs, refEntry{Package: it.Package, Item: it.Item, Verdict: v, Candidate: it.Candidate})
+		r := refEntry{ID: it.ID, Revision: it.Revision, Package: it.Package, Item: it.Item, Verdict: v, Candidate: it.Candidate, Candidates: it.Candidates}
+		// Key import paths remain untouched. Optional scoring metadata can be
+		// recovered from the immutable original or its canonical source itemset.
+		var extra struct {
+			Revision   string   `json:"revision"`
+			Candidates []string `json:"candidates"`
+		}
+		_ = json.Unmarshal(it.Original, &extra)
+		if r.Revision == "" {
+			r.Revision = extra.Revision
+		}
+		if len(r.Candidates) == 0 {
+			r.Candidates = extra.Candidates
+		}
+		for _, source := range set.Items {
+			if source.ID == it.ID && r.Revision == "" {
+				r.Revision = source.Revision
+			}
+		}
+		refs = append(refs, r)
 	}
-	ref := resolveReference(refs, ad.items)
-	s := benchScore{Classes: map[string]locationScore{}, Judges: map[string]benchJudge{}}
+	return refs
+}
+
+func benchScoreArm(ad *armData, k *benchKey) benchScore {
+	ref := ad.reference
+	if ref == nil {
+		ref = resolveReference(benchKeyReferences(k), ad.items)
+	}
+	s := benchScore{Classes: map[string]locationScore{}, LegacyClasses: map[string]locationScore{}, Judges: map[string]benchJudge{}, MappingIssues: referenceIssues(ref)}
+	if len(s.MappingIssues) > 0 {
+		s.Unavailable = "quality unavailable: " + strings.Join(s.MappingIssues, "; ")
+	}
+	for _, id := range benchSortedKeys(ref) {
+		r := ref[id]
+		s.Population = append(s.Population, r.ID+"@"+r.Revision)
+	}
 	kv := keyViewOf(ad, ref)
 	s.Seen, s.KeyAgree = kv.Seen, kv.Agree
-	for _, kind := range []string{verdictReuse, verdictExtend} {
+	for _, kind := range []string{verdictReuse, verdictExtend, verdictNew, verdictUnclr} {
 		s.Classes[benchClass(kind)] = scoreLocations(ad, ref, "group", kind)
+		if kind == verdictReuse || kind == verdictExtend {
+			s.LegacyClasses[benchClass(kind)] = scoreLegacyLocations(ad, ref, "group", kind)
+		}
 	}
 	for judge, verdicts := range ad.judges {
 		j := benchJudge{Confusion: map[string]map[string]int{}, Cost: benchCost{Basis: "none"}}
 		cost := 0.0
 		known := 0
 		for id, v := range verdicts {
+			ans := ad.answer(judge, id)
+			if len(s.MappingIssues) > 0 || !ans.Valid || !ans.Supported {
+				continue
+			}
 			actual := benchClass(ref[id].Verdict)
 			pred := benchClass(v)
-			if actual != "" && actual != "unknown" && pred != "" {
+			if actual != "" && pred != "" {
 				if j.Confusion[actual] == nil {
 					j.Confusion[actual] = map[string]int{}
 				}
@@ -1013,6 +1077,9 @@ func benchRescore(r *benchRun, k *benchKey) (benchScore, error) {
 	}
 	var s benchScore
 	if r.Kind == "report-only" {
+		s.Unavailable = "quality unavailable: report-only run has no scoring inputs"
+		s.ItemNote = s.Unavailable
+		s.Coverage = "key coverage: not recorded (report-only)"
 		return s, nil
 	}
 	snap := filepath.Join(r.dir, "snapshot")
@@ -1034,24 +1101,41 @@ func benchRescore(r *benchRun, k *benchKey) (benchScore, error) {
 			filtered.Items = append(filtered.Items, it)
 		}
 	}
+	from, to := k.Itemset, r.Itemset
+	mappingPath := filepath.Join(benchDir(), r.Suite, "keys", "mapping.json")
+	var mapping *itemMapping
+	var mappingErr error
+	if err := benchSafe(mappingPath); err != nil {
+		mappingErr = err
+	} else {
+		mapping, mappingErr = readItemMapping(mappingPath, k.ID, from, to)
+	}
+	// Validate against the complete key and run itemset before applying scope.
+	allItems := readItemsFile(snap)
+	if len(allItems) == 0 {
+		allItems = ad.items
+	}
+	resolved := resolveMappedReference(benchKeyReferences(k), allItems, from, to, mapping)
+	ad.reference = map[string]refEntry{}
+	for id, ref := range resolved {
+		if len(packages) > 0 && !packages[ref.Package] {
+			continue
+		}
+		if mappingErr != nil {
+			ref.Issue = mappingErr.Error()
+		}
+		ad.reference[id] = ref
+	}
 	s = benchScoreArm(ad, &filtered)
 	s.Coverage = fmt.Sprintf("key coverage: %d of %d items in the compared groups", len(filtered.Items), len(k.Items))
 	if changed, known := benchChangedKeyItems(r, &filtered); known {
 		s.Coverage += fmt.Sprintf("; %d key items whose package changed between versions", changed)
 	}
 	s.KeySubject = k.Subject
-	s.MatchedItems = 0
-	for _, it := range filtered.Items {
-		for _, actual := range ad.items {
-			if (r.Itemset != "" && r.Itemset == k.Itemset && it.ID == actual.ID) || (r.Itemset != k.Itemset && it.Package == actual.Package && wordShare(it.Item, actual.Text) >= itemMatchShare) {
-				s.MatchedItems++
-				break
-			}
-		}
-	}
-	if len(filtered.Items) > 0 && s.MatchedItems*100 < len(filtered.Items)*80 {
-		s.Judges = nil
-		s.ItemNote = fmt.Sprintf("per-item section omitted: %d of %d key items matched (below 80%%)", s.MatchedItems, len(filtered.Items))
+	s.MatchedItems = len(ad.reference) - len(s.MappingIssues)
+	s.ItemNote = fmt.Sprintf("identity coverage: %d/%d key behaviors mapped; %d excluded from conditional quality; no fuzzy joins; legacy location heuristics are not behavior accuracy", s.MatchedItems, len(filtered.Items), len(s.MappingIssues))
+	if len(s.MappingIssues) > 0 {
+		s.ItemNote += "; " + s.Unavailable
 	}
 	return s, nil
 }
@@ -1226,43 +1310,11 @@ func cmdBenchKey(a *app, args []string) error {
 		if *key == "" {
 			return fail("rescore requires --key N")
 		}
-		r, e := benchRunLoad(pos[0], pos[1])
+		artifact, e := benchRescoreWrite(pos[0], pos[1], *key)
 		if e != nil {
 			return e
 		}
-		k, e := benchKeyLoad(pos[0], *key)
-		if e != nil {
-			return e
-		}
-		s, e := benchRescore(r, k)
-		if e != nil {
-			return e
-		}
-		e = benchWithLock(filepath.Join(benchDir(), pos[0], ".lock"), func() error {
-			path := filepath.Join(r.dir, "score-"+k.ID+".json")
-			if !benchExists(path) {
-				if e := benchJSON(path, s); e != nil {
-					return e
-				}
-			}
-			var raw map[string]json.RawMessage
-			runPath := filepath.Join(r.dir, "run.json")
-			if e := benchReadJSON(runPath, &raw); e != nil {
-				return e
-			}
-			bindings := r.KeySubjects
-			if bindings == nil {
-				bindings = map[string]string{}
-			}
-			bindings[k.ID] = k.Subject
-			b, _ := json.Marshal(bindings)
-			raw["key_subjects"] = b
-			return benchJSON(runPath, raw)
-		})
-		if e != nil {
-			return e
-		}
-		return json.NewEncoder(a.out).Encode(s)
+		return json.NewEncoder(a.out).Encode(artifact)
 	}
 	return fail("unknown bench key command %q", args[0])
 }
@@ -1302,8 +1354,14 @@ func cmdBenchList(a *app, args []string) error {
 				if e != nil {
 					return e
 				}
-				c := v.Classes["duplicate"]
-				score = fmt.Sprintf("%s %d/%d", k.ID, c.Match, c.Total)
+				if c, known := v.Classes["duplicate"]; known {
+					if v.Unavailable != "" {
+						score = k.ID + " unavailable (identity mapping)"
+					} else {
+						coverage := v.KeyAgree["group"]
+						score = fmt.Sprintf("%s supported duplicate matches %d/%d key behaviors; answer coverage %d/%d", k.ID, c.Match, c.Total, coverage.Answered, coverage.Items)
+					}
+				}
 			}
 			fmt.Fprintf(a.out, "%s | %s | %s | %s | %s | %s | %s | %s | %s\n", s, r.ID, r.Label, r.CreatedAt.Format("2006-01-02"), r.Arm, r.Inputs.SpecHash, benchCostText(cost), benchGroupText(r, "wall", nil, false), score)
 			fmt.Fprintln(a.out, benchTestedOn(r))
@@ -1328,7 +1386,14 @@ func benchDoctorLine() string {
 	return fmt.Sprintf("bench: %s; %d suites, %d runs, %d keys", benchDir(), suites, runs, keys)
 }
 func benchReadme() error {
-	return benchWrite(filepath.Join(benchDir(), "README.md"), []byte(benchReadmeText+benchReadmeSubjects))
+	path := filepath.Join(benchDir(), "README.md")
+	if e := benchSafe(path); e != nil {
+		return e
+	}
+	if benchExists(path) {
+		return nil
+	}
+	return benchImmutable(path, []byte(benchReadmeText+benchReadmeSubjects))
 }
 
 const benchReadmeText = `# Orchestrate benchmark store
@@ -1349,7 +1414,9 @@ checklist, dossiers and shadow rows. Original sessions are paths only and can va
   and [arms.<name>] with dossier, cache, runners, ctx_tool, context_files,
   shadow, spec_variant and orch flags. Create a suite by recording its first run,
   then edit suite.toml to set the groups for comparisons or add arm definitions.
-  New arm names are captured on first record; existing arm definitions are kept.
+  The first run initializes a suite definition. Later definition changes go to
+  reports/suite-proposals/<sha256>.toml; the existing suite.toml stays byte-identical.
+  Every run also retains its own arm definition. Reports never apply proposals.
 - <suite>/keys/key-N.json: normalized versioned key and class counts.
   key-N.original.json preserves the input; key-N.md preserves provenance and prompt.
 - <suite>/runs/YYYYMMDD-HHMM-label/run.json: schema_version 2. Build, inputs,
@@ -1358,8 +1425,12 @@ checklist, dossiers and shadow rows. Original sessions are paths only and can va
   or empty legacy strings, never inferred from today's environment. Cost has
   basis reported|estimated|none; unknown USD is null. Partial totals are marked.
   snapshot/ holds durable scoring inputs; shadow.jsonl copies shadow rows.
-  score-key-N.json adds a rescore without rewriting run.json. note.md is optional.
-- <suite>/reports/: saved Markdown history reports and index.md.
+  scores/<sha256>.json holds a versioned rescore with population/mapping ids,
+  input hashes, denominators, exclusions and warnings. Old score-key-N.json files
+  remain historical evidence. migrations/<sha256>.json holds reconstruction proposals.
+  Rescore and migration never rewrite run.json, keys, prompts or old scores.
+  note.md is optional.
+- <suite>/reports/history-<sha256>.md: content-addressed history with an idempotent index.md.
 
 ## Commands
 
@@ -1373,10 +1444,12 @@ checklist, dossiers and shadow rows. Original sessions are paths only and can va
   Add --total to sum passes instead of joining per-group values with 'and'.
   --json returns the same table data for scripts. Unknowns print 'not recorded'.
 - Rescore: orch bench key rescore crm-v1-reuse arm1 --key 2
-  Uses the same location-overlap scorer as gate compare. No model calls.
+  Validates an isolated copy before writing a new immutable score artifact.
+  Uses the behavior-identity scorer, with explicit mapping when required.
+  No overlap fuzzy match or model calls. Old scores stay labeled legacy.
 - History: orch bench report crm-v1-reuse --runs run3,arm1 --since 2026-01-01 --key 2 --baseline run3 --md --save
   --json returns the report data. Without --save, print to stdout.
-- Regenerate this guide: orch bench readme
+- Create this guide if missing: orch bench readme. An existing README stays byte-identical.
 
 Gate integration: orch gate spec.md --only group:api --experiment arm1 --bench-suite crm-v1-reuse
 or set bench_suite in user orchestrate.toml. Repo bench_suite is ignored. Default none does not record.
