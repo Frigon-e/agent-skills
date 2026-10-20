@@ -11,12 +11,17 @@ import (
 
 type modelRunner func(role, prompt string) (string, error)
 
-var queryModelRunner modelRunner = func(role, prompt string) (string, error) {
-	return "", fmt.Errorf("no runner configured")
-}
+var queryModelRunner modelRunner // Optional test override; production resolves the role.
 
-func generateQueries(role, prompt string) (string, error) {
-	return queryModelRunner(role, prompt)
+func (a *app) generateQueries(role, prompt string) (string, error) {
+	if queryModelRunner != nil {
+		return queryModelRunner(role, prompt)
+	}
+	s, err := a.site()
+	if err != nil {
+		return "", err
+	}
+	return s.runModel(role, prompt)
 }
 
 type specQueriesPackage struct {
@@ -99,9 +104,9 @@ func cmdSpec(a *app, args []string) error {
 		}
 		output := prompt
 		if !*dry {
-			output, err = generateQueries("spec_queries", prompt)
+			output, err = a.generateQueries("spec_queries", prompt)
 			if err != nil {
-				return err
+				return fail("spec_queries skipped: %v", err)
 			}
 		}
 		if *asJSON {

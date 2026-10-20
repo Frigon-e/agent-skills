@@ -147,13 +147,16 @@ func cmdQuick(a *app, args []string) error {
 	// logged under the `quick` tier so the report can say whether it was right.
 	verdict := "skipped: decider off"
 	if reason := s.deciderOff(a.now()); reason != "" {
+		a.recordTriageSkip(s, id, reason)
 		if s.cfg.QuickMode == "enforce" {
 			cleanup()
 			return &triageOff{reason: reason, id: id}
 		}
-		a.recordTriageSkip(s, id, reason)
 	} else {
 		rec, terr := a.triageTask(s, id, false)
+		if terr != nil {
+			a.recordTriageSkip(s, id, terr.Error())
+		}
 		switch {
 		case terr != nil && s.cfg.QuickMode == "enforce":
 			cleanup()
@@ -163,7 +166,6 @@ func cmdQuick(a *app, args []string) error {
 			return fail("triage is unavailable (%v), so quick cannot be checked. Retry, or use the full path", terr)
 		case terr != nil:
 			verdict = "skipped: decider off"
-			a.recordTriageSkip(s, id, terr.Error())
 			fmt.Fprintf(a.out, "warning: triage unavailable: %v\n", terr)
 		default:
 			ok, why := quickFit(rec.Answers)

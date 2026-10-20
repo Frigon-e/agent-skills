@@ -54,6 +54,27 @@ A profile marked `degraded = true` requires user approval and `--degraded`.
 `site.runModel(role, prompt, ...modelOptions)` is the tool-less conversational
 entry point for generation commands. API Decider calls use the API wrapper.
 
+## When a provider is down
+
+Provider failures are local to the run. They do not write health state. Mark a
+persistent limit explicitly with `orch health set <lane> limited --for 3h` and
+clear it with `orch health set <lane> ok` after recovery. The lanes are
+`claude`, `pi:openrouter`, `pi:anthropic`, and `pi:openai`. A `pi` limit covers
+all pi children; an OpenAI limit does not disable Claude or OpenRouter.
+
+| Component | Provider unavailable |
+|---|---|
+| Gate reviewers and adversaries | Skip a failed lane for this run and try one configured fallback. With no completed review, the v2 result is incomplete, never pass. Deterministic checks and dossiers remain. |
+| Triage, auto dispatch and quick | Record a sanitized skipped triage result, never invent a tier. Shadow proceeds; enforce refuses. Auto gives manual-profile/`--tier` guidance and starts no lead. |
+| Question classifier | Keep deterministic cards and gate outputs unchanged. Record unavailability; bounded retries and late-result rejection remain in force. |
+| Optional gate adjudicator | Leave the check incomplete. Charge attempts to its local and shared gate budget; no indefinite retries. |
+| Spec queries and shadow Flash | Report the unavailable optional work. No independent authority to pass a gate. |
+| Offline sweep | Missing, unreadable or insufficient independent passes cannot settle a card. Human-only questions stay human-only. |
+| Lead dispatch | Refuse limited lanes. Use an allowed healthy profile; a degraded profile requires consent and `--degraded`. An already-running lead can be explicitly respawned on another harness. |
+
+See [outage.md](outage.md) for the deterministic injection matrix and precise
+limits of what these tests establish.
+
 ## Background question classification
 
 `question_classifier` is a separate typed decisions API role. When absent, it

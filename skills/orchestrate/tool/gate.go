@@ -1617,13 +1617,22 @@ func runGatePasses(dir, code, model string, passes []gatePass, rec *gateRecord, 
 				passCtx, cancelPass := context.WithTimeout(opts.guard.ctx, min(gateTimeout, rec.Budget.remaining()))
 				invocations := map[string]int{}
 				calls := map[string]int{}
-				lastRoute := ""
+				lastRoute, retryAfter := "", ""
+				replyError := func(raw string, err error) error {
+					if err == nil {
+						return nil
+					}
+					if strings.TrimSpace(raw) == "" {
+						return fmt.Errorf("%s: empty reply: %w", lastRoute, err)
+					}
+					return fmt.Errorf("%s: %w", lastRoute, err)
+				}
 				run1 := func(q gatePass) (string, string, error) {
 					q.ctxTool, q.ctxOnly, q.ctxProfile, q.contextFiles, q.ctx = opts.ctxTool, opts.ctxOnly, opts.ctxProfile, opts.contextFiles, passCtx
 					job := strings.TrimSuffix(q.name, "#retry")
 					repair := calls[job] > 0
 					calls[job]++
-					out, hit, used, err := opts.runner.run(func(choice profile) (string, string, error) {
+					out, hit, used, err := opts.runner.runAfter(retryAfter, func(choice profile) (string, string, error) {
 						prepared, prepErr := gateAgentPass(code, choice.Harness, q)
 						if prepErr != nil {
 							return "", "", prepErr
@@ -1677,14 +1686,15 @@ func runGatePasses(dir, code, model string, passes []gatePass, rec *gateRecord, 
 				// the original deadline. A second reply never gets a third try.
 				retried := false
 				var limit *passLimit
-				if p.class == "package" && errors.As(err, &limit) {
+				if errors.As(err, &limit) && strings.HasPrefix(limit.Error(), "stalled:") {
 					retried = true
+					retryAfter = lastRoute
 					first := err
 					if out, err = run(); err != nil {
 						err = fmt.Errorf("%v; retried once and failed again: %w", first, err)
 					}
 				}
-				if limit != nil || errors.As(err, &limit) || errors.Is(err, errAdjudicationBudget) {
+				if errors.As(err, &limit) && !strings.HasPrefix(limit.Error(), "stalled:") || errors.Is(err, errAdjudicationBudget) {
 					answerState = reviewAnswerBudget
 				}
 				tokens, haveTokens := sessionTokens(filepath.Join(dir, "sessions", passFile(p.name)))
@@ -1696,7 +1706,7 @@ func runGatePasses(dir, code, model string, passes []gatePass, rec *gateRecord, 
 				}
 				var schemaErr error
 				if err == nil {
-					schemaErr = p.apply(out, rec, code, sp)
+					schemaErr = replyError(out, p.apply(out, rec, code, sp))
 					if schemaErr != nil {
 						answerState = reviewAnswerInvalid
 					}
@@ -1706,6 +1716,7 @@ func runGatePasses(dir, code, model string, passes []gatePass, rec *gateRecord, 
 				mu.Unlock()
 				var repair *gatePass
 				if !retried && schemaErr != nil {
+					retryAfter = lastRoute
 					rp := p
 					rp.name = p.name + "#retry"
 					rp.task += "\nSchema repair: the earlier reply was incomplete or invalid: " + schemaErr.Error() + ". Return a complete replacement matching the schema above, with every required array explicitly present (use [] when empty)."
@@ -1727,17 +1738,20 @@ func runGatePasses(dir, code, model string, passes []gatePass, rec *gateRecord, 
 					}
 					if rerr != nil {
 						answerState = reviewAnswerUnavailable
-						if errors.As(rerr, &limit) || errors.Is(rerr, errAdjudicationBudget) {
+						if errors.As(rerr, &limit) && !strings.HasPrefix(limit.Error(), "stalled:") || errors.Is(rerr, errAdjudicationBudget) {
 							answerState = reviewAnswerBudget
 						}
 					}
 					if rerr == nil {
-						rerr = rp.apply(rout, rec, code, sp)
+						rerr = replyError(rout, rp.apply(rout, rec, code, sp))
 						if rerr != nil {
 							answerState = reviewAnswerInvalid
 						}
 					}
 					if rerr != nil {
+						if schemaErr != nil {
+							rerr = fmt.Errorf("%v; %w", schemaErr, rerr)
+						}
 						err = fmt.Errorf("repair exhausted: %w", rerr)
 						rec.PassKept[rp.name] = keptFiles(dir, rp.name, pool != nil)
 					} else {

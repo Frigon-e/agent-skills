@@ -303,10 +303,9 @@ func (a *app) triageScore(s site, id string, force bool) (rec *triageRecord, cac
 		return "", "", e
 	})
 	if runErr != nil {
-		if choices, _ := runner.available(); len(choices) == 0 || providerDown(runErr) {
-			return nil, false, &triageOff{reason: short(runErr.Error(), 160) + ", " + used.lane(), id: id}
-		}
-		return nil, false, runErr
+		// Runtime failures never supply a tier. Persist only a reason class and
+		// lane, not provider response bodies or potentially secret transport URLs.
+		return nil, false, &triageOff{reason: "dependency_unavailable, " + used.lane(), id: id}
 	}
 	tier, reason := tierFor(ans)
 	fm, _, _ := readTask(filepath.Join(dir, "task.md"))
@@ -322,20 +321,20 @@ func (a *app) triageGate(s site, id string, fm map[string]string) error {
 		return nil
 	}
 	if reason := s.deciderOff(a.now()); reason != "" {
+		a.recordTriageSkip(s, id, reason)
 		if s.cfg.TriageMode == "enforce" && !a.overrideTier {
 			return &triageOff{reason: reason, id: id}
 		}
-		a.recordTriageSkip(s, id, reason)
 		fmt.Fprintf(a.out, "triage skipped: decider off (%s)\n", reason)
 		return nil
 	}
 	rec, err := a.triageTask(s, id, false)
 	enforce := s.cfg.TriageMode == "enforce" && !a.overrideTier
 	if err != nil {
+		a.recordTriageSkip(s, id, err.Error())
 		if enforce {
 			return fail("triage is unavailable (%v). Retry, or spawn with --override-tier after checking the task by hand", err)
 		}
-		a.recordTriageSkip(s, id, err.Error())
 		fmt.Fprintf(a.out, "warning: triage unavailable: %v\n", err)
 		return nil
 	}

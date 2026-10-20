@@ -211,6 +211,11 @@ func providerDown(err error) bool {
 		return true
 	}
 	text := strings.ToLower(err.Error())
+	for _, transport := range []string{"connection refused", "connection reset", "request timed out", "connection timed out", "econnrefused", "econnreset", "etimedout"} {
+		if strings.Contains(text, transport) {
+			return true
+		}
+	}
 	if providerStatusRe.MatchString(text) {
 		return true
 	}
@@ -225,10 +230,33 @@ func providerDown(err error) bool {
 // A provider failure is run-local. It never writes the person's health file.
 // Each pass gets at most one retry on the next usable choice.
 func (r *roleRun) run(fn func(profile) (string, string, error)) (string, string, profile, error) {
+	return r.runAfter("", fn)
+}
+
+// A repair may use the next available route without marking a replying provider
+// down for other passes. With no next route, retain the existing repair choice.
+func (r *roleRun) runAfter(after string, fn func(profile) (string, string, error)) (string, string, profile, error) {
+	choices, _ := r.available()
+	skip := map[string]bool{}
+	for i, p := range choices {
+		if p.String() == after && i+1 < len(choices) {
+			for _, earlier := range choices[:i+1] {
+				skip[earlier.String()] = true
+			}
+			break
+		}
+	}
 	var last error
 	var used profile
 	for attempt := 0; attempt < 2; attempt++ {
 		choices, _ := r.available()
+		filtered := choices[:0]
+		for _, p := range choices {
+			if !skip[p.String()] {
+				filtered = append(filtered, p)
+			}
+		}
+		choices = filtered
 		if len(choices) == 0 {
 			if last != nil {
 				return "", "", used, fmt.Errorf("%v; %w", last, r.unavailable())
@@ -278,6 +306,9 @@ func (s site) runModel(role, prompt string, opts ...modelOptions) (string, error
 	out, _, _, err := r.run(func(p profile) (string, string, error) {
 		pass := gatePass{prompt: prompt, noTools: true}
 		out, err := runHeadless(s.repo, p, pass, dir, "")
+		if err == nil && strings.TrimSpace(out) == "" {
+			err = fmt.Errorf("%s unavailable: empty reply from %s", role, p.String())
+		}
 		return out, "", err
 	})
 	return out, err

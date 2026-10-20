@@ -298,7 +298,7 @@ func TestGateRunBudgetSchedulerRetriesShareUsage(t *testing.T) {
 		t.Run(kind, func(t *testing.T) {
 			h := setup(t)
 			var dir string
-			args := []string{"gate", "spec.md"}
+			args := []string{"gate", "spec.md", "--runner", "pi:"+gateModelDef}
 			if kind == "coverage" {
 				dir = verdictRepo(t, h)
 				scriptPi(t, h, strings.Replace(cleanPackageReply, `"reuse":[]`, `"reuse":[],"items":[]`, 1), `{"packages":[{"id":"api","items":[]}]}`)
