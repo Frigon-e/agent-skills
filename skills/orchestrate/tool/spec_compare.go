@@ -55,7 +55,7 @@ func (a *armData) addLocation(judge, kind, loc string) {
 func legacyChecklist(dir string) map[string][]itemCands {
 	files, _ := filepath.Glob(filepath.Join(dir, "dossier", "*.md"))
 	out := map[string][]itemCands{}
-	item := regexp.MustCompile("^- `([^`]+#[0-9]+)` (.*)$")
+	item := regexp.MustCompile("^- `([^`#]+#(?:[0-9]+|[a-z][a-z0-9._-]*))` (.*)$")
 	cand := regexp.MustCompile("^  [0-9]+\\. `([^`]+)`")
 	for _, file := range files {
 		b, _ := os.ReadFile(file)

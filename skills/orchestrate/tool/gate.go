@@ -418,7 +418,11 @@ func gateDeterministic(repo string, cfg config, sp *spec, src string) []string {
 				seen[ptr] = true
 				note, err := checkPointer(repo, ptr)
 				if err != nil {
-					out = append(out, fmt.Sprintf("package %s: Builds bullet %d: %v", p.id, n+1, err))
+					label := fmt.Sprintf("Builds bullet %d", n+1)
+					if b.ID != "" {
+						label += " (" + itemKey(p.id, b.ID) + ")"
+					}
+					out = append(out, fmt.Sprintf("package %s: %s: %v", p.id, label, err))
 				} else if note != "" {
 					out = append(out, "note: "+note)
 				}

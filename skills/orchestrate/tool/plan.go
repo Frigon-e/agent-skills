@@ -579,15 +579,18 @@ func specText(p *specPackage) string {
 		return p.body
 	}
 	var b strings.Builder
-	b.WriteString(p.body + "\n\nBuilds:\n")
-	for i, it := range p.builds {
-		fmt.Fprintf(&b, "- %s#%d: %s", p.id, i+1, it.Text)
-		b.WriteString("\n")
+	b.WriteString(p.body)
+	b.WriteString("\n\nBuilds:\n")
+	for _, it := range packageItems(p) {
+		fmt.Fprintf(&b, "- %s: %s\n", it.ID, it.Text)
+		if len(it.Supersedes) > 0 {
+			fmt.Fprintf(&b, "  supersedes: %s\n", strings.Join(it.Supersedes, ", "))
+		}
 		for _, q := range it.Queries {
-			b.WriteString("  search: " + q + "\n")
+			fmt.Fprintf(&b, "  search: %s\n", q)
 		}
 		if len(it.Reuse) > 0 {
-			b.WriteString("  reuse: " + strings.Join(it.Reuse, ", ") + "\n")
+			fmt.Fprintf(&b, "  reuse: %s\n", strings.Join(it.Reuse, ", "))
 		}
 	}
 	return strings.TrimRight(b.String(), "\n")
