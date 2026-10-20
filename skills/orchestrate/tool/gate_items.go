@@ -216,11 +216,15 @@ func (f *flexStr) UnmarshalJSON(b []byte) error {
 
 // itemVerdict is the model's answer for one item.
 type itemVerdict struct {
-	Item      string  `json:"item"`
-	Verdict   string  `json:"verdict"`
-	Candidate flexStr `json:"candidate"`
-	Why       string  `json:"why"`
-	fields    map[string]json.RawMessage
+	EvidenceIDs      []string      `json:"evidence_ids,omitempty"`
+	MatchingBehavior string        `json:"matching_behavior,omitempty"`
+	MissingBehavior  string        `json:"missing_behavior,omitempty"`
+	Assessment       *claimSupport `json:"support_assessment,omitempty"`
+	Item             string        `json:"item"`
+	Verdict          string        `json:"verdict"`
+	Candidate        flexStr       `json:"candidate"`
+	Why              string        `json:"why"`
+	fields           map[string]json.RawMessage
 }
 
 func (v *itemVerdict) UnmarshalJSON(b []byte) error {
@@ -233,14 +237,17 @@ func (v *itemVerdict) UnmarshalJSON(b []byte) error {
 
 // gateItemResult is one item in gate.json: its verdict and where it came from.
 type gateItemResult struct {
-	ID        string `json:"id"`
-	Package   string `json:"package"`
-	Text      string `json:"text"`
-	Verdict   string `json:"verdict"` // reuse, extend, new, unclear, or "" for none
-	Candidate string `json:"candidate,omitempty"`
-	Why       string `json:"why,omitempty"`
-	Pass      string `json:"source_pass,omitempty"`
-	Verified  bool   `json:"verified,omitempty"` // the candidate's evidence holds
+	AnswerID    string `json:"review_answer_id,omitempty"`
+	Revision    string `json:"revision,omitempty"`
+	AnswerValid *bool  `json:"answer_valid,omitempty"`
+	ID          string `json:"id"`
+	Package     string `json:"package"`
+	Text        string `json:"text"`
+	Verdict     string `json:"verdict"` // reuse, extend, new, unclear, or "" for none
+	Candidate   string `json:"candidate,omitempty"`
+	Why         string `json:"why,omitempty"`
+	Pass        string `json:"source_pass,omitempty"`
+	Verified    bool   `json:"verified,omitempty"` // the candidate's evidence holds
 }
 
 // normVerdict maps a verdict word to one of the four values, "" if unknown.
@@ -276,7 +283,7 @@ func (r *gateRecord) ensureItems(items []gateItem) {
 	}
 	for _, it := range items {
 		if !have[it.ID] {
-			r.Items = append(r.Items, gateItemResult{ID: it.ID, Package: it.Package, Text: it.Text})
+			r.Items = append(r.Items, gateItemResult{ID: it.ID, Package: it.Package, Text: it.Text, Revision: it.Revision})
 		}
 	}
 }
@@ -304,6 +311,7 @@ func (r *gateRecord) applyVerdicts(pass, repo string, items []gateItem, vs []ite
 			if res.ID != it.ID || res.covered() {
 				continue
 			}
+			previous := *res
 			res.Verdict, res.Candidate, res.Why, res.Pass = verdict, strings.TrimSpace(string(v.Candidate)), v.Why, pass
 			res.Verified = false
 			if res.Candidate == "null" {
@@ -323,12 +331,67 @@ func (r *gateRecord) applyVerdicts(pass, repo string, items []gateItem, vs []ite
 				}
 				r.Findings = append(r.Findings, f)
 			}
+			if r.Review != nil {
+				raw, _ := json.Marshal(v)
+				actor := strings.TrimSuffix(pass, "#retry")
+				recordGateAnswer(r, it.ID, "reuse", actor, string(raw), reviewJudgment(verdict), v.Why, v.MatchingBehavior, v.MissingBehavior)
+				answerID := "answer-" + subjectJSONDigest([]string{it.ID + "/reuse", string(raw), actor})
+				valid := false
+				for j := range r.Review.Answers {
+					a := &r.Review.Answers[j]
+					if a.ID != answerID {
+						continue
+					}
+					if v.Assessment == nil || v.Assessment.SchemaVersion != evidenceSchemaVersion || v.Assessment.State != claimSupported || strings.TrimSpace(v.Assessment.Rationale) == "" || (verdict == verdictReuse || verdict == verdictExtend) && !res.Verified {
+						a.Support = nil
+						continue
+					}
+					replyID := addGateObservation(r, it.ID+"/reuse", string(raw), actor)
+					a.EvidenceIDs = []string{replyID}
+					a.Support = &claimSupport{SchemaVersion: evidenceSchemaVersion, State: claimSupported, Assessor: actor, Method: "model", Rationale: v.Assessment.Rationale, EvidenceIDs: []string{replyID}}
+					if verdict == verdictReuse || verdict == verdictExtend {
+						eid := captureGateSource(r, repo, res.Candidate, actor)
+						if eid == "" {
+							a.Support = nil
+							continue
+						}
+						a.EvidenceIDs = append(a.EvidenceIDs, eid)
+						a.Support.EvidenceIDs = []string{eid}
+					}
+					for _, eid := range v.EvidenceIDs {
+						if !containsReviewID(a.EvidenceIDs, eid) {
+							a.EvidenceIDs = append(a.EvidenceIDs, eid)
+						}
+						if !containsReviewID(a.Support.EvidenceIDs, eid) {
+							a.Support.EvidenceIDs = append(a.Support.EvidenceIDs, eid)
+						}
+					}
+					valid = verdict != verdictUnclr && strings.TrimSpace(v.Why) != "" && (verdict != verdictNew || adequateReviewSearch(r.Review.Policy.Packet, a.EvidenceIDs...)) && (verdict == verdictNew || strings.TrimSpace(v.MatchingBehavior) != "") && (verdict != verdictExtend || strings.TrimSpace(v.MissingBehavior) != "") && a.Validate(reviewItem{SchemaVersion: evidenceSchemaVersion, ID: it.ID, Revision: it.Revision, Package: it.Package, Requirement: it.Text, Checks: []string{"reuse"}}, r.Review.Policy.Packet, r.Subject, r.Review.Policy.CurrentHashes) == nil
+				}
+				// A bounded supporting repair may replace only this exact unresolved
+				// claim. Changed judgments/candidates remain competing claims. Findings,
+				// especially accepted blockers, are never superseded by answer repair.
+				if valid && strings.HasSuffix(pass, "#retry") && previous.AnswerID != "" && previous.AnswerID != answerID && previous.Verdict == res.Verdict && previous.Candidate == res.Candidate && strings.TrimSuffix(previous.Pass, "#retry") == actor {
+					for j, old := range r.Review.Answers {
+						if old.ID == previous.AnswerID && old.ItemID == it.ID && old.ItemRevision == it.Revision && old.CheckID == "reuse" {
+							r.Review.Repairs = append(r.Review.Repairs, reviewAnswerRepair{Previous: old, ReplacementID: answerID, Actor: actor, Rationale: "Bounded support repair of the same judgment and candidate"})
+							r.Review.Answers = append(r.Review.Answers[:j], r.Review.Answers[j+1:]...)
+							break
+						}
+					}
+				}
+				res.AnswerID = answerID
+				res.AnswerValid = &valid
+			}
 		}
 	}
 }
 
 // covered requires a valid candidate for reuse/extend, not just a verdict word.
 func (r gateItemResult) covered() bool {
+	if r.AnswerValid != nil && !*r.AnswerValid {
+		return false
+	}
 	switch r.Verdict {
 	case verdictReuse, verdictExtend:
 		return r.Verified

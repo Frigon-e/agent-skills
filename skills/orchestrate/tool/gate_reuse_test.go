@@ -313,8 +313,8 @@ esac
 func TestGroupVerdictsAreOffByDefaultAndTheRetryAsksOnlyForMissingItems(t *testing.T) {
 	h := setup(t)
 	gdir := verdictRepo(t, h)
-	group := `{"packages":[{"id":"api","will_change":[],"claims":[],"questions":[],"reuse":[],"items":[{"item":"api#1","verdict":"reuse","candidate":"internal/store.go:3","why":"Put exists"}]}]}`
-	retry := `{"packages":[{"id":"api","items":[{"item":"api#2","verdict":"extend","candidate":"internal/store.go:3","why":"add the route beside Put"}]}]}`
+	group := `{"packages":[{"id":"api","will_change":[],"claims":[],"questions":[],"reuse":[],"items":[{"item":"api#1","verdict":"reuse","candidate":"internal/store.go:3","why":"Put exists","matching_behavior":"Put stores the record","support_assessment":{"schema_version":1,"state":"supported","rationale":"The existing Put function handles the requested storage behavior"}}]}]}`
+	retry := `{"packages":[{"id":"api","items":[{"item":"api#2","verdict":"extend","candidate":"internal/store.go:3","why":"add the route beside Put","matching_behavior":"Put supplies storage","missing_behavior":"Add the POST route beside Put","support_assessment":{"schema_version":1,"state":"supported","rationale":"Storage exists but the requested HTTP route must be added"}}]}]}`
 	dir := scriptPi(t, h, cleanPackageReply, retry)
 
 	// Off by default: no verdict is asked for and no retry runs.

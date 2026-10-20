@@ -18,6 +18,8 @@ func saveSubjectApproval(t *testing.T, h *harness, code string) (*gateRecord, []
 	}
 	rec := &gateRecord{Spec: "spec.md", Hash: specHash(src), Status: gateStatePass, Subject: subject,
 		ReviewPolicy: &gateReviewPolicy{Version: gateReviewPolicyVersion, CtxTool: "on", ContextFiles: "off", CtxShell: "open", Dossier: "code"}}
+	initGateReview(rec, &spec{}, string(src), nil)
+	reduceGateRecord(rec)
 	dir := gateDir(h.a.siteRoot(t), specHash(src))
 	if err := writeGate(dir, rec); err != nil {
 		t.Fatal(err)
@@ -340,7 +342,7 @@ func TestCheckoutCompletionRechecks(t *testing.T) {
 	writeFiles(t, h.repo, map[string]string{"after-final-pass.py": "changed"})
 	rec := &gateRecord{Status: gateStatePass, PassErrors: map[string]string{}}
 	guard.finish(rec)
-	if rec.Status != "unverified" || len(rec.TreeChanged) != 1 {
-		t.Fatalf("completion did not check: %+v", rec)
+	if rec.Status != gateStatePass || len(rec.TreeChanged) != 1 || rec.PassErrors["all"] == "" {
+		t.Fatalf("completion did not record the change without deciding status: %+v", rec)
 	}
 }

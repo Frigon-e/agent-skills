@@ -24,9 +24,8 @@ import (
 // The gate checks a spec before any lead starts. Deterministic checks cover
 // what code can prove (pointers, acceptance commands). Cheap read-only model
 // passes (pi, default Flash) then probe scope, open questions and design
-// flaws. A model claim counts only when its evidence (`path:line`) exists in
-// the repo, so a verifier cannot block or pass a spec by assertion. The
-// orchestrator and the user make the final call; the gate removes noise.
+// flaws. A locator identifies source, not semantic support. ReduceReview
+// validates recorded support and authority before accepting a blocker or pass.
 const (
 	gateParallel   = 6 // model passes at once, so a large spec does not flood the provider
 	gateModelDef   = "openrouter/~deepseek/deepseek-flash-latest"
@@ -66,14 +65,17 @@ func (e *passLimit) Error() string { return e.msg }
 var gateWarmDelay = 45 * time.Second
 
 type gateFinding struct {
-	Severity string `json:"severity"` // blocker or concern
-	Where    string `json:"where"`
-	Claim    string `json:"claim"`
-	Evidence string `json:"evidence"`
-	Why      string `json:"why,omitempty"`
-	Source   string `json:"source"`
-	Verified bool   `json:"verified"`
-	Support  string `json:"support,omitempty"` // structural ownership is proven by the spec graph
+	ID         string        `json:"id,omitempty"`
+	Accepted   bool          `json:"accepted,omitempty"`
+	Assessment *claimSupport `json:"support_assessment,omitempty"`
+	Severity   string        `json:"severity"` // blocker or concern
+	Where      string        `json:"where"`
+	Claim      string        `json:"claim"`
+	Evidence   string        `json:"evidence"`
+	Why        string        `json:"why,omitempty"`
+	Source     string        `json:"source"`
+	Verified   bool          `json:"verified"`
+	Support    string        `json:"support,omitempty"` // structural ownership is proven by the spec graph
 }
 
 type gateQuestion struct {
@@ -88,44 +90,52 @@ type gateQuestion struct {
 func (q gateQuestion) blocks() bool { return q.Decisive && q.AnsweredBy == "" }
 
 type gateRecord struct {
-	Subject           *gateSubject          `json:"subject,omitempty"`
-	ReviewPolicy      *gateReviewPolicy     `json:"review_policy,omitempty"`
-	SubjectStale      []string              `json:"subject_stale,omitempty"`
-	BenchBuild        benchBuild            `json:"bench_build,omitempty"`
-	BenchInputs       benchInputs           `json:"bench_inputs,omitempty"`
-	BenchConfig       benchConfig           `json:"bench_config,omitempty"`
-	Spec              string                `json:"spec"`
-	Hash              string                `json:"hash"`
-	At                int64                 `json:"at"`
-	Status            string                `json:"status"`            // pass, fail or unverified
-	Reasons           []string              `json:"reasons,omitempty"` // incomplete review or execution failures
-	CtxTool           string                `json:"ctx_tool"`
-	ContextFiles      string                `json:"context_files"`
-	CtxProfile        string                `json:"ctx_profile,omitempty"` // a named orch ctx tuning, empty for the default
-	CtxShell          string                `json:"ctx_shell,omitempty"`   // effective shell policy: open or ctx-only
-	TreeChanged       []string              `json:"tree_changed,omitempty"`
-	TreeChangedPasses []string              `json:"tree_changed_passes,omitempty"`
-	TreeCheckError    string                `json:"tree_check_error,omitempty"`
-	Deterministic     []string              `json:"deterministic,omitempty"`
-	Findings          []gateFinding         `json:"findings,omitempty"`
-	Questions         []gateQuestion        `json:"questions,omitempty"`
-	Dropped           int                   `json:"dropped_unsupported_claims"`
-	PassErrors        map[string]string     `json:"pass_errors,omitempty"`
-	PassRunners       map[string]string     `json:"pass_runners,omitempty"`
-	PassSeconds       map[string]int        `json:"pass_seconds,omitempty"` // wall time per model pass, timeouts included
-	Salvaged          []string              `json:"salvaged,omitempty"`     // passes whose reply was not valid JSON but could be read
-	Groups            map[string][]string   `json:"groups,omitempty"`       // package ids covered by each group pass
-	PassKept          map[string]string     `json:"pass_kept,omitempty"`    // files kept for a pass that did not run, to read afterwards
-	PassTokens        map[string]passTokens `json:"pass_tokens,omitempty"`  // model usage per pass, when its session recorded any
-	Dossier           string                `json:"dossier,omitempty"`      // off, code or plan
-	DossierChars      map[string]int        `json:"dossier_chars,omitempty"`
-	Cache             string                `json:"cache,omitempty"`  // short or long: the provider prompt-cache retention asked for
-	Items             []gateItemResult      `json:"items,omitempty"`  // one result per item of a package, with its verdict
-	Shadow            string                `json:"shadow,omitempty"` // the shadow judges that ran (record only)
-	Notes             []string              `json:"notes,omitempty"`
-	Experiment        string                `json:"experiment,omitempty"`
-	Only              []string              `json:"only,omitempty"`
-	SpecRel           string                `json:"spec_rel,omitempty"`
+	SchemaVersion     int                          `json:"schema_version,omitempty"`
+	State             string                       `json:"state,omitempty"`
+	Completion        reviewCompletion             `json:"completion,omitempty"`
+	NextActors        []string                     `json:"next_actors,omitempty"`
+	NextActions       []reviewAction               `json:"next_actions,omitempty"`
+	Review            *gateReviewRecords           `json:"review,omitempty"`
+	Reduction         *reviewResult                `json:"reduction,omitempty"`
+	Subject           *gateSubject                 `json:"subject,omitempty"`
+	ReviewPolicy      *gateReviewPolicy            `json:"review_policy,omitempty"`
+	SubjectStale      []string                     `json:"subject_stale,omitempty"`
+	BenchBuild        benchBuild                   `json:"bench_build,omitempty"`
+	BenchInputs       benchInputs                  `json:"bench_inputs,omitempty"`
+	BenchConfig       benchConfig                  `json:"bench_config,omitempty"`
+	Spec              string                       `json:"spec"`
+	Hash              string                       `json:"hash"`
+	At                int64                        `json:"at"`
+	Status            string                       `json:"status"`            // pass, fail or unverified
+	Reasons           []string                     `json:"reasons,omitempty"` // incomplete review or execution failures
+	CtxTool           string                       `json:"ctx_tool"`
+	ContextFiles      string                       `json:"context_files"`
+	CtxProfile        string                       `json:"ctx_profile,omitempty"` // a named orch ctx tuning, empty for the default
+	CtxShell          string                       `json:"ctx_shell,omitempty"`   // effective shell policy: open or ctx-only
+	TreeChanged       []string                     `json:"tree_changed,omitempty"`
+	TreeChangedPasses []string                     `json:"tree_changed_passes,omitempty"`
+	TreeCheckError    string                       `json:"tree_check_error,omitempty"`
+	Deterministic     []string                     `json:"deterministic,omitempty"`
+	Findings          []gateFinding                `json:"findings,omitempty"`
+	Questions         []gateQuestion               `json:"questions,omitempty"`
+	Dropped           int                          `json:"dropped_unsupported_claims"`
+	PassErrors        map[string]string            `json:"pass_errors,omitempty"`
+	PassAnswerStates  map[string]reviewAnswerState `json:"pass_answer_states,omitempty"`
+	PassRunners       map[string]string            `json:"pass_runners,omitempty"`
+	PassSeconds       map[string]int               `json:"pass_seconds,omitempty"` // wall time per model pass, timeouts included
+	Salvaged          []string                     `json:"salvaged,omitempty"`     // passes whose reply was not valid JSON but could be read
+	Groups            map[string][]string          `json:"groups,omitempty"`       // package ids covered by each group pass
+	PassKept          map[string]string            `json:"pass_kept,omitempty"`    // files kept for a pass that did not run, to read afterwards
+	PassTokens        map[string]passTokens        `json:"pass_tokens,omitempty"`  // model usage per pass, when its session recorded any
+	Dossier           string                       `json:"dossier,omitempty"`      // off, code or plan
+	DossierChars      map[string]int               `json:"dossier_chars,omitempty"`
+	Cache             string                       `json:"cache,omitempty"`  // short or long: the provider prompt-cache retention asked for
+	Items             []gateItemResult             `json:"items,omitempty"`  // one result per item of a package, with its verdict
+	Shadow            string                       `json:"shadow,omitempty"` // the shadow judges that ran (record only)
+	Notes             []string                     `json:"notes,omitempty"`
+	Experiment        string                       `json:"experiment,omitempty"`
+	Only              []string                     `json:"only,omitempty"`
+	SpecRel           string                       `json:"spec_rel,omitempty"`
 }
 
 type passTokens struct {
@@ -885,11 +895,12 @@ func budgetSentence(n int, ctxOn ...bool) string {
 func buildGatePasses(code, src, rel string, sp *spec, groups map[string][]string, dos *dossierSet, plan bool, only map[string]bool) []gatePass {
 	scope := adversaryScope(specFiles(code, src))
 	specCtx := gateSpecContext(src, rel)
-	advA := newGatePass("adversary-a", "adversary", specCtx, "", "GATE-ADVERSARY-A", `Attack the Design rules and the Authority section. Find a rule that the code contradicts, a failure case no package covers, or an unsafe default. Report only what you can prove.`+scope+budgetSentence(gateTurnsAdversary),
-		`{"findings":[{"severity":"blocker|concern","where":"","claim":"","evidence":"path:line","why":""}]}`, applyFindings("adversary-a"))
+	supportInstructions := ` For each semantic blocker provide support_assessment with schema_version 1, state supported|unsupported|conflicting|unknown, rationale, an exact source excerpt, and a concrete failure_scenario. A locator or confidence alone is not support. Use unsupported when the behavior cannot be established; do not label model interpretations structural.`
+	advA := newGatePass("adversary-a", "adversary", specCtx, "", "GATE-ADVERSARY-A", `Attack the Design rules and the Authority section. Find a rule that the code contradicts, a failure case no package covers, or an unsafe default. Report only what you can support.`+supportInstructions+scope+budgetSentence(gateTurnsAdversary),
+		`{"findings":[{"severity":"blocker|concern","where":"","claim":"","evidence":"path:line","why":"","support_assessment":{"schema_version":1,"state":"supported","rationale":"","excerpt":"","failure_scenario":""}}]}`, applyFindings("adversary-a"))
 	advA.budget = gateTurnsAdversary
-	advB := newGatePass("adversary-b", "adversary", specCtx, "", "GATE-ADVERSARY-B", `Assume the packages are built exactly as written and the acceptance commands pass. What still breaks for a user, or between two packages? Gaps in a contract that two packages share (one produces, the other consumes) are your job, and so is two packages of this spec building the same thing (duplicate producers, two implementations of one contract). Report only what you can prove.`+scope+budgetSentence(gateTurnsAdversary),
-		`{"findings":[{"severity":"blocker|concern","where":"","claim":"","evidence":"path:line","why":""}]}`, applyFindings("adversary-b"))
+	advB := newGatePass("adversary-b", "adversary", specCtx, "", "GATE-ADVERSARY-B", `Assume the packages are built exactly as written and the acceptance commands pass. What still breaks for a user, or between two packages? Gaps in a contract that two packages share (one produces, the other consumes) are your job, and so is two packages of this spec building the same thing (duplicate producers, two implementations of one contract). Report only what you can support.`+supportInstructions+scope+budgetSentence(gateTurnsAdversary),
+		`{"findings":[{"severity":"blocker|concern","where":"","claim":"","evidence":"path:line","why":"","support_assessment":{"schema_version":1,"state":"supported","rationale":"","excerpt":"","failure_scenario":""}}]}`, applyFindings("adversary-b"))
 	advB.budget = gateTurnsAdversary
 	// Scope and questions share one pass per group of related packages: it
 	// sees the shared sections and the package index but only its own
@@ -925,6 +936,8 @@ func buildGatePasses(code, src, rel string, sp *spec, groups map[string][]string
 		groups[key] = ids
 		joined := strings.Join(texts, "\n\n")
 		var gitems []gateItem
+		// Package-level scope, questions and reuse are always required. Per-item
+		// verdicts remain an explicitly requested experimental review mode.
 		if dos != nil && dos.verdicts && dos.hasItems(ids) {
 			gitems = dos.itemsOf(ids)
 		}
@@ -938,8 +951,11 @@ func buildGatePasses(code, src, rel string, sp *spec, groups map[string][]string
 			schema := `{"packages":[{"id":"","will_change":["path"],"claims":[{"claim":"","evidence":"path:line"}],"questions":[{"question":"","answered_by":"","changes_result":false}],"reuse":[{"builds":"","existing":"","evidence":"path:line","why":""}]}]}`
 			budget := budgetSentence(gateTurnsBase + gateTurnsPerPackage*len(ids))
 			if len(gitems) > 0 {
-				reuseTask = reuseItemsTask
-				schema = `{"packages":[{"id":"","will_change":["path"],"claims":[{"claim":"","evidence":"path:line"}],"questions":[{"question":"","answered_by":"","changes_result":false}],"items":[{"item":"<package>#<n>","verdict":"reuse|extend|new|unclear","candidate":"path:line or null","why":""}]}]}`
+				if dos == nil || !dos.verdicts {
+					own += "\n\n" + requiredReviewChecklist(gitems)
+				}
+				reuseTask = reuseItemsTask + ` Packages without Builds items must give an explicit reuse array and items: []; do not omit their package-level reuse review.`
+				schema = `{"packages":[{"id":"","will_change":["path"],"claims":[{"claim":"","evidence":"path:line"}],"questions":[{"question":"","answered_by":"","changes_result":false}],"reuse":[],"items":[{"item":"<package>#<id>","verdict":"reuse|extend|new|unclear","candidate":"path:line or null","why":"","matching_behavior":"","missing_behavior":"","evidence_ids":[],"support_assessment":{"schema_version":1,"state":"supported","rationale":""}}]}]}`
 				budget = budgetSentenceItems(gateTurnsBase + gateTurnsPerPackage*len(ids))
 			}
 			p := newGatePass(key, "package", pkgShared, own, "GATE-GROUP",
@@ -1241,6 +1257,7 @@ func cmdGate(a *app, args []string) error {
 		dos.verdicts = opts.verdicts
 	}
 	passes := buildGatePasses(code, src, rel, sp, rec.Groups, dos, opts.dossier == "plan", only)
+	initGateReview(rec, sp, src, passes)
 	for _, p := range passes {
 		if rec.BenchConfig.Budgets != nil {
 			rec.BenchConfig.Budgets[p.name] = p.budget
@@ -1331,37 +1348,19 @@ func cmdGate(a *app, args []string) error {
 		_ = dos.write(runDir)
 	}
 
+	prepareGateReview(rec, code)
 	if opts.guard != nil {
 		opts.guard.finish(rec)
 	}
 	finishGateSubject(rec, code, filepath.Join(code, rel))
-	blockers, unanswered := 0, 0
-	for _, f := range rec.Findings {
-		if f.Verified && f.Severity == "blocker" {
-			blockers++
-		}
-	}
+	reduceGateRecord(rec)
+	blockers, unanswered := len(rec.Reduction.ActiveBlockers), 0
 	for _, q := range rec.Questions {
 		if q.blocks() {
 			unanswered++
 		}
 	}
-	switch {
-	case len(rec.SubjectStale) > 0, len(rec.TreeChanged) > 0 || rec.TreeCheckError != "":
-		rec.Status = "unverified"
-	case experiment:
-		rec.Status = "experiment"
-	case strings.HasPrefix(rec.PassErrors["all"], "gate off:"):
-		rec.Status = "unverified"
-	case hasError(rec.Deterministic), blockers > 0, unanswered > 0:
-		rec.Status = "fail"
-	case len(rec.PassErrors) > 0:
-		rec.Status = "unverified"
-	default:
-		rec.Status = gateStatePass
-	}
-	// finish also sets unverified on checkout failure. Preserve its refusal
-	// here and expose precise execution/coverage failures additively.
+	// Status is derived only by ReduceReview. Keep legacy execution diagnostics.
 	var failedPasses []string
 	for name := range rec.PassErrors {
 		failedPasses = append(failedPasses, name)
@@ -1571,6 +1570,7 @@ func runGatePasses(dir, code, model string, passes []gatePass, rec *gateRecord, 
 					return out, err
 				}
 				out, err := run()
+				answerState := reviewAnswerUnavailable
 				// Stall, schema repair and coverage share one retry slot and
 				// the original deadline. A second reply never gets a third try.
 				retried := false
@@ -1582,6 +1582,9 @@ func runGatePasses(dir, code, model string, passes []gatePass, rec *gateRecord, 
 						err = fmt.Errorf("%v; retried once and failed again: %v", first, err)
 					}
 				}
+				if limit != nil || errors.As(err, &limit) {
+					answerState = reviewAnswerBudget
+				}
 				tokens, haveTokens := sessionTokens(filepath.Join(dir, "sessions", passFile(p.name)))
 				mu.Lock()
 				rec.PassSeconds[p.name] = int(time.Since(start).Seconds())
@@ -1592,6 +1595,9 @@ func runGatePasses(dir, code, model string, passes []gatePass, rec *gateRecord, 
 				var schemaErr error
 				if err == nil {
 					schemaErr = p.apply(out, rec, code, sp)
+					if schemaErr != nil {
+						answerState = reviewAnswerInvalid
+					}
 					err = schemaErr
 				}
 				missing := rec.missingItems(p.items)
@@ -1617,8 +1623,17 @@ func runGatePasses(dir, code, model string, passes []gatePass, rec *gateRecord, 
 					if rhave {
 						rec.PassTokens[rp.name] = rtokens
 					}
+					if rerr != nil {
+						answerState = reviewAnswerUnavailable
+						if errors.As(rerr, &limit) {
+							answerState = reviewAnswerBudget
+						}
+					}
 					if rerr == nil {
 						rerr = rp.apply(rout, rec, code, sp)
+						if rerr != nil {
+							answerState = reviewAnswerInvalid
+						}
 					}
 					if rerr != nil {
 						err = fmt.Errorf("repair exhausted: %v", rerr)
@@ -1636,12 +1651,19 @@ func runGatePasses(dir, code, model string, passes []gatePass, rec *gateRecord, 
 						ids = append(ids, it.ID)
 					}
 					detail := ""
+					if err == nil {
+						answerState = reviewAnswerInvalid
+					}
 					if err != nil {
 						detail = "; " + err.Error()
 					}
 					err = fmt.Errorf("incomplete review: %d items had no verdict or unsupported candidates: %s%s", len(left), strings.Join(ids, ", "), detail)
 				}
 				if err != nil {
+					if rec.PassAnswerStates == nil {
+						rec.PassAnswerStates = map[string]reviewAnswerState{}
+					}
+					rec.PassAnswerStates[p.name] = answerState
 					rec.PassErrors[p.name] = err.Error()
 					rec.PassKept[p.name] = keptFiles(dir, p.name, pool != nil)
 				} else {
@@ -1811,6 +1833,13 @@ func applyGroupItems(key string, ids []string, items map[string][]gateItem) func
 		} else if err := validateEntries(r.Packages, ids, items, false); err != nil {
 			return err
 		}
+		if decodeErr == nil && items != nil {
+			for _, e := range r.Packages {
+				if len(items[e.ID]) == 0 && e.Reuse == nil {
+					return fmt.Errorf("package %s: reuse must be an explicit array without Builds items", e.ID)
+				}
+			}
+		}
 		for _, e := range r.Packages {
 			scopeFor(e.ID, scopeReply{WillChange: e.WillChange, Claims: e.Claims}, rec, repo, sp)
 			for i := range e.Questions {
@@ -1831,6 +1860,7 @@ func applyGroupItems(key string, ids []string, items map[string][]gateItem) func
 				rec.Findings = append(rec.Findings, f)
 			}
 			if decodeErr == nil {
+				recordGateGroup(rec, key, raw, e, len(items[e.ID]) > 0)
 				rec.applyVerdicts(key, repo, items[e.ID], e.Items)
 			}
 		}
@@ -1918,6 +1948,9 @@ func applyFindings(source string) func(string, *gateRecord, string, *spec) error
 				return fmt.Errorf("invalid finding severity %q", f.Severity)
 			}
 			findings = append(findings, f)
+		}
+		if decodeErr == nil {
+			recordGateAnswer(rec, "@"+source, source, source, raw, reviewJudgmentSatisfied, "Explicit adversarial findings assessment", "", "")
 		}
 		for _, f := range findings {
 			f.Source, f.Support = source, ""

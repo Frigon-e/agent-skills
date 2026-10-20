@@ -343,7 +343,7 @@ func exists(path string) bool { _, err := os.Stat(path); return err == nil }
 func TestGatePanePassesRunInPanesAndApplyLikeHeadless(t *testing.T) {
 	h := setup(t)
 	gdir := h.gateRepo(3)
-	blocker := map[string]string{"adv-b": `{"findings":[{"severity":"blocker","where":"Design rules","claim":"Put ignores errors","evidence":"internal/store.go:3","why":"w"}]}`}
+	blocker := map[string]string{"adv-b": `{"findings":[{"severity":"blocker","where":"Design rules","claim":"Put ignores errors","evidence":"internal/store.go:3","why":"The failure path cannot return an error","support_assessment":{"schema_version":1,"state":"supported","rationale":"Put has no error return","excerpt":"func Put() {}","failure_scenario":"A write failure is hidden from the caller"}}]}`}
 	h.sessionPi(gatePasses(blocker))
 
 	code, paneOut := h.run("gate", "spec.md")

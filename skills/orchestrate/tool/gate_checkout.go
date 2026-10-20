@@ -130,9 +130,10 @@ func (g *checkoutGuard) finish(rec *gateRecord) {
 	sort.Strings(rec.TreeChanged)
 	sort.Strings(rec.TreeChangedPasses)
 	rec.TreeCheckError = g.failure
-	rec.Status = "unverified"
-	rec.Findings = nil
-	rec.Questions = nil
-	rec.Items = nil
-	rec.PassErrors["all"] = "checkout changed or could not be checked; review discarded; no files reverted"
+	// Capture facts only. ReduceReview owns state and keeps the useful review,
+	// even when a changed subject or failed checkout check takes precedence.
+	if rec.PassErrors == nil {
+		rec.PassErrors = map[string]string{}
+	}
+	rec.PassErrors["all"] = "checkout changed or could not be checked; approval withheld; no files reverted"
 }

@@ -714,15 +714,29 @@ func TestGateEvidenceDecidesTheVerdict(t *testing.T) {
 		t.Fatalf("plan without a gate: %d %s", code, out)
 	}
 
-	// A claim whose evidence is not in the repo is dropped, not counted.
+	// An unsupported blocking claim is not accepted, but the required check
+	// stays incomplete until evidence supports or rejects the interpretation.
 	h.fakePi(gatePasses(map[string]string{"adv-a": `{"findings":[{"severity":"blocker","where":"Design rules","claim":"x","evidence":"internal/nope.go:9"}]}`}))
-	out := h.must("gate", "spec.md")
-	wantContains(t, out, "gate: pass", "blockers: 0 verified", "concerns: 0 verified, 1 unverified", "dropped: 1 claim(s)")
-	h.must("plan", "spec.md") // the passed gate unlocks plan
-
-	// The same finding with evidence that exists is a verified blocker.
-	h.fakePi(gatePasses(map[string]string{"adv-b": `{"findings":[{"severity":"blocker","where":"Design rules","claim":"Put ignores errors","evidence":"internal/store.go:3","why":"w"}]}`}))
 	code, out := h.run("gate", "spec.md")
+	if code != 1 {
+		t.Fatalf("unsupported blocking claim passed: %d %s", code, out)
+	}
+	wantContains(t, out, "gate: unverified", "blockers: 0 verified", "concerns: 0 verified, 1 unverified", "dropped: 1 claim(s)")
+	gdir := gateDir(h.a.siteRoot(t), specHash(mustRead(t, filepath.Join(h.repo, "spec.md"))))
+	rec := readRecord(t, gdir)
+	if rec.State != "incomplete" || len(rec.Reduction.Reasons) == 0 || rec.Reduction.Reasons[0].Reason != reviewUnsupportedClaim {
+		t.Fatalf("unsupported claim did not remain incomplete: %+v", rec.Reduction)
+	}
+	if code, _ := h.run("plan", "spec.md"); code != 1 {
+		t.Fatal("unsupported claim authorized plan")
+	}
+	h.fakePi(gatePasses(nil))
+	h.must("gate", "spec.md")
+	h.must("plan", "spec.md") // only a complete supported review unlocks plan
+
+	// A valid locator plus separate behavioral support is an accepted blocker.
+	h.fakePi(gatePasses(map[string]string{"adv-b": `{"findings":[{"severity":"blocker","where":"Design rules","claim":"Put ignores errors","evidence":"internal/store.go:3","why":"The failure path does not report storage errors","support_assessment":{"schema_version":1,"state":"supported","rationale":"The Put implementation has no error return","excerpt":"func Put() {}","failure_scenario":"A failed write cannot be reported to its caller"}}]}`}))
+	code, out = h.run("gate", "spec.md")
 	if code != 1 {
 		t.Fatalf("a verified blocker passed the gate: %d %s", code, out)
 	}

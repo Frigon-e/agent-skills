@@ -162,9 +162,9 @@ func TestGateSchemaRepairSharesCoverageSlot(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			h := setup(t)
 			gdir := verdictRepo(t, h)
-			items := `{"item":"api#1","verdict":"new","candidate":null,"why":"new behavior"}`
+			items := `{"item":"api#1","verdict":"reuse","candidate":"internal/store.go:3","why":"Put stores records","matching_behavior":"Put stores records","support_assessment":{"schema_version":1,"state":"supported","rationale":"The existing source provides storage"}}`
 			if complete {
-				items += `,{"item":"api#2","verdict":"new","candidate":null,"why":"new endpoint"}`
+				items += `,{"item":"api#2","verdict":"extend","candidate":"internal/store.go:3","why":"Add the endpoint beside Put","matching_behavior":"Put provides storage","missing_behavior":"Add the endpoint","support_assessment":{"schema_version":1,"state":"supported","rationale":"Extend the existing storage with endpoint behavior"}}`
 			}
 			repaired := `{"packages":[{"id":"api","will_change":[],"claims":[],"questions":[],"items":[` + items + `]}]}`
 			dir := scriptPi(t, h, `{}`, repaired)
