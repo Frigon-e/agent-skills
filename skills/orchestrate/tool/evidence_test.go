@@ -66,6 +66,22 @@ func evidenceTestRoundTrip[T any](t *testing.T, original T) T {
 	return decoded
 }
 
+func TestEvidenceSearchSupportRequiresZeroResults(t *testing.T) {
+	for _, total := range []int{0, 7} {
+		p := evidenceTestPacket("python")
+		p.Evidence = nil
+		p.Lookups[0].Counts.Total = evidenceTestPtr(total)
+		if total == 0 {
+			p.Lookups[0].Status = "empty"
+		}
+		support := claimSupport{SchemaVersion: evidenceSchemaVersion, State: claimSupported, Assessor: "reviewer", Method: "model", Rationale: "A completed search found no implementation"}
+		err := support.ValidateSearch(p, []string{p.Lookups[0].ID}, p.Subject)
+		if (err == nil) != (total == 0) {
+			t.Fatalf("search-only support with total=%d: %v", total, err)
+		}
+	}
+}
+
 func TestEvidenceSourceFixturesAndStrings(t *testing.T) {
 	for _, language := range []string{"python", "typescript"} {
 		t.Run(language, func(t *testing.T) {

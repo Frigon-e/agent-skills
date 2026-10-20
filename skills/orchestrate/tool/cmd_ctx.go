@@ -1097,10 +1097,13 @@ func ctxReadiness(e *ctxEnv) string {
 	return line
 }
 
-// tsServerPath is the TypeScript server if it exists, else "".
+// tsServerPath reports availability using the same executable check as
+// langStatuses. A configured path may exist without being a usable server.
 func tsServerPath(code string) string {
-	if p := tslsBin(code); p != "" && (fileExists(p) || which(p) != "") {
-		return p
+	if p := tslsBin(code); p != "" {
+		if _, err := exec.LookPath(p); err == nil {
+			return p
+		}
 	}
 	return ""
 }

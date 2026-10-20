@@ -23,6 +23,7 @@ func fixtureReview(t *testing.T, h *harness, f portabilityFixture) (*gateSubject
 	p.Packet.Lookups[0].Query = "Normalize"
 	p.Packet.Lookups[0].Scope = "parser/"
 	cs[0].SearchScope = "parser/"
+	cs[0].SearchQuery = p.Packet.Lookups[0].Query
 	cs[0].Item.ID = "parser#normalize"
 	cs[0].Item.Package = "parser"
 	cs[0].Item.Requirement = "Trim file names without changing their case"
@@ -60,6 +61,7 @@ func TestFixtureGateTrust(t *testing.T) {
 							as[0].Support.Rationale = "The complete recorded search found no streaming processor"
 							as[0].Rationale = as[0].Support.Rationale
 							p.Packet.Lookups[0].Query = "stream file chunks"
+							cs[0].SearchQuery = p.Packet.Lookups[0].Query
 							p.Packet.Lookups[0].Counts.Total = evidenceTestPtr(0)
 							p.Packet.Lookups[0].Status = "empty"
 							// A completed empty search is coverage, not an evidence row.

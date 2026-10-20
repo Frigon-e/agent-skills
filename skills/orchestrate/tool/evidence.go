@@ -262,10 +262,16 @@ func (s claimSupport) Validate(evidence map[string]evidenceRecord) error {
 
 // ValidateSearch permits an absence assessment to cite search coverage instead
 // of manufacturing a source observation for a lookup that returned nothing.
-// Adequacy (scope, exact counts and completeness) remains reducer policy.
+// Only complete exact zero-result lookups qualify for this structural relaxation.
+// Requirement/query binding, scope and exclusion adequacy remain reducer policy.
 func (s claimSupport) ValidateSearch(p evidencePacket, ids []string, current *gateSubject) error {
 	if err := p.ValidateLookupAttachment(ids, current); err != nil {
 		return err
+	}
+	for _, l := range p.Lookups {
+		if slices.Contains(ids, l.ID) && (l.Status != "empty" || l.CountKind != evidenceCountExact || l.Counts.Total == nil || *l.Counts.Total != 0) {
+			return fmt.Errorf("search-only support requires complete exact zero results: %s", l.ID)
+		}
 	}
 	return s.validate(p.evidenceIndex(), len(ids) > 0)
 }
