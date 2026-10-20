@@ -1946,8 +1946,7 @@ func writeGate(dir string, rec *gateRecord) error {
 		}
 		n++
 		key := cardKey(n, q.Package)
-		card := fmt.Sprintf("---\nquestion: %s\n---\n## Context\nRaised by the spec gate for package `%s`. No file in the repo answers it.\n",
-			strings.Join(strings.Fields(q.Question), " "), q.Package)
+		card := gateQuestionCard(q)
 		if err := os.WriteFile(filepath.Join(qdir, key+".md"), []byte(card), 0o644); err != nil {
 			return err
 		}
