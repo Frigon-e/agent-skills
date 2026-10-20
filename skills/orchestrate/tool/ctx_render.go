@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strconv"
@@ -32,10 +33,11 @@ const (
 
 // ctxFmt carries the output options shared by every command.
 type ctxFmt struct {
-	Full    bool            // raise bounded caps
-	Compact bool            // the shortest answer: counts, signatures, first lines
-	Batch   bool            // the lookup runs inside orch ctx batch, so hints use -q keys
-	Fields  map[string]bool // src
+	SchemaVersion int             // 0/1: legacy JSON/prose; 2: faithful, shared selection
+	Full          bool            // raise bounded caps
+	Compact       bool            // the shortest answer: counts, signatures, first lines
+	Batch         bool            // the lookup runs inside orch ctx batch, so hints use -q keys
+	Fields        map[string]bool // src
 }
 
 var ctxFieldNames = []string{"src"}
@@ -63,16 +65,37 @@ func (f ctxFmt) answerCap() int {
 // ctxLine is one line of a file: a match (or the line of a chunk, caller or
 // definition) or a context line around one.
 type ctxLine struct {
-	N     int    `json:"n"`
-	Text  string `json:"text"`
-	Match bool   `json:"match,omitempty"`
-	In    string `json:"in,omitempty"` // the declaration that holds a match
+	ID        string `json:"id,omitempty"` // v2 evidence reference; absent in legacy JSON
+	Reference string `json:"reference,omitempty"`
+	N         int    `json:"n"`
+	Text      string `json:"text"`
+	Match     bool   `json:"match,omitempty"`
+	In        string `json:"in,omitempty"` // the declaration that holds a match
 }
 
 type ctxFileHits struct {
-	Path  string    `json:"path"`
-	Lines []ctxLine `json:"lines"`
-	Notes []string  `json:"notes,omitempty"`
+	ID         string    `json:"id,omitempty"`         // v2 stable source reference, absent from legacy JSON
+	References []string  `json:"references,omitempty"` // source lines already emitted in this selected result
+	Path       string    `json:"path"`
+	Lines      []ctxLine `json:"lines"`
+	Notes      []string  `json:"notes,omitempty"`
+}
+
+// MarshalJSON retains exact legacy line bytes/schema, while v2 references keep
+// lookup-specific match/enclosing metadata without repeating the source text.
+func (l ctxLine) MarshalJSON() ([]byte, error) {
+	type plain ctxLine
+	if l.Reference == "" {
+		return json.Marshal(plain(l))
+	}
+	ref := map[string]any{"reference": l.Reference, "n": l.N}
+	if l.Match {
+		ref["match"] = true
+	}
+	if l.In != "" {
+		ref["in"] = l.In
+	}
+	return json.Marshal(ref)
 }
 
 // ctxPart is a titled section of an answer: verbatim lines and/or files.
@@ -291,20 +314,40 @@ func validTests(mode string) bool {
 }
 
 // lineAt is line n of ls without its indentation, "" past the ends.
-func lineAt(ls []string, n int) string {
+func lineAt(ls []string, n int, version ...int) string {
 	if n < 1 || n > len(ls) {
 		return ""
+	}
+	if len(version) > 0 && version[0] == 2 {
+		return ls[n-1]
 	}
 	return strings.TrimSpace(ls[n-1])
 }
 
+func sourceExcerpt(s string, f ctxFmt) string {
+	if f.SchemaVersion == 2 {
+		return s
+	}
+	return short(keepIndent(s), f.width())
+}
+
 // addAround adds line n of a file as a match, with up to ctx non-blank lines
 // on each side as context.
-func addAround(p *ctxPart, path string, ls []string, n int, text, in string, ctx, width int) {
-	p.add(path, ctxLine{N: n, Text: short(text, width), Match: true, In: in})
+func addAround(p *ctxPart, path string, ls []string, n int, text, in string, ctx, width int, version ...int) {
+	faithful := len(version) > 0 && version[0] == 2
+	clip := func(s string) string {
+		if faithful {
+			return s
+		}
+		return short(s, width)
+	}
+	p.add(path, ctxLine{N: n, Text: clip(text), Match: true, In: in})
 	for d := -ctx; d <= ctx; d++ {
-		if t := lineAt(ls, n+d); d != 0 && t != "" {
-			p.add(path, ctxLine{N: n + d, Text: short(t, width)})
+		if d == 0 || n+d < 1 || n+d > len(ls) {
+			continue
+		}
+		if t := lineAt(ls, n+d, version...); t != "" || faithful {
+			p.add(path, ctxLine{N: n + d, Text: clip(t)})
 		}
 	}
 }
@@ -353,13 +396,13 @@ func (e *ctxEnv) conceptViewG(query, path, tests, gen string, hits []codeHit, f 
 		}
 		before, after := e.surround(h, len(body), f)
 		for i, l := range before {
-			p.add(h.Path, ctxLine{N: h.Start - len(before) + i, Text: short(keepIndent(l), f.width())})
+			p.add(h.Path, ctxLine{N: h.Start - len(before) + i, Text: sourceExcerpt(l, f)})
 		}
 		for i, l := range body {
-			p.add(h.Path, ctxLine{N: h.Start + i, Text: short(keepIndent(l), f.width()), Match: true})
+			p.add(h.Path, ctxLine{N: h.Start + i, Text: sourceExcerpt(l, f), Match: true})
 		}
 		for i, l := range after {
-			p.add(h.Path, ctxLine{N: h.Start + len(body) + i, Text: short(keepIndent(l), f.width())})
+			p.add(h.Path, ctxLine{N: h.Start + len(body) + i, Text: sourceExcerpt(l, f)})
 		}
 	}
 	p.normalize()
@@ -469,7 +512,7 @@ func (e *ctxEnv) textView(q rgQuery, tests string, res rgResult, max, page, ctx 
 		var rows []string
 		for _, c := range kept[lo:hi] {
 			v.Shown += c.Count
-			rows = append(rows, fmt.Sprintf("  %s,%d", toonValue(c.Path), c.Count))
+			rows = append(rows, fmt.Sprintf("  %s,%d", agentScalar(c.Path), c.Count))
 			v.XPaths = append(v.XPaths, c.Path)
 		}
 		if len(rows) > 0 {
@@ -505,7 +548,11 @@ func (e *ctxEnv) textView(q rgQuery, tests string, res rgResult, max, page, ctx 
 	lo, hi, past := pageRange(len(kept), max, page)
 	for _, h := range kept[lo:hi] {
 		ls := e.Lines(h.Path)
-		addAround(p, h.Path, ls, h.Line, h.Text, enclosing(ls, h.Line, h.Path), ctx, f.width())
+		text := h.Text
+		if f.SchemaVersion == 2 && !q.OnlyMatching && h.Line > 0 && h.Line <= len(ls) {
+			text = lineAt(ls, h.Line, 2)
+		}
+		addAround(p, h.Path, ls, h.Line, text, enclosing(ls, h.Line, h.Path), ctx, f.width(), f.SchemaVersion)
 	}
 	v.Shown = hi - lo
 	p.normalize()
@@ -910,7 +957,7 @@ func commonFiles(views []*ctxView) []string {
 		for n := range r.in.nums {
 			ns = append(ns, n)
 		}
-		out = append(out, fmt.Sprintf("  %s,%s,%s", toonValue(r.path), strings.Join(ks, "+"), toonValue(compactLines(ns))))
+		out = append(out, fmt.Sprintf("  %s,%s,%s", agentScalar(r.path), strings.Join(ks, "+"), agentScalar(compactLines(ns))))
 	}
 	return out
 }

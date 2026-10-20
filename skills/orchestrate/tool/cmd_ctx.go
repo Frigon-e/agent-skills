@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -48,19 +49,45 @@ var ctxHelps = map[string]ctxHelp{
 // Mark this invocation's writer rather than global state, so concurrent CLI
 // tests and embedded callers cannot leak the JSON error mode to another call.
 type ctxJSONOutput struct{ io.Writer }
+type ctxV2Output struct {
+	io.Writer
+	audience outputAudience
+}
+
+func ctxAudience(w io.Writer) outputAudience {
+	switch v := w.(type) {
+	case ctxV2Output:
+		return v.audience
+	case ctxJSONOutput:
+		return outputJSON
+	default:
+		return outputAgent
+	}
+}
 
 func cmdCtx(a *app, args []string) (retErr error) {
-	for _, arg := range args {
+	// Mark the audience before parsing so usage and setup errors use it too.
+	// --json wins if both presentation flags are present.
+	audience := explicitAudience(args)
+	version := 1
+	for i, arg := range args {
 		if arg == "--" {
 			break
 		}
-		if arg == "--json" || arg == "--json=true" {
-			copy := *a
-			copy.out = ctxJSONOutput{a.out}
-			a = &copy
-			break
+		if strings.HasPrefix(arg, "--schema-version=") {
+			version, _ = strconv.Atoi(strings.TrimPrefix(arg, "--schema-version="))
+		}
+		if arg == "--schema-version" && i+1 < len(args) {
+			version, _ = strconv.Atoi(args[i+1])
 		}
 	}
+	copy := *a
+	if audience == outputJSON && version == 1 {
+		copy.out = ctxJSONOutput{a.out}
+	} else {
+		copy.out = ctxV2Output{a.out, audience}
+	}
+	a = &copy
 	// Keep runtime setup/read failures in the selected result format as well.
 	// Errors already emitted by ctxErr/ctxView have an empty exitError message.
 	defer func() {
@@ -78,7 +105,7 @@ func cmdCtx(a *app, args []string) (retErr error) {
 		if _, ok := a.out.(ctxJSONOutput); ok {
 			_ = json.NewEncoder(a.out).Encode(map[string]any{"status": "failed", "error": retErr.Error()})
 		} else {
-			fmt.Fprintf(a.out, "error: %s\n", retErr)
+			_ = writeOutput(a.out, ctxAudience(a.out), map[string]any{"status": "failed", "error": retErr.Error()})
 		}
 		retErr = &exitError{code: code}
 	}()
@@ -140,17 +167,7 @@ func ctxErr(a *app, msg string, help ...string) error {
 		_ = json.NewEncoder(a.out).Encode(map[string]any{"status": "failed", "error": msg, "help": help})
 		return &exitError{code: 2}
 	}
-	fmt.Fprintf(a.out, "error: %s\n", msg)
-	switch len(help) {
-	case 0:
-	case 1:
-		fmt.Fprintf(a.out, "help: %s\n", help[0])
-	default:
-		fmt.Fprintf(a.out, "help[%d]:\n", len(help))
-		for _, h := range help {
-			fmt.Fprintf(a.out, "  %s\n", h)
-		}
-	}
+	_ = writeOutput(a.out, ctxAudience(a.out), map[string]any{"status": "failed", "error": msg, "help": help})
 	return &exitError{code: 2}
 }
 
@@ -164,28 +181,26 @@ func flagName(n string) string {
 // writeHelp prints the concise reference of one subcommand.
 func writeHelp(a *app, name string, fs *flag.FlagSet) {
 	h := ctxHelps[name]
+	view := map[string]any{"usage": h.usage, "description": h.summary, "examples": h.examples}
 	if name == "batch" {
 		for _, kind := range ctxKinds {
-			fmt.Fprintf(a.out, "%s_options: %s\n", kind, strings.Join(lookupOptionKeys(kind), ", "))
+			view[kind+"_options"] = lookupOptionKeys(kind)
 		}
 	}
 	if name == "find" {
-		fmt.Fprint(a.out, ctxQueryGuide+"\n")
+		view["query_guide"] = ctxQueryGuide
 	}
-	fmt.Fprintf(a.out, "usage: %s\ndescription: %s\n", h.usage, h.summary)
 	if fs != nil {
-		var rows []string
-		fs.VisitAll(func(f *flag.Flag) {
-			rows = append(rows, fmt.Sprintf("  %s,%s,%s", flagName(f.Name), toonValue(f.DefValue), toonValue(f.Usage)))
-		})
-		if len(rows) > 0 {
-			fmt.Fprintf(a.out, "flags[%d]{flag,default,meaning}:\n%s\n", len(rows), strings.Join(rows, "\n"))
+		type flagInfo struct {
+			Flag    string `json:"flag"`
+			Default string `json:"default"`
+			Meaning string `json:"meaning"`
 		}
+		rows := []flagInfo{}
+		fs.VisitAll(func(f *flag.Flag) { rows = append(rows, flagInfo{flagName(f.Name), f.DefValue, f.Usage}) })
+		view["flags"] = rows
 	}
-	fmt.Fprintf(a.out, "examples[%d]:\n", len(h.examples))
-	for _, e := range h.examples {
-		fmt.Fprintf(a.out, "  %s\n", e)
-	}
+	_ = writeOutput(a.out, ctxAudience(a.out), view)
 }
 
 // ctxParse parses flags anywhere among the arguments. --help prints the
@@ -194,6 +209,8 @@ func writeHelp(a *app, name string, fs *flag.FlagSet) {
 func ctxParse(a *app, name string, fs *flag.FlagSet, args []string) (pos []string, done bool, err error) {
 	fs.SetOutput(io.Discard)
 	fs.Usage = func() {}
+	fs.Bool("human", false, "readable JSON of the v2 selection; --json keeps the legacy machine contract")
+	version := fs.Int("schema-version", 1, "machine JSON schema: 1 (legacy) or 2 (same faithful, bounded selection as TOON/--human)")
 	for _, s := range args {
 		if s == "--" {
 			break
@@ -227,6 +244,30 @@ func ctxParse(a *app, name string, fs *flag.FlagSet, args []string) (pos []strin
 		pos = append(pos, rest[0])
 		args = rest[1:]
 	}
+	// Use parsed values, not flag-like query or option values, for successful
+	// invocations. Early errors still have an explicitly selected audience.
+	base := a.out
+	switch w := a.out.(type) {
+	case ctxJSONOutput:
+		base = w.Writer
+	case ctxV2Output:
+		base = w.Writer
+	}
+	audience := outputAgent
+	if fs.Lookup("human").Value.String() == "true" {
+		audience = outputHuman
+	}
+	if jsonFlag := fs.Lookup("json"); jsonFlag != nil && jsonFlag.Value.String() == "true" {
+		audience = outputJSON
+	}
+	if audience == outputJSON && *version == 1 {
+		a.out = ctxJSONOutput{base}
+	} else {
+		a.out = ctxV2Output{base, audience}
+	}
+	if *version != 1 && *version != 2 {
+		return nil, true, ctxErr(a, "--schema-version must be 1 or 2")
+	}
 	return append(pos, tail...), false, nil
 }
 
@@ -249,6 +290,9 @@ func addCommon(fs *flag.FlagSet) ctxCommon {
 
 func (c ctxCommon) fmt(a *app) (ctxFmt, error) {
 	f := ctxFmt{Full: *c.full, Compact: *c.compact, Fields: map[string]bool{}}
+	if _, ok := a.out.(ctxV2Output); ok {
+		f.SchemaVersion = 2
+	}
 	for _, n := range strings.Split(*c.fields, ",") {
 		if n = strings.TrimSpace(n); n == "" {
 			continue
@@ -311,27 +355,21 @@ func ctxEnvFor(a *app) (*ctxEnv, error) {
 // emit prints the body then the notes and the sources line; with asJSON it
 // prints the data, the notes and the sources as JSON instead.
 func (a *app) ctxEmit(e *ctxEnv, asJSON bool, body string, data any) error {
+	if _, ok := a.out.(ctxV2Output); ok {
+		return a.ctxEmitV2(e, data, ctxFmt{SchemaVersion: 2}, 0)
+	}
+	// body remains available to internal prose consumers, not as pseudo-TOON.
+	// All audiences serialize this selected envelope. Machine JSON preserves
+	// MarshalIndent's existing bytes, including key order and nulls.
+	envelope := map[string]any{"result": data, "notes": e.Notes(), "sources": e.Sources()}
+	if views, ok := data.([]*ctxView); ok {
+		envelope["status"] = ctxBatchStatus(views)
+	}
+	audience := ctxAudience(a.out)
 	if asJSON {
-		envelope := map[string]any{"result": data, "notes": e.Notes(), "sources": e.Sources()}
-		if views, ok := data.([]*ctxView); ok {
-			envelope["status"] = ctxBatchStatus(views)
-		}
-		b, err := json.MarshalIndent(envelope, "", "  ")
-		if err != nil {
-			return err
-		}
-		fmt.Fprintln(a.out, string(b))
-		return nil
+		audience = outputJSON
 	}
-	fmt.Fprint(a.out, strings.TrimRight(body, "\n")+"\n")
-	if notes := e.Notes(); len(notes) > 0 {
-		fmt.Fprintf(a.out, "notes[%d]:\n", len(notes))
-		for _, n := range notes {
-			fmt.Fprintf(a.out, "  %s\n", toonValue(n))
-		}
-	}
-	fmt.Fprintf(a.out, "sources: %s\n", e.Sources())
-	return nil
+	return writeOutput(a.out, audience, envelope)
 }
 
 // ---- home and status ----
@@ -346,11 +384,21 @@ func homePath(p string) string {
 // ctxHome is `orch ctx` with no arguments: the live state, then hints.
 func ctxHome(a *app) error {
 	exe, _ := os.Executable()
-	fmt.Fprintf(a.out, "bin: %s\ndescription: Code facts for any git repo (concepts, symbols, exact text, batches, briefs) from tools, no model\n", homePath(exe))
+	view := struct {
+		Bin         string   `json:"bin"`
+		Description string   `json:"description"`
+		Repo        string   `json:"repo"`
+		Head        string   `json:"head,omitempty"`
+		Index       string   `json:"index,omitempty"`
+		Tools       string   `json:"tools,omitempty"`
+		Find        string   `json:"find,omitempty"`
+		Files       string   `json:"files,omitempty"`
+		Help        []string `json:"help"`
+	}{Bin: homePath(exe), Description: "Code facts for any git repo (concepts, symbols, exact text, batches, briefs) from tools, no model"}
 	e, err := ctxEnvFor(a)
 	if err != nil {
-		fmt.Fprintf(a.out, "repo: none (not inside a git repository)\nhelp[1]:\n  cd into a git repository, then run `orch ctx`\n")
-		return nil
+		view.Repo, view.Help = "none (not inside a git repository)", []string{"cd into a git repository, then run `orch ctx`"}
+		return writeOutput(a.out, ctxAudience(a.out), view)
 	}
 	head, _ := git(e.Code, "rev-parse", "HEAD")
 	porcelain, _ := git(e.Code, "status", "--porcelain")
@@ -358,19 +406,18 @@ func ctxHome(a *app) error {
 	if strings.TrimSpace(porcelain) != "" {
 		dirty = " (uncommitted changes)"
 	}
-	fmt.Fprintf(a.out, "repo: %s\nhead: %s%s\n", e.Code, sha7(head), dirty)
-	fmt.Fprintf(a.out, "index: %s\n", indexSummary(e, head))
-	ready := ctxReadiness(e)
-	fmt.Fprintf(a.out, "%s\n", strings.Replace(ready, "ctx: ", "tools: ", 1))
-	fmt.Fprint(a.out, "find: describe one behavior in plain language, e.g. `Code that checks a user's credentials and establishes a signed-in session.`; not a noun list\n")
-	fmt.Fprint(a.out, "files: Read files with your native read tool (offset and limit for part of a file); orch ctx is for finding things, not for reading them; never use sed, cat, head or tail.\n")
-	fmt.Fprint(a.out, "help[5]:\n"+
-		"  orch ctx text <pattern> [--glob G] [--word]    exact strings, and their absence\n"+
-		"  orch ctx sym <Name> [--refs N]                 an exact symbol\n"+
-		"  orch ctx find \"Code that lists payment gateways\"   where something lives, in the form \"Code that <does X>\"\n"+
-		"  orch ctx batch -q \"symbol:X\" -q \"text:Y\"       several lookups in one call\n"+
-		"  orch ctx <subcommand> --help                   flags and examples\n")
-	return nil
+	view.Repo, view.Head, view.Index = e.Code, sha7(head)+dirty, indexSummary(e, head)
+	view.Tools = strings.TrimPrefix(ctxReadiness(e), "ctx: ")
+	view.Find = "describe one behavior in plain language, e.g. `Code that checks a user's credentials and establishes a signed-in session.`; not a noun list"
+	view.Files = "Read files with your native read tool (offset and limit for part of a file); orch ctx is for finding things, not for reading them; never use sed, cat, head or tail."
+	view.Help = []string{
+		"orch ctx text <pattern> [--glob G] [--word]    exact strings, and their absence",
+		"orch ctx sym <Name> [--refs N]                 an exact symbol",
+		"orch ctx find \"Code that lists payment gateways\"   where something lives, in the form \"Code that <does X>\"",
+		"orch ctx batch -q \"symbol:X\" -q \"text:Y\"       several lookups in one call",
+		"orch ctx <subcommand> --help                   flags and examples",
+	}
+	return writeOutput(a.out, ctxAudience(a.out), view)
 }
 
 // indexSummary is one phrase about the jbcontext index.
@@ -466,24 +513,24 @@ func ctxStatusCmd(a *app, args []string) error {
 		for _, r := range roots {
 			st.Watched = st.Watched || evalOr(r) == evalOr(e.Code)
 		}
-		fmt.Fprintf(&b, "watch: %s\nwatched: %v\n", toonValue(line), st.Watched)
+		fmt.Fprintf(&b, "watch: %s\nwatched: %v\n", agentScalar(line), st.Watched)
 		if len(roots) > 0 {
 			fmt.Fprintf(&b, "watch_roots[%d]:\n", len(roots))
 			for _, r := range roots {
-				fmt.Fprintf(&b, "  %s\n", toonValue(r))
+				fmt.Fprintf(&b, "  %s\n", agentScalar(r))
 			}
 		}
 	}
 	rows := [][2]string{{"gopls", st.Gopls}, {"ts_server", st.TSServer}, {"rg", st.RG}}
 	fmt.Fprintf(&b, "tools[%d]{name,path}:\n", len(rows))
 	for _, t := range rows {
-		fmt.Fprintf(&b, "  %s,%s\n", t[0], toonValue(orDefault(t[1], "missing")))
+		fmt.Fprintf(&b, "  %s,%s\n", t[0], agentScalar(orDefault(t[1], "missing")))
 	}
 	st.Languages = e.langStatuses()
 	if len(st.Languages) > 0 {
 		fmt.Fprintf(&b, "languages[%d]{name,files,server,hint}:\n", len(st.Languages))
 		for _, l := range st.Languages {
-			fmt.Fprintf(&b, "  %s,%d,%s,%s\n", l.ID, l.Files, toonValue(orDefault(l.Server, "missing")), toonValue(l.Hint))
+			fmt.Fprintf(&b, "  %s,%d,%s,%s\n", l.ID, l.Files, agentScalar(orDefault(l.Server, "missing")), agentScalar(l.Hint))
 		}
 	}
 	return a.ctxEmit(e, *asJSON, b.String(), st)
@@ -541,11 +588,7 @@ func ctxWatchCmd(a *app, args []string) error {
 	if err != nil {
 		return fail("jbcontext watch %s failed: %v", pos[0], err)
 	}
-	fmt.Fprintf(a.out, "watch: %s %s\n", pos[0], toonValue(dir))
-	if s := strings.TrimSpace(string(out)); s != "" {
-		fmt.Fprintf(a.out, "detail: %s\n", toonValue(s))
-	}
-	return nil
+	return writeOutput(a.out, ctxAudience(a.out), map[string]any{"watch": pos[0], "path": dir, "detail": strings.TrimSpace(string(out))})
 }
 
 var watchPIDRe = regexp.MustCompile(`pid (\d+)`)
@@ -630,8 +673,14 @@ func ctxFindCmd(a *app, args []string) error {
 func (a *app) ctxView(e *ctxEnv, asJSON bool, f ctxFmt, v *ctxView) error {
 	var b strings.Builder
 	v.finishTruth()
-	v.write(&b, f, nil, 0, f.answerCap())
-	if err := a.ctxEmit(e, asJSON, b.String(), v); err != nil {
+	var emitErr error
+	if f.SchemaVersion == 2 {
+		emitErr = a.ctxEmitV2(e, v, f, f.answerCap())
+	} else {
+		v.write(&b, f, nil, 0, f.answerCap())
+		emitErr = a.ctxEmit(e, asJSON, b.String(), v)
+	}
+	if err := emitErr; err != nil {
 		return err
 	}
 	if v.Status == "failed" {
@@ -841,8 +890,17 @@ func ctxBatchCmd(a *app, args []string) error {
 	if err != nil {
 		return ctxErr(a, err.Error(), "valid kinds: "+strings.Join(ctxKinds, ", "), "valid options: "+strings.Join(ctxOptionKeys, ", "))
 	}
-	body := renderBatch(views, f)
-	if err := a.ctxEmit(e, *common.json, body, views); err != nil {
+	var emitErr error
+	if f.SchemaVersion == 2 {
+		budget := ctxBatchBudget
+		if f.Compact {
+			budget = ctxBatchBudgetCmp
+		}
+		emitErr = a.ctxEmitV2(e, views, f, budget)
+	} else {
+		emitErr = a.ctxEmit(e, *common.json, renderBatch(views, f), views)
+	}
+	if err := emitErr; err != nil {
 		return err
 	}
 	if ctxBatchStatus(views) == "failed" {
@@ -907,6 +965,16 @@ func ctxBriefCmd(a *app, args []string) error {
 		}
 	}
 	b := e.Briefs([]briefInput{{ID: "brief", Title: briefTitle(text), Text: text, Owns: own}})[0]
+	if f.SchemaVersion == 2 {
+		budget := *size
+		if budget < 1 {
+			return ctxErr(a, "--max must be at least 1")
+		}
+		if f.Full {
+			budget = max(budget, f.answerCap())
+		}
+		return a.ctxEmitV2(e, b, f, budget)
+	}
 	body := e.briefTOON(b, f)
 	if !f.Full && len(body) > *size {
 		body = cutLines(strings.TrimRight(body, "\n"), *size) + " (--full or --max N lifts the cap)\n"
@@ -922,7 +990,7 @@ func (e *ctxEnv) briefTOON(b *ctxBrief, f ctxFmt) string {
 	if len(b.FileRows) > 0 {
 		fmt.Fprintf(&w, "files[%d]{path,score,why}:\n", len(b.FileRows))
 		for _, r := range b.FileRows {
-			fmt.Fprintf(&w, "  %s,%d,%s\n", toonValue(r.Path), r.Score, toonValue(strings.Join(r.Why, "; ")))
+			fmt.Fprintf(&w, "  %s,%d,%s\n", agentScalar(r.Path), r.Score, agentScalar(strings.Join(r.Why, "; ")))
 		}
 	}
 	for _, fact := range b.Facts {
@@ -937,13 +1005,13 @@ func (e *ctxEnv) briefTOON(b *ctxBrief, f ctxFmt) string {
 			if len(r.Snippet) > 0 {
 				text = short(strings.TrimSpace(r.Snippet[0]), f.width())
 			}
-			fmt.Fprintf(&w, "  %s,%s,%s\n", toonValue(r.At), toonValue(r.Via), toonValue(text))
+			fmt.Fprintf(&w, "  %s,%s,%s\n", agentScalar(r.At), agentScalar(r.Via), agentScalar(text))
 		}
 	}
 	if len(b.Names) > 0 {
 		fmt.Fprintf(&w, "not_found[%d]:\n", len(b.Names))
 		for _, n := range b.Names {
-			fmt.Fprintf(&w, "  %s\n", toonValue(n))
+			fmt.Fprintf(&w, "  %s\n", agentScalar(n))
 		}
 	} else {
 		w.WriteString("not_found: 0 names missing\n")

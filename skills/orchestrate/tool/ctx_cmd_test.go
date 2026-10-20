@@ -109,8 +109,13 @@ func lastOutLine(s string) string {
 func TestCtxStatusReportsIndexWatchAndTools(t *testing.T) {
 	c := newCtxHarness(t)
 	out := c.must("ctx", "status")
-	wantContains(t, out, "ctx_index: full", "index: fresh ("+sha7(c.head)+")", "watch: Watch daemon running (pid 7)", "watched: true",
-		"tools[3]{name,path}:", "  ts_server,missing", "  gopls,", "  rg,")
+	info := ctxTestObject(t, out)["result"].(map[string]any)
+	if info["ctx_index"] != "full" || info["indexed_revision"] != c.head || info["index_fresh"] != true || info["watched"] != true || info["watch_pid"] != "7" || info["watch_status"] != "Watch daemon running (pid 7)" {
+		t.Fatalf("status: %#v", info)
+	}
+	if info["ts_server"] != "" || info["gopls"] == "" || info["rg"] == "" {
+		t.Fatalf("tools: %#v", info)
+	}
 	if l := lastOutLine(out); !strings.HasPrefix(l, "sources: ") || !strings.Contains(l, "jbcontext index "+sha7(c.head)) {
 		t.Errorf("last line = %q", l)
 	}
@@ -141,7 +146,9 @@ func TestCtxRefreshFollowsThePolicy(t *testing.T) {
 	c := newCtxHarness(t)
 	os.WriteFile(filepath.Join(c.jbDir, "rev"), []byte(strings.Repeat("c", 40)), 0o644)
 	out := c.must("ctx", "refresh")
-	wantContains(t, out, "refresh: index is current ("+sha7(c.head)+")")
+	if ctxTestObject(t, out)["result"].(map[string]any)["current"] != true {
+		t.Fatalf("refresh not current: %s", out)
+	}
 	wantContains(t, c.log(c.jbCalls), "index --only-incremental")
 
 	os.WriteFile(filepath.Join(c.jbDir, "rev"), nil, 0o644)
@@ -152,13 +159,18 @@ func TestCtxRefreshFollowsThePolicy(t *testing.T) {
 	if strings.Contains(c.log(c.jbCalls), "index") {
 		t.Errorf("incremental built a first index: %s", c.log(c.jbCalls))
 	}
-	wantContains(t, out, "refresh: index is not current", "jbcontext has no index for this repo and ctx_index is incremental")
+	if ctxTestObject(t, out)["result"].(map[string]any)["current"] != false {
+		t.Fatalf("refresh unexpectedly current: %s", out)
+	}
+	wantContains(t, ctxTestStrings(t, out), "jbcontext has no index for this repo and ctx_index is incremental")
 	c.must("ctx", "refresh", "--full")
 	wantContains(t, c.log(c.jbCalls), "index --project-path")
 
 	os.WriteFile(cfg, []byte("ctx_index = \"off\"\n"), 0o644)
 	os.Remove(c.jbCalls)
-	wantContains(t, c.must("ctx", "refresh"), "refresh: nothing to do (jbcontext is off (ctx_index = off))")
+	if got := ctxTestObject(t, c.must("ctx", "refresh"))["result"].(map[string]any)["skipped"]; got != "jbcontext is off (ctx_index = off)" {
+		t.Fatalf("skip=%#v", got)
+	}
 	if c.log(c.jbCalls) != "" {
 		t.Errorf("off called jbcontext: %s", c.log(c.jbCalls))
 	}
@@ -183,24 +195,36 @@ func TestCtxFindSymTextBatchAndBriefOutsideAnyRunState(t *testing.T) {
 	c := newCtxHarness(t)
 
 	find := c.must("ctx", "find", "checkout gateway", "-p", "pay", "--limit", "2")
-	wantContains(t, find, "find: 1 of 1 hits for \"checkout gateway\" in 1 file (path pay)", "pay/pay.go\n", "  3: type Gateway interface {", "  4:  StartCheckout(ctx int) error", "  declares type Gateway", "  package pay declares 3 exported symbols in 1 file")
+	findResult := ctxTestObject(t, find)["result"].(map[string]any)
+	if findResult["kind"] != "find" || findResult["total"] != float64(1) || findResult["shown"] != float64(1) || findResult["scope"] != "path pay" {
+		t.Fatalf("find=%#v", findResult)
+	}
+	wantContains(t, ctxTestStrings(t, find), "pay/pay.go", "type Gateway interface {", "\tStartCheckout(ctx int) error", "declares type Gateway", "package pay declares 3 exported symbols in 1 file")
 	wantContains(t, c.log(c.jbCalls), "--limit 10", "--path-filter pay", "--revision "+c.head)
 	if !strings.HasPrefix(lastOutLine(find), "sources: jbcontext index "+sha7(c.head)) {
 		t.Errorf("find sources: %q", lastOutLine(find))
 	}
 
 	sym := c.must("ctx", "sym", "StartCheckout")
-	wantContains(t, sym, `sym: 2 definitions of "StartCheckout"`, "StartCheckout  method  pay/pay.go:4  candidate (identity not verified)\n", "\n   StartCheckout(ctx int) error\n", "used by 8, +1 in tests:\n",
-		"  svc/svc.go\n", "    5  // Handle starts a checkout.\n", "showing 1-5 of 8; next: --page 2; left out: svc/svc.go (3)", "implemented by 1:\n  7  func (s *Stripe) StartCheckout(ctx int) error { return nil }\n",
-		"StartCheckout  method  pay/pay.go:7  candidate (identity not verified)\n", "used by 1, none in tests\n")
+	symResult := ctxTestObject(t, sym)["result"].(map[string]any)
+	if symResult["total"] != float64(2) {
+		t.Fatalf("definitions=%#v", symResult)
+	}
+	wantContains(t, ctxTestStrings(t, sym), "StartCheckout  method  pay/pay.go:4  candidate (identity not verified)", "\tStartCheckout(ctx int) error", "used by 8, +1 in tests:", "svc/svc.go", "// Handle starts a checkout.", "showing 1-5 of 8; next: --page 2; left out: svc/svc.go (3)", "implemented by 1:", "func (s *Stripe) StartCheckout(ctx int) error { return nil }", "StartCheckout  method  pay/pay.go:7  candidate (identity not verified)", "used by 1, none in tests")
 	if strings.Contains(sym, "pay_test.go") {
 		t.Errorf("default sym listed test references:\n%s", sym)
 	}
 	wantContains(t, lastOutLine(sym), "gopls ")
-	wantContains(t, c.must("ctx", "sym", "NoSuchSymbol"), `sym: no symbol named "NoSuchSymbol" found`)
+	if got := ctxTestObject(t, c.must("ctx", "sym", "NoSuchSymbol"))["result"].(map[string]any); got["total"] != float64(0) || got["status"] != "empty" {
+		t.Fatalf("missing symbol=%#v", got)
+	}
 
 	text := c.must("ctx", "text", "StartCheckout", "-p", "pay", "--max", "1")
-	wantContains(t, text, "text: 1 of 2 matches", "pay/pay.go\n", "  4: StartCheckout(ctx int) error  [in type Gateway]", "showing 1-1 of 2; next: --page 2")
+	textResult := ctxTestObject(t, text)["result"].(map[string]any)
+	if textResult["total"] != float64(2) || textResult["shown"] != float64(1) {
+		t.Fatalf("text=%#v", textResult)
+	}
+	wantContains(t, ctxTestStrings(t, text), "pay/pay.go", "\tStartCheckout(ctx int) error", "type Gateway", "showing 1-1 of 2; next: --page 2")
 	log := c.log(c.rgCalls)
 	wantContains(t, log, "--json", "-e StartCheckout -- pay")
 	c.must("ctx", "text", "Start.*Out", "--fixed")
@@ -211,7 +235,9 @@ func TestCtxFindSymTextBatchAndBriefOutsideAnyRunState(t *testing.T) {
 	if lines := strings.Split(strings.TrimSpace(c.log(c.rgCalls)), "\n"); strings.Contains(lines[len(lines)-1], "-F") {
 		t.Errorf("the default pattern is not a regular expression: %s", lines[len(lines)-1])
 	}
-	wantContains(t, c.must("ctx", "text", "zzzNone"), "text: 0 matches found in the whole repo")
+	if got := ctxTestObject(t, c.must("ctx", "text", "zzzNone"))["result"].(map[string]any); got["total"] != float64(0) || got["status"] != "empty" {
+		t.Fatalf("empty text=%#v", got)
+	}
 	code, out := c.run("ctx", "text", "x", "-p", "../outside")
 	if code != 1 || !strings.Contains(out, "error: path ../outside is outside the repo") {
 		t.Errorf("a path outside the repo: %d %s", code, out)
@@ -221,11 +247,20 @@ func TestCtxFindSymTextBatchAndBriefOutsideAnyRunState(t *testing.T) {
 	plan := `{"lookups":[{"kind":"text","query":"StartCheckout","why":"callers"},{"kind":"symbol","query":"StartCheckout"},{"kind":"concept","query":"checkout gateway"},{"kind":"read","path":"pay/pay.go","from":3,"to":4},{"kind":"text","query":"x","path":"../outside"}]}`
 	c.stdin.WriteString(plan)
 	batch := c.must("ctx", "batch", "-")
-	idx := func(s string) int { return strings.Index(batch, s) }
-	if !(idx("#1 text") >= 0 && idx("#1 text") < idx("#2 sym") && idx("#2 sym") < idx("#3 find") && idx("#3 find") < idx("#4 read") && idx("#4 read") < idx("#5 text")) {
-		t.Errorf("batch is not in plan order:\n%s", batch)
+	batchInfo := ctxTestObject(t, batch)
+	batchRows := batchInfo["result"].([]any)
+	if len(batchRows) != 5 || batchInfo["status"] != "partial" {
+		t.Fatalf("batch=%#v", batchInfo)
 	}
-	wantContains(t, batch, "batch: 5 lookups, 4 with results, 0 empty, 1 failed", `#1 text "StartCheckout" [callers]:`, "#5 text \"x\": error: path ../outside is outside the repo")
+	for i, kind := range []string{"text", "sym", "find", "read", "text"} {
+		if batchRows[i].(map[string]any)["kind"] != kind {
+			t.Fatalf("batch order: %#v", batchRows)
+		}
+	}
+	if batchRows[0].(map[string]any)["why"] != "callers" || batchRows[4].(map[string]any)["status"] != "failed" {
+		t.Fatalf("batch relationship/status: %#v", batchRows)
+	}
+	wantContains(t, ctxTestStrings(t, batch), "path ../outside is outside the repo")
 	jb, rg := c.log(c.jbCalls), c.log(c.rgCalls)
 	c.stdin.WriteString(plan)
 	if again := c.must("ctx", "batch", "-"); again != batch {
@@ -253,7 +288,11 @@ func TestCtxFindSymTextBatchAndBriefOutsideAnyRunState(t *testing.T) {
 
 	c.stdin.WriteString("### api: Checkout\nBuild the StartCheckout flow in `pay/pay.go:7`; it adds a `zzzNone_table`.\n")
 	brief := c.must("ctx", "brief", "-", "--owns", "pay")
-	wantContains(t, brief, "brief: ", "files[", "  pay/pay.go,", "not_found[1]:", "  zzzNone_table")
+	briefResult := ctxTestObject(t, brief)["result"].(map[string]any)
+	if len(briefResult["files"].([]any)) == 0 || len(briefResult["not_found"].([]any)) != 1 {
+		t.Fatalf("brief=%#v", briefResult)
+	}
+	wantContains(t, ctxTestStrings(t, brief), "pay/pay.go", "zzzNone_table")
 	c.stdin.WriteString("Build the StartCheckout flow")
 	var js struct {
 		Result struct{ Files []string } `json:"result"`
@@ -275,7 +314,10 @@ func TestCtxPrivateTaskNeverUsesJbcontext(t *testing.T) {
 	if code != 1 {
 		t.Fatalf("private find exit %d, want 1: %s", code, out)
 	}
-	wantContains(t, out, "find: error: jbcontext is not used for private work")
+	if ctxTestObject(t, out)["status"] != "failed" {
+		t.Fatalf("private status: %s", out)
+	}
+	wantContains(t, ctxTestStrings(t, out), "jbcontext is not used for private work")
 	if c.log(c.jbCalls) != "" {
 		t.Errorf("a private task reached jbcontext: %s", c.log(c.jbCalls))
 	}

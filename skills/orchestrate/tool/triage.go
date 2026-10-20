@@ -521,7 +521,7 @@ func (a *app) triageReport(s site) error {
 	table("by_difficulty", byBand)
 	fmt.Fprintf(a.out, "settled_but_hard[%d]:\n", len(missed))
 	for _, m := range missed {
-		fmt.Fprintf(a.out, "  %s\n", toonValue(m))
+		fmt.Fprintf(a.out, "  %s\n", agentScalar(m))
 	}
 	fmt.Fprintf(a.out, "cautious_but_clean: %d task(s) rated above settled finished with no trouble", len(cautious))
 	if len(cautious) > 0 {

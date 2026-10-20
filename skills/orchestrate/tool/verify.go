@@ -111,7 +111,7 @@ func cmdVerify(a *app, args []string) error {
 	if result == "pass" && !integrating {
 		wording += " (not integrated)"
 	}
-	fmt.Fprintf(a.out, "verify: %s\ncheck: %s\nfiles: %d changed, %d lines\n", wording, toonValue(checkLine), len(files), lines)
+	fmt.Fprintf(a.out, "verify: %s\ncheck: %s\nfiles: %d changed, %d lines\n", wording, agentScalar(checkLine), len(files), lines)
 	if candidateErr != nil {
 		fmt.Fprintf(a.out, "candidate: changed after checks: %v; integration refused\n", candidateErr)
 	}
@@ -119,11 +119,11 @@ func cmdVerify(a *app, args []string) error {
 	case len(owns) == 0:
 		fmt.Fprintln(a.out, "scope: not checked (the task has no `owns:` front matter)")
 	case len(outside) == 0:
-		fmt.Fprintf(a.out, "scope: all files inside %s\n", toonValue(strings.Join(owns, ", ")))
+		fmt.Fprintf(a.out, "scope: all files inside %s\n", agentScalar(strings.Join(owns, ", ")))
 	default:
 		fmt.Fprintf(a.out, "outside_owns[%d]:\n", len(outside))
 		for _, f := range outside {
-			fmt.Fprintf(a.out, "  %s\n", toonValue(f))
+			fmt.Fprintf(a.out, "  %s\n", agentScalar(f))
 		}
 	}
 	if tail != "" {

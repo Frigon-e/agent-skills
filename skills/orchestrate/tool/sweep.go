@@ -157,7 +157,7 @@ func cmdSweep(a *app, args []string) error {
 			if r.why != "" {
 				line += " (" + r.why + ")"
 			}
-			fmt.Fprintf(a.out, "  %s\n", toonValue(line))
+			fmt.Fprintf(a.out, "  %s\n", agentScalar(line))
 		}
 	}
 	for _, issue := range checkDropped(topic, cards, s.repo, roots, *acceptURLs) {

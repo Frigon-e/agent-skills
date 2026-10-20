@@ -222,31 +222,43 @@ func TestCtxTestsFlagOnSymTextAndBatch(t *testing.T) {
 	c := newCtxHarness(t)
 
 	text := c.must("ctx", "text", "StartCheckout")
-	wantContains(t, text, "text: 2 of 2 matches", "(+1 in tests; tests=include|only)")
+	if r := ctxTestObject(t, text)["result"].(map[string]any); r["total"] != float64(2) || r["shown"] != float64(2) || r["in_tests"] != float64(1) {
+		t.Fatalf("default text=%#v", r)
+	}
 	if strings.Contains(text, "pay_test.go") {
 		t.Errorf("tests are hidden by default:\n%s", text)
 	}
 	only := c.must("ctx", "text", "StartCheckout", "--tests", "only")
-	wantContains(t, only, "text: 1 of 1 matches", "pay/pay_test.go\n")
+	if r := ctxTestObject(t, only)["result"].(map[string]any); r["total"] != float64(1) || r["shown"] != float64(1) {
+		t.Fatalf("tests-only text=%#v", r)
+	}
+	wantContains(t, ctxTestStrings(t, only), "pay/pay_test.go")
 	if strings.Contains(only, "pay/pay.go") {
 		t.Errorf("--tests only listed a source file:\n%s", only)
 	}
 	inc := c.must("ctx", "text", "StartCheckout", "--tests", "include")
-	wantContains(t, inc, "text: 3 of 3 matches", "pay/pay.go\n", "pay/pay_test.go\n")
+	if r := ctxTestObject(t, inc)["result"].(map[string]any); r["total"] != float64(3) || r["shown"] != float64(3) {
+		t.Fatalf("included text=%#v", r)
+	}
+	wantContains(t, ctxTestStrings(t, inc), "pay/pay.go", "pay/pay_test.go")
 
 	sym := c.must("ctx", "sym", "StartCheckout", "--tests", "only")
-	wantContains(t, sym, "in 1 tests (used by 8 outside tests):\n", "  pay/pay_test.go\n    3  func TestPay(g Gateway) { g.StartCheckout(1) }")
+	wantContains(t, ctxTestStrings(t, sym), "in 1 tests (used by 8 outside tests):", "pay/pay_test.go", "func TestPay(g Gateway) { g.StartCheckout(1) }")
 	if strings.Contains(sym, "used by 8,") || strings.Contains(sym, "svc/svc.go") {
 		t.Errorf("--tests only listed callers:\n%s", sym)
 	}
-	wantContains(t, c.must("ctx", "sym", "StartCheckout", "--tests", "include"), "used by 8, +1 in tests:\n", "tests:\n  pay/pay_test.go\n")
+	wantContains(t, ctxTestStrings(t, c.must("ctx", "sym", "StartCheckout", "--tests", "include")), "used by 8, +1 in tests:", "tests:", "pay/pay_test.go")
 
 	c.stdin.WriteString(`{"lookups":[{"kind":"text","query":"StartCheckout"},{"kind":"text","query":"StartCheckout","tests":"only"},{"kind":"symbol","query":"StartCheckout","tests":"only"}]}`)
 	batch := c.must("ctx", "batch", "-")
-	wantContains(t, batch, `#1 text "StartCheckout": 2 of 2 matches`, `#2 text "StartCheckout": 1 of 1 matches`, "in 1 tests (used by 8 outside tests):")
+	rows := ctxTestObject(t, batch)["result"].([]any)
+	if len(rows) != 3 || rows[0].(map[string]any)["total"] != float64(2) || rows[1].(map[string]any)["total"] != float64(1) {
+		t.Fatalf("batch tests=%#v", rows)
+	}
+	wantContains(t, ctxTestStrings(t, batch), "in 1 tests (used by 8 outside tests):")
 
 	code, out := c.run("ctx", "text", "x", "--tests", "maybe")
-	if code != 2 || !strings.Contains(out, "error: unknown value for --tests: maybe") || !strings.Contains(out, "valid values: none, include, only") {
+	if code != 2 || !strings.Contains(ctxTestStrings(t, out), "unknown value for --tests: maybe") || !strings.Contains(ctxTestStrings(t, out), "valid values: none, include, only") {
 		t.Errorf("a bad --tests: %d %s", code, out)
 	}
 }
@@ -254,21 +266,33 @@ func TestCtxTestsFlagOnSymTextAndBatch(t *testing.T) {
 func TestCtxSymbolOptionsShapeTheAnswer(t *testing.T) {
 	c := newCtxHarness(t)
 	def := c.must("ctx", "sym", "StartCheckout")
-	wantContains(t, def, "used by 8, +1 in tests:\n  svc/svc.go\n", "implemented by 1:\n",
-		"\nwired: StartCheckout is called in func Handle (svc/svc.go:7); by name (rg), Handle is referenced at pay/pay.go:4 in type Gateway")
-	if count(def, "svc/svc.go\n") != 1 || strings.Contains(def, "callers of") {
-		t.Errorf("a path is printed once and there is no callers header:\n%s", def)
+	wantContains(t, ctxTestStrings(t, def), "used by 8, +1 in tests:", "svc/svc.go", "implemented by 1:", "StartCheckout is called in func Handle (svc/svc.go:7); by name (rg), Handle is referenced at pay/pay.go:4 in type Gateway")
+	if strings.Contains(def, "callers of") {
+		t.Errorf("unexpected callers header: %s", def)
 	}
 
 	counts := c.must("ctx", "sym", "StartCheckout", "--refs", "0")
-	wantContains(t, counts, "used by 8, +1 in tests (--refs N lists them)")
+	wantContains(t, ctxTestStrings(t, counts), "used by 8, +1 in tests (--refs N lists them)")
 	if strings.Contains(counts, "svc/svc.go") {
 		t.Errorf("--refs 0 still listed callers:\n%s", counts)
 	}
 	two := c.must("ctx", "sym", "StartCheckout", "--refs", "2")
-	wantContains(t, two, "used by 8, +1 in tests:\n", "showing 1-2 of 8; next: --page 2")
-	if strings.Contains(two, "    8  }") || strings.Contains(two, "    7  return g.StartCheckout(1)  in Handle") || !strings.Contains(two, "    2  ") || !strings.Contains(two, "    1  package svc") {
-		t.Errorf("--refs 2 listed more than two callers:\n%s", two)
+	wantContains(t, ctxTestStrings(t, two), "used by 8, +1 in tests:", "showing 1-2 of 8; next: --page 2")
+	parts := ctxTestObject(t, two)["result"].(map[string]any)["parts"].([]any)
+	seen := map[float64]bool{}
+	for _, p := range parts {
+		files, _ := p.(map[string]any)["files"].([]any)
+		for _, f := range files {
+			file := f.(map[string]any)
+			if file["path"] == "svc/svc.go" {
+				for _, l := range file["lines"].([]any) {
+					seen[l.(map[string]any)["n"].(float64)] = true
+				}
+			}
+		}
+	}
+	if len(seen) != 2 || !seen[1] || !seen[2] {
+		t.Errorf("--refs2 source lines=%#v", seen)
 	}
 	if noImpl := c.must("ctx", "sym", "StartCheckout", "--impl=false"); strings.Contains(noImpl, "implemented by") {
 		t.Errorf("--impl=false listed implementers:\n%s", noImpl)
@@ -276,10 +300,12 @@ func TestCtxSymbolOptionsShapeTheAnswer(t *testing.T) {
 	wantContains(t, c.must("ctx", "sym", "StartCheckout", "--kind", "Function"), "0 of 2 definitions match")
 	wantContains(t, c.must("ctx", "sym", "StartCheckout", "--in", "svc"), "0 of 2 definitions match")
 	only := c.must("ctx", "sym", "StartCheckout", "--in", "pay", "--kind", "method")
-	wantContains(t, only, "2 definitions of")
+	if got := ctxTestObject(t, only)["result"].(map[string]any)["total"]; got != float64(2) {
+		t.Fatalf("matched definitions=%#v", got)
+	}
 
 	compact := c.must("ctx", "sym", "StartCheckout", "--compact")
-	wantContains(t, compact, "StartCheckout  method  pay/pay.go:4  candidate (identity not verified)\n", "used by 8, +1 in tests (--refs N lists them)")
+	wantContains(t, ctxTestStrings(t, compact), "StartCheckout  method  pay/pay.go:4  candidate (identity not verified)", "used by 8, +1 in tests (--refs N lists them)")
 	if strings.Contains(compact, "svc/svc.go") || strings.Contains(compact, "implemented by") {
 		t.Errorf("--compact listed callers:\n%s", compact)
 	}
@@ -297,23 +323,74 @@ func TestCtxBatchDedupesAcrossLookupsAndCrossReferences(t *testing.T) {
 {"kind":"text","query":"StartCheckout","why":"again"}]}`)
 	out := c.must("ctx", "batch", "-")
 
-	wantContains(t, out, "batch: 4 lookups, 4 with results, 0 empty, 0 failed", "common[", "  pay/pay.go,jb+rg+sym,1-4")
-	if i, j := strings.Index(out, "common["), strings.Index(out, "#1 "); i < 0 || i > j {
-		t.Errorf("the cross-referenced files must come first:\n%s", out)
+	info := ctxTestObject(t, out)
+	rows := info["result"].([]any)
+	if info["status"] != "partial" || len(rows) != 4 {
+		t.Fatalf("batch=%#v", info)
 	}
-	// #1 prints pay/pay.go lines 2-9 once even though its two hits' context overlaps.
-	one := section(out, "#1 text", "#2 ")
-	for _, n := range []string{"5", "6"} {
-		if count(one, "\n  "+n+"-") != 1 {
-			t.Errorf("line %s of the overlapping context is not printed exactly once in #1:\n%s", n, one)
+	common := info["common"].([]any)
+	found := false
+	for _, value := range common {
+		row := value.(map[string]any)
+		if row["path"] == "pay/pay.go" {
+			found = true
+			if len(row["lookups"].([]any)) != 4 || len(row["sources"].([]any)) != 3 {
+				t.Fatalf("shared file=%#v", row)
+			}
 		}
 	}
-	wantContains(t, section(out, "#2 sym", "#3 "), "pay/pay.go also #1: ")
-	wantContains(t, section(out, "#3 find", "#4 "), "pay/pay.go also #1: 3-5")
-	four := section(out, "#4 text", "")
-	wantContains(t, four, `#4 text "StartCheckout" [again]: 2 of 2 matches`, "pay/pay.go also #1: ")
-	if strings.Contains(four, "  4: ") {
-		t.Errorf("#4 printed a line #1 already showed:\n%s", four)
+	if !found {
+		t.Fatal("missing common pay/pay.go")
+	}
+	if strings.Index(out, "common[") > strings.Index(out, "result[") {
+		t.Error("common files should precede result excerpts")
+	}
+	seen := map[string]bool{}
+	lineCounts := map[int]int{}
+	refs := make([]int, 4)
+	for i, value := range rows {
+		row := value.(map[string]any)
+		for _, partValue := range row["parts"].([]any) {
+			part := partValue.(map[string]any)
+			files, _ := part["files"].([]any)
+			for _, fileValue := range files {
+				file := fileValue.(map[string]any)
+				lines, _ := file["lines"].([]any)
+				for _, lineValue := range lines {
+					line := lineValue.(map[string]any)
+					if ref, ok := line["reference"].(string); ok {
+						if !seen[ref] {
+							t.Fatalf("dangling line reference %s", ref)
+						}
+						if _, ok := line["text"]; ok {
+							t.Fatalf("reference repeated text: %#v", line)
+						}
+						continue
+					}
+					id := line["id"].(string)
+					if seen[id] {
+						t.Fatalf("source duplicated %s", id)
+					}
+					seen[id] = true
+					if i == 0 && file["path"] == "pay/pay.go" {
+						lineCounts[int(line["n"].(float64))]++
+					}
+				}
+				references, _ := file["references"].([]any)
+				for _, ref := range references {
+					if !seen[ref.(string)] {
+						t.Fatalf("dangling source reference %s", ref)
+					}
+					refs[i]++
+				}
+			}
+		}
+	}
+	if lineCounts[5] != 1 || lineCounts[6] != 1 || refs[1] == 0 || refs[2] == 0 || refs[3] == 0 {
+		t.Fatalf("overlap/reference counts: %#v %#v", lineCounts, refs)
+	}
+	if rows[3].(map[string]any)["why"] != "again" || rows[3].(map[string]any)["total"] != float64(2) {
+		t.Fatalf("lost lookup relationship: %#v", rows[3])
 	}
 	if count(out, "\nsources: ") != 1 {
 		t.Errorf("a batch carries one sources line:\n%s", out)
@@ -326,7 +403,11 @@ func TestCtxBatchDedupesAcrossLookupsAndCrossReferences(t *testing.T) {
 func TestCtxBatchInlineLookupsAndWhyLabel(t *testing.T) {
 	c := newCtxHarness(t)
 	out := c.must("ctx", "batch", "-q", "text:StartCheckout glob=pay/** why=callers", "-q", "symbol:StartCheckout refs=1 impl=false")
-	wantContains(t, out, `#1 text "StartCheckout" [callers]: `, "#2 sym \"StartCheckout\": 2 definitions", "used by 8, +1 in tests:\n", "showing 1-1 of 8; next: page=2")
+	rows := ctxTestObject(t, out)["result"].([]any)
+	if len(rows) != 2 || rows[0].(map[string]any)["kind"] != "text" || rows[0].(map[string]any)["why"] != "callers" || rows[1].(map[string]any)["total"] != float64(2) {
+		t.Fatalf("inline=%#v", rows)
+	}
+	wantContains(t, ctxTestStrings(t, out), "used by 8, +1 in tests:", "showing 1-1 of 8; next: page=2")
 	if strings.Contains(out, "implemented by") {
 		t.Errorf("impl=false in an inline lookup was ignored:\n%s", out)
 	}
@@ -335,7 +416,9 @@ func TestCtxBatchInlineLookupsAndWhyLabel(t *testing.T) {
 
 	// The label is not part of the cache key.
 	again := c.must("ctx", "batch", "-q", "text:StartCheckout glob=pay/** why=other")
-	wantContains(t, again, `#1 text "StartCheckout" [other]: `)
+	if row := ctxTestObject(t, again)["result"].([]any)[0].(map[string]any); row["why"] != "other" {
+		t.Fatalf("why=%#v", row)
+	}
 	if c.log(c.rgCalls) != calls {
 		t.Errorf("a different why ran rg again:\n%s", c.log(c.rgCalls))
 	}
@@ -343,12 +426,13 @@ func TestCtxBatchInlineLookupsAndWhyLabel(t *testing.T) {
 	// A plan from stdin and inline lookups run together, plan first.
 	c.stdin.WriteString(`{"lookups":[{"kind":"read","path":"pay/pay.go","from":1,"to":2}]}`)
 	both := c.must("ctx", "batch", "-", "-q", "text:StartCheckout")
-	if !(strings.Index(both, "#1 read") >= 0 && strings.Index(both, "#1 read") < strings.Index(both, "#2 text")) {
+	bothRows := ctxTestObject(t, both)["result"].([]any)
+	if len(bothRows) != 2 || bothRows[0].(map[string]any)["kind"] != "read" || bothRows[1].(map[string]any)["kind"] != "text" {
 		t.Errorf("plan and inline lookups:\n%s", both)
 	}
 
 	code, bad := c.run("ctx", "batch", "-q", "text:x bogus=1")
-	if code != 2 || !strings.Contains(bad, `unknown option "bogus"`) || !strings.Contains(bad, "valid options: tests, generated, max, limit, page, fixed, word") {
+	if code != 2 || !strings.Contains(ctxTestStrings(t, bad), `unknown option "bogus"`) || !strings.Contains(bad, "valid options: tests, generated, max, limit, page, fixed, word") {
 		t.Errorf("an unknown inline option: %d %s", code, bad)
 	}
 	code, bad = c.run("ctx", "batch", "-q", "wat:x")
@@ -377,12 +461,22 @@ func TestCtxTextOptionsReachRipgrep(t *testing.T) {
 	}
 	c.must("ctx", "text", "x", "-l")
 	wantContains(t, last(), " -l ")
-	if files := c.must("ctx", "text", "x", "-l", "--tests", "include"); !strings.Contains(files, "files[2]:\n  pay/pay.go\n  pay/pay_test.go") || !strings.Contains(files, "2 of 2 files") {
-		t.Errorf("files only:\n%s", files)
+	files := c.must("ctx", "text", "x", "-l", "--tests", "include")
+	ctxTestHits(t, files, 2, 2)
+	if r := ctxTestObject(t, files)["result"].(map[string]any); r["unit"] != "files" {
+		t.Fatalf("files unit=%#v", r)
 	}
-	wantContains(t, c.must("ctx", "text", "StartCheckout", "--fields", "src", "-p", "pay"), "pay/pay.go (rg)\n")
+	wantContains(t, ctxTestStrings(t, files), "files[2]:\n  pay/pay.go\n  pay/pay_test.go")
+	sourced := c.must("ctx", "text", "StartCheckout", "--fields", "src", "-p", "pay")
+	wantContains(t, ctxTestStrings(t, sourced), "pay/pay.go")
+	if r := ctxTestObject(t, sourced); !strings.Contains(r["sources"].(string), "rg ") || r["result"].(map[string]any)["kind"] != "text" {
+		t.Fatalf("missing text provenance: %#v", r)
+	}
 	counts := c.must("ctx", "text", "x", "-c")
-	wantContains(t, counts, "counts[1]{path,count}:\n  pay/pay.go,2", "(+1 in tests; tests=include|only)")
+	wantContains(t, ctxTestStrings(t, counts), "counts[1]{path,count}:\n  pay/pay.go,2")
+	if r := ctxTestObject(t, counts)["result"].(map[string]any); r["in_tests"] != float64(1) {
+		t.Fatalf("hidden tests=%#v", r)
+	}
 }
 
 // realRG skips the test when ripgrep is not installed.
@@ -427,43 +521,69 @@ func TestCtxTextWithRipgrepKeepsItsSemanticsAndShapesHits(t *testing.T) {
 	wantContains(t, c.must("ctx", "text", "StartCheckout", "--all", "--limit", "20"), "vendor/v/v.go\n", "go.sum\n")
 
 	// word and glob.
-	wantContains(t, c.must("ctx", "text", "Start", "--word"), "text: 0 matches found in the whole repo")
+	ctxTestHits(t, c.must("ctx", "text", "Start", "--word"), 0, 0)
 	web := c.must("ctx", "text", "StartCheckout", "--word", "--glob", "web/**")
-	wantContains(t, web, "text: 1 of 1 matches", "(glob web/**)", "web/page.tsx\n", "  2: return StartCheckout  [in function Page]")
+	ctxTestHits(t, web, 1, 1)
+	if r := ctxTestObject(t, web)["result"].(map[string]any); r["scope"] != "glob web/**" {
+		t.Fatalf("glob scope=%#v", r)
+	}
+	if line := ctxTestSourceLines(t, web, "web/page.tsx")[2]; line["text"] != "  return StartCheckout" || line["in"] != "function Page" || line["match"] != true {
+		t.Fatalf("native TS match=%#v", line)
+	}
 	if count(web, "web/page.tsx") != 1 {
 		t.Errorf("a path must be printed once, not once per line:\n%s", web)
 	}
-	wantContains(t, c.must("ctx", "text", "StartCheckout", "--glob", "nowhere/**"), "text: 0 matches found in the whole repo (glob nowhere/**)")
+	nowhere := c.must("ctx", "text", "StartCheckout", "--glob", "nowhere/**")
+	ctxTestHits(t, nowhere, 0, 0)
+	if r := ctxTestObject(t, nowhere)["result"].(map[string]any); r["scope"] != "glob nowhere/**" {
+		t.Fatalf("empty scope=%#v", r)
+	}
 
 	// context: two lines by default, none with -C 0, a wider window with -C 3.
 	def := c.must("ctx", "text", "StartCheckout", "--word", "--glob", "web/page.tsx")
-	wantContains(t, def, "  1- export function Page() {", "  3- }")
-	if zero := c.must("ctx", "text", "StartCheckout", "--word", "--glob", "web/page.tsx", "-C", "0"); strings.Contains(zero, "  1- ") || strings.Contains(zero, "  3- ") {
-		t.Errorf("-C 0 printed context:\n%s", zero)
+	context := ctxTestSourceLines(t, def, "web/page.tsx")
+	if context[1]["text"] != "export function Page() {" || context[3]["text"] != "}" {
+		t.Fatalf("default context=%#v", context)
+	}
+	zero := c.must("ctx", "text", "StartCheckout", "--word", "--glob", "web/page.tsx", "-C", "0")
+	if lines := ctxTestSourceLines(t, zero, "web/page.tsx"); len(lines) != 1 || lines[2] == nil {
+		t.Fatalf("-C0 context=%#v", lines)
 	}
 
 	// only matching, multiline.
 	om := c.must("ctx", "text", "Start[A-Z]\\w+", "--only-matching", "--glob", "web/**")
-	wantContains(t, om, "  2: StartCheckout  [in function Page]")
+	if line := ctxTestSourceLines(t, om, "web/page.tsx")[2]; line["text"] != "StartCheckout" || line["in"] != "function Page" {
+		t.Fatalf("only-matching=%#v", line)
+	}
 	ml := c.must("ctx", "text", `Gateway interface \{\n\s+Start`, "--multiline", "--glob", "pay/pay.go")
-	wantContains(t, ml, "  3: type Gateway interface {", "  4: StartCheckout(ctx int) error")
+	mlLines := ctxTestSourceLines(t, ml, "pay/pay.go")
+	if mlLines[3]["text"] != "type Gateway interface {" || mlLines[4]["text"] != "\tStartCheckout(ctx int) error" {
+		t.Fatalf("multiline=%#v", mlLines)
+	}
 
 	// counts and files.
-	wantContains(t, c.must("ctx", "text", "StartCheckout", "-c", "--glob", "pay/pay.go"), "counts[1]{path,count}:\n  pay/pay.go,2")
+	wantContains(t, ctxTestStrings(t, c.must("ctx", "text", "StartCheckout", "-c", "--glob", "pay/pay.go")), "counts[1]{path,count}:\n  pay/pay.go,2")
 
-	// a long line is cut at 300 characters, 600 with --full, and says so with an ellipsis.
-	wide := c.must("ctx", "text", "StartCheckout", "--glob", "pay/wide.go", "-C", "0")
-	if l := section(wide, "pay/wide.go", ""); !strings.Contains(l, "…") || strings.Contains(l, strings.Repeat("w", 301)) || !strings.Contains(l, strings.Repeat("w", 250)) {
-		t.Errorf("the wide line is not cut at about 300 characters:\n%s", wide)
-	}
-	if full := c.must("ctx", "text", "StartCheckout", "--glob", "pay/wide.go", "-C", "0", "--full"); !strings.Contains(full, strings.Repeat("w", 380)) {
-		t.Errorf("--full did not lift the line width:\n%s", full)
+	// V2 selects whole native lines under one shared byte budget, not a
+	// serializer-specific 300/600-character crop. Legacy JSON stays v1.
+	for _, flags := range [][]string{nil, {"--full"}} {
+		args := append([]string{"ctx", "text", "StartCheckout", "--glob", "pay/wide.go", "-C", "0"}, flags...)
+		wide := c.must(args...)
+		if line := ctxTestSourceLines(t, wide, "pay/wide.go")[3]; line["text"] != strings.TrimSuffix(long, "\n") {
+			t.Fatalf("native wide line lost: %#v", line)
+		}
 	}
 
 	// matches only in test files: the zero sentence says where the hits went.
-	wantContains(t, c.must("ctx", "text", "uniqueOnlyInTests"), "text: 0 matches outside tests in the whole repo (+1 in tests; tests=include|only)")
-	wantContains(t, c.must("ctx", "text", "uniqueOnlyInTests", "--tests", "only"), "text: 1 of 1 matches", "pay/only_test.go\n")
-	wantContains(t, c.must("ctx", "text", "neverAppearsAnywhere"), "text: 0 matches found in the whole repo")
+	hidden := c.must("ctx", "text", "uniqueOnlyInTests")
+	ctxTestHits(t, hidden, 0, 0)
+	if r := ctxTestObject(t, hidden)["result"].(map[string]any); r["in_tests"] != float64(1) {
+		t.Fatalf("hidden tests=%#v", r)
+	}
+	only := c.must("ctx", "text", "uniqueOnlyInTests", "--tests", "only")
+	ctxTestHits(t, only, 1, 1)
+	wantContains(t, ctxTestStrings(t, only), "pay/only_test.go")
+	ctxTestHits(t, c.must("ctx", "text", "neverAppearsAnywhere"), 0, 0)
 
 	// per-file and total caps say how many were left out and the flag that shows them.
 	body := "package pay\n"
@@ -472,9 +592,10 @@ func TestCtxTextWithRipgrepKeepsItsSemanticsAndShapesHits(t *testing.T) {
 	}
 	os.WriteFile(filepath.Join(c.repo, "pay", "many.go"), []byte(body), 0o644)
 	pf := c.must("ctx", "text", "marker", "--per-file", "2", "-C", "0")
-	wantContains(t, pf, "text: 2 of 2 matches")
+	ctxTestHits(t, pf, 2, 2)
 	mx := c.must("ctx", "text", "marker", "--max", "3", "-C", "0")
-	wantContains(t, mx, "text: 3 of 5 matches", "showing 1-3 of 5; next: --page 2")
+	ctxTestHits(t, mx, 5, 3)
+	wantContains(t, ctxTestStrings(t, mx), "showing 1-3 of 5; next: --page 2")
 }
 
 func TestCtxErrorsAreStructuredOnStdoutWithExitCode2(t *testing.T) {
@@ -495,12 +616,24 @@ func TestCtxErrorsAreStructuredOnStdoutWithExitCode2(t *testing.T) {
 		if code != 2 {
 			t.Errorf("%v exited %d, want 2:\n%s", tc.args, code, out)
 		}
-		wantContains(t, out, tc.wants...)
+		info := ctxTestObject(t, out)
+		if info["status"] != "failed" {
+			t.Errorf("not failed: %#v", info)
+		}
+		for _, want := range tc.wants {
+			want = strings.TrimPrefix(strings.TrimPrefix(want, "error: "), "help: ")
+			wantContains(t, ctxTestStrings(t, out), want)
+		}
 	}
 	// A plan with one bad unit of work is a partial batch, not a failure.
 	c.stdin.WriteString(`{"lookups":[{"kind":"text","query":"StartCheckout"},{"kind":"read","path":"pay/missing.go"},{"kind":"text","query":"zzzNone"}]}`)
 	out := c.must("ctx", "batch", "-")
-	wantContains(t, out, "batch: 3 lookups, 1 with results, 1 empty, 1 failed", "#2 read \"pay/missing.go\": error: file pay/missing.go not found in the repo", "#3 text \"zzzNone\": 0 matches found in the whole repo")
+	info := ctxTestObject(t, out)
+	rows := info["result"].([]any)
+	if len(rows) != 3 || info["status"] != "partial" || rows[0].(map[string]any)["status"] != "ok" || rows[1].(map[string]any)["status"] != "failed" || rows[2].(map[string]any)["status"] != "empty" {
+		t.Fatalf("partial batch=%#v", info)
+	}
+	wantContains(t, ctxTestStrings(t, out), "file pay/missing.go not found in the repo")
 }
 
 func TestCtxHomeShowsLiveStateAndHelpAndVersionAreCheap(t *testing.T) {
@@ -518,9 +651,26 @@ func TestCtxHomeShowsLiveStateAndHelpAndVersionAreCheap(t *testing.T) {
 			t.Errorf("ctx %s --help has %d examples, want 2 or 3", name, n)
 		}
 		out := c.must("ctx", name, "--help")
-		wantContains(t, out, "usage: "+h.usage, fmt.Sprintf("examples[%d]:", len(h.examples)))
+		info := ctxTestObject(t, out)
+		if info["usage"] != h.usage || len(info["examples"].([]any)) != len(h.examples) {
+			t.Errorf("help for %s=%#v", name, info)
+		}
 	}
-	wantContains(t, c.must("ctx", "text", "--help"), "flags[", "--glob,", "--word,", "--tests,none,")
+	flags := ctxTestObject(t, c.must("ctx", "text", "--help"))["flags"].([]any)
+	found := map[string]string{}
+	for _, flag := range flags {
+		row := flag.(map[string]any)
+		found[row["flag"].(string)] = row["default"].(string)
+	}
+	if _, ok := found["--glob"]; !ok {
+		t.Error("missing glob flag")
+	}
+	if _, ok := found["--word"]; !ok {
+		t.Error("missing word flag")
+	}
+	if found["--tests"] != "none" {
+		t.Errorf("test default=%#v", found)
+	}
 }
 
 func TestSymViewSizesBodyByKindAndPrintsPathsOnce(t *testing.T) {

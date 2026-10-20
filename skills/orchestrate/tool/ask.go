@@ -51,6 +51,7 @@ type askQuestion struct {
 	Context, Next            template.HTML
 	Extra                    []askExtra
 	Options                  []askOption
+	source                   *card // Plain source for the shared information view, not rendered HTML.
 }
 
 type askPage struct {
@@ -369,6 +370,7 @@ func buildCard(r *renderer, q *askQuestion) error {
 	if err != nil {
 		return fmt.Errorf("%s: %v", r.cardPath, err)
 	}
+	q.source = c
 	q.Question, q.Change = c.question, c.change
 	if q.Context, err = r.body(c.context); err != nil {
 		return err
@@ -398,8 +400,40 @@ func buildCard(r *renderer, q *askQuestion) error {
 	return nil
 }
 
-func cmdAsk(a *app, args []string) error {
+func cmdAsk(a *app, args []string) (retErr error) {
 	fs := a.flags("ask")
+	human := fs.Bool("human", false, "readable JSON question view, preserving all choices and uncertainty")
+	machine := fs.Bool("json", false, "machine JSON of the selected question view")
+	audience := outputAgent
+	for _, arg := range args {
+		if arg == "--" {
+			break
+		}
+		if arg == "--human" || arg == "--human=true" {
+			audience = outputHuman
+		}
+	}
+	for _, arg := range args {
+		if arg == "--" {
+			break
+		}
+		if arg == "--json" || arg == "--json=true" {
+			audience = outputJSON
+		}
+	}
+	defer func() {
+		if retErr == nil {
+			return
+		}
+		code := 1
+		var ee *exitError
+		if errors.As(retErr, &ee) {
+			code = ee.code
+		}
+		_ = writeOutput(a.out, audience, map[string]any{"status": "failed", "error": retErr.Error()})
+		retErr = &exitError{code: code}
+	}()
+	_, _ = human, machine
 	outFlag := fs.String("out", "", "write the page to `DIR` (default <run root>/ask, or <cards dir>/../ask)")
 	cardsFlag := fs.String("cards", "", "render every card in `DIR` instead of the leads' open decisions")
 	pos, err := parseArgs(fs, args)
@@ -537,23 +571,87 @@ func cmdAsk(a *app, args []string) error {
 	if err := writeAtomic(path, buf.Bytes()); err != nil {
 		return err
 	}
-	// AXI-style output: short key: value lines an agent reads in a few tokens.
-	fmt.Fprintf(a.out, "page: %s\n", path)
-	fmt.Fprintf(a.out, "questions: %d\n", len(page.Questions))
-	if len(warnings) > 0 {
-		fmt.Fprintf(a.out, "warnings[%d]{question,message}:\n", len(warnings))
-		for _, w := range warnings {
-			fmt.Fprintf(a.out, "  %s,%s\n", toonValue(w.id()), toonValue(w.msg))
+	view := askOutputView(path, page.Questions, warnings)
+	return writeOutput(a.out, audience, view)
+}
+
+// askInformation is selected once for agents, humans and machine clients.
+// Keep question/choices/required action ahead of provenance. Source Markdown is
+// intentional: it preserves uncertainty and include references without HTML.
+type askInformation struct {
+	ID               string                  `json:"id"`
+	Question         string                  `json:"question"`
+	Options          []askChoiceInformation  `json:"options"`
+	AnswerNeededFrom string                  `json:"answer_needed_from"`
+	Context          string                  `json:"context,omitempty"`
+	Recommendation   string                  `json:"recommendation,omitempty"`
+	NextAction       string                  `json:"next_action,omitempty"`
+	Change           string                  `json:"change,omitempty"`
+	MaterialContext  []askContextInformation `json:"material_context,omitempty"`
+	Warning          string                  `json:"warning,omitempty"`
+	Lead             string                  `json:"lead,omitempty"`
+	Resolve          string                  `json:"resolve,omitempty"`
+}
+
+type askChoiceInformation struct {
+	ID     string `json:"id"`
+	Choice string `json:"choice"`
+	Effect any    `json:"effect"`
+}
+
+type askContextInformation struct {
+	Topic  string   `json:"topic"`
+	Detail []string `json:"detail"`
+}
+
+// Long prose is a block, not a cell in a dense uniform metadata table.
+func askEffect(body string) any {
+	if len(body) > 160 || strings.Contains(body, "\n") {
+		return []string{body}
+	}
+	return body
+}
+
+func askOutputView(path string, questions []askQuestion, warnings []askWarning) any {
+	packets := make([]askInformation, 0, len(questions))
+	for _, q := range questions {
+		id := q.Label
+		if q.Lead != "" {
+			id = q.Lead + "/" + id
 		}
+		p := askInformation{ID: id, Question: q.Question, Options: []askChoiceInformation{}, AnswerNeededFrom: "owner", Lead: q.Lead, Resolve: q.Resolve, Warning: q.Warning}
+		if c := q.source; c != nil {
+			p.Context, p.Recommendation, p.NextAction, p.Change = c.context, c.recommend, c.next, c.change
+			for _, o := range c.options {
+				p.Options = append(p.Options, askChoiceInformation{o.id, o.label, askEffect(o.body)})
+			}
+			for _, x := range c.extra {
+				p.MaterialContext = append(p.MaterialContext, askContextInformation{x.title, []string{x.body}})
+			}
+		}
+		packets = append(packets, p)
 	}
-	if len(page.Questions) == 0 {
-		fmt.Fprintln(a.out, "No open questions.")
-		return nil
+	type warning struct {
+		Question string `json:"question"`
+		Message  string `json:"message"`
 	}
-	fmt.Fprintln(a.out, "help[2]:")
-	fmt.Fprintf(a.out, "  lavish-axi %s\n", path)
-	fmt.Fprintf(a.out, "  lavish-axi poll %s\n", path)
-	return nil
+	ws := make([]warning, 0, len(warnings))
+	for _, w := range warnings {
+		ws = append(ws, warning{w.id(), w.msg})
+	}
+	status, message := "ok", ""
+	if len(questions) == 0 {
+		status, message = "empty", "No open questions."
+	}
+	return struct {
+		Status    string           `json:"status"`
+		Questions int              `json:"questions"`
+		Message   string           `json:"message,omitempty"`
+		Decisions []askInformation `json:"decisions"`
+		Page      string           `json:"page"`
+		Warnings  []warning        `json:"warnings,omitempty"`
+		Help      []string         `json:"help"`
+	}{status, len(questions), message, packets, path, ws, []string{"lavish-axi " + path, "lavish-axi poll " + path}}
 }
 
 type askWarning struct{ lead, label, msg string }
@@ -563,16 +661,6 @@ func (w askWarning) id() string {
 		return w.label
 	}
 	return w.lead + "/" + w.label
-}
-
-// toonValue quotes a TOON value when it holds a delimiter, a quote or edge
-// spaces.
-func toonValue(v string) string {
-	if v != "" && !strings.ContainsAny(v, ",:\"\\\n") && strings.TrimSpace(v) == v {
-		return v
-	}
-	r := strings.NewReplacer(`\`, `\\`, `"`, `\"`, "\n", `\n`)
-	return `"` + r.Replace(v) + `"`
 }
 
 func fileExists(p string) bool {

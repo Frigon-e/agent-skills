@@ -717,7 +717,10 @@ func TestGateEvidenceDecidesTheVerdict(t *testing.T) {
 	// A claim whose evidence is not in the repo is dropped, not counted.
 	h.fakePi(gatePasses(map[string]string{"adv-a": `{"findings":[{"severity":"blocker","where":"Design rules","claim":"x","evidence":"internal/nope.go:9"}]}`}))
 	out := h.must("gate", "spec.md")
-	wantContains(t, out, "gate: pass", "blockers: 0 verified", "concerns: 0 verified, 1 unverified", "dropped: 1 claim(s)")
+	wantContains(t, out, "gate: pass", "blockers: 0 verified", "dropped: 1 claim(s)")
+	if got := ctxTestObject(t, out)["concerns"]; got != "0 verified, 1 unverified" {
+		t.Fatalf("concerns=%#v", got)
+	}
 	h.must("plan", "spec.md") // the passed gate unlocks plan
 
 	// The same finding with evidence that exists is a verified blocker.
@@ -2258,7 +2261,11 @@ func TestAsk(t *testing.T) {
 		"shot.png": "PNGDATA",
 	})
 	out := h.must("ask")
-	wantContains(t, out, "page: ", "index.html", "questions: 2\n", "help[2]:", "  lavish-axi ", "  lavish-axi poll ")
+	wantContains(t, out, "page: ", "index.html", "questions: 2\n", "help[2]:", "lavish-axi ", "lavish-axi poll ")
+	info := decodedOutput(t, []byte(out), outputAgent).(map[string]any)
+	if len(info["decisions"].([]any)) != 2 || len(info["help"].([]any)) != 2 {
+		t.Fatalf("incomplete structured ask view: %#v", info)
+	}
 	page := h.askPage()
 	wantContains(t, page, "Does a script make the page?", "Question for other?", "Recommended", "Change later: hard",
 		"<strong>bold</strong>", `src="files/t1-page-diagram.svg"`, `alt="A diagram"`, `src="files/t1-page-shot.png"`, `alt="A screenshot"`,

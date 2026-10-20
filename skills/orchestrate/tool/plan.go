@@ -450,7 +450,7 @@ func cmdPlan(a *app, args []string) error {
 	if n := len(sp.problems); n > 0 {
 		fmt.Fprintf(a.out, "problems[%d]:\n", n)
 		for _, p := range sp.problems {
-			fmt.Fprintf(a.out, "  %s\n", toonValue(p))
+			fmt.Fprintf(a.out, "  %s\n", agentScalar(p))
 		}
 		noun := "problems"
 		if n == 1 {
@@ -498,14 +498,14 @@ func cmdPlan(a *app, args []string) error {
 
 	waves, _ := sp.waves()
 	var stale []string
-	fmt.Fprintf(a.out, "spec: %s\npackages: %d\n%s", toonValue(rel), len(sp.packages), intNote)
+	fmt.Fprintf(a.out, "spec: %s\npackages: %d\n%s", agentScalar(rel), len(sp.packages), intNote)
 	fmt.Fprintf(a.out, "tasks[%d]{id,kind,model,depends,status}:\n", len(sp.packages))
 	for _, p := range sp.packages {
 		deps := ""
 		if len(p.deps) > 0 {
-			deps = toonValue(strings.Join(p.deps, " "))
+			deps = agentScalar(strings.Join(p.deps, " "))
 		}
-		fmt.Fprintf(a.out, "  %s,%s,%s,%s,%s\n", toonValue(p.id), toonValue(p.kind), toonValue(p.model), deps, status[p.id])
+		fmt.Fprintf(a.out, "  %s,%s,%s,%s,%s\n", agentScalar(p.id), agentScalar(p.kind), agentScalar(p.model), deps, status[p.id])
 		if status[p.id] == "stale" {
 			stale = append(stale, p.id)
 		}
@@ -514,13 +514,13 @@ func cmdPlan(a *app, args []string) error {
 		// An existing brief is never rewritten; the old one may be running.
 		fmt.Fprintf(a.out, "stale[%d]:\n", len(stale))
 		for _, id := range stale {
-			fmt.Fprintf(a.out, "  %s\n", toonValue(id+": the spec changed since its brief was written; close its lead if one is open, remove "+filepath.Join(s.root, id)+" by hand and rerun orch plan"))
+			fmt.Fprintf(a.out, "  %s\n", agentScalar(id+": the spec changed since its brief was written; close its lead if one is open, remove "+filepath.Join(s.root, id)+" by hand and rerun orch plan"))
 		}
 		return fail("%d stale brief(s); do not spawn until they are replaced", len(stale))
 	}
 	fmt.Fprintf(a.out, "waves[%d]:\n", len(waves))
 	for _, w := range waves {
-		fmt.Fprintf(a.out, "  %s\n", toonValue(strings.Join(w, " ")))
+		fmt.Fprintf(a.out, "  %s\n", agentScalar(strings.Join(w, " ")))
 	}
 	fmt.Fprintln(a.out, "help[2]:\n  orch check <id>\n  orch spawn <id>")
 	return nil

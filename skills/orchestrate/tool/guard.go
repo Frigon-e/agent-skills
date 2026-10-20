@@ -254,7 +254,7 @@ func cmdDoctor(a *app, args []string) error {
 		if f.severity == "error" {
 			errs++
 		}
-		fmt.Fprintf(a.out, "  %s,%s,%s,%s\n", f.severity, toonValue(f.where), toonValue(f.msg), toonValue(f.fix))
+		fmt.Fprintf(a.out, "  %s,%s,%s,%s\n", f.severity, agentScalar(f.where), agentScalar(f.msg), agentScalar(f.fix))
 	}
 	if errs > 0 {
 		return &exitError{code: 1, msg: ""}
