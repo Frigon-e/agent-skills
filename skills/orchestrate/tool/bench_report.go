@@ -468,6 +468,14 @@ func benchComparison(suite string, s benchSuite, runs []*benchRun, base *benchRu
 		add(name, field, vs, nil, nil)
 	}
 	if key != nil {
+		t.Notes = append(t.Notes, "New scores: "+benchScorerSchema+" / "+benchScorerProfile+" recomputed read-only; original recorded scores below remain legacy evidence, not current approval.")
+		for _, class := range []string{"duplicate", "variation_site", "none", "unknown"} {
+			var vs []string
+			for _, r := range runs {
+				vs = append(vs, benchOriginalScoreText(r, key.ID, class))
+			}
+			add("old recorded "+class+" score (legacy, unversioned)", class, vs, nil, nil)
+		}
 		scores := make([]benchScore, len(runs))
 		for i, r := range runs {
 			scoped := *r
@@ -713,7 +721,7 @@ func benchDiff(a, b *benchRun) benchConfigDiff {
 	return d
 }
 func benchHistoryBuild(suite string, s benchSuite, runs []*benchRun, base *benchRun, key *benchKey) (benchHistory, error) {
-	h := benchHistory{Suite: suite, Key: key, Runs: runs, Scores: map[string]benchScore{}, Subjects: benchHistorySubjects(runs, key), RecordedScoreBasis: "runs[].scores are preserved historical originals; unversioned heuristic scores are legacy, not current behavior quality. Current in-memory computations are in scores."}
+	h := benchHistory{Suite: suite, Key: key, Runs: runs, Scores: map[string]benchScore{}, Subjects: benchHistorySubjects(runs, key), RecordedScoreBasis: "Old runs[].scores are preserved historical originals; unversioned heuristic scores are legacy, not current behavior quality. New scores use " + benchScorerSchema + " / " + benchScorerProfile + "; read-only in-memory computations are in scores."}
 	headlineRuns := []*benchRun{base}
 	if last := runs[len(runs)-1]; last.ID != base.ID {
 		headlineRuns = append(headlineRuns, last)
@@ -907,7 +915,10 @@ func benchPrintHistory(w io.Writer, h benchHistory) {
 	for _, r := range h.Runs {
 		fmt.Fprintln(w, "\n"+r.Label+": "+benchTestedOn(r))
 		if h.Key != nil {
-			fmt.Fprintf(w, "\nScored with %s (%d items; key subject %s); %s.\n", h.Key.ID, len(h.Key.Items), h.Key.Subject, h.Scores[r.ID].Coverage)
+			fmt.Fprintf(w, "\nNew scores: %s / %s with %s (%d items; key subject %s); %s.\n", benchScorerSchema, benchScorerProfile, h.Key.ID, len(h.Key.Items), h.Key.Subject, h.Scores[r.ID].Coverage)
+			for _, class := range []string{"duplicate", "variation_site", "none", "unknown"} {
+				fmt.Fprintf(w, "Old recorded %s score (legacy, unversioned): %s.\n", class, benchOriginalScoreText(r, h.Key.ID, class))
+			}
 			score := h.Scores[r.ID]
 			fmt.Fprintf(w, "\n%s. %s.\n", score.ItemNote, keyAgreeText(score.KeyAgree["group"]))
 			for _, class := range []string{"duplicate", "variation_site"} {

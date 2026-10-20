@@ -308,7 +308,8 @@ func benchShow(a *app, r *benchRun) error {
 const benchReadmeSubjects = `
 ## Subjects and immutable objects (schema 2)
 
-store.json identifies schema 2. objects/spec/HASH.md preserves byte-exact spec text
+New store.json files identify schema 2; migration leaves historical schema 1 metadata intact.
+objects/spec/HASH.md preserves byte-exact spec text
 (up to 2 MB); HASH is the 16-hex gate specHash and spec_sha256 is the full SHA256.
 objects/spec/HASH.json records packages, content hashes, history and variants.
 objects/itemset/ID.json holds canonical items. objects/blob/SHA256 holds private
@@ -325,7 +326,7 @@ Store directories are 0700 and files are 0600. No redaction is provided.
   --console output.txt preserves output; --console-start start.txt computes wall
   clock only with explicit timestamps. --with-sessions copies session transcripts.
 - Verify: orch bench verify --suite suite
-- Migrate schema 1: orch bench migrate --suite suite
+- Propose schema 1 reconstruction without changing originals: orch bench migrate --suite suite
 - Export: orch bench export suite --out suite.tar.gz
 - Restore into a fresh store: orch bench import-archive suite.tar.gz
 
@@ -334,8 +335,10 @@ Historical commit, dirty state, cost, turns, runner and author are never guessed
 Unknown spec text is allowed with a warning; verification reports it as information.
 Missing raw paths do not affect stored-data comparisons. Other repos or spec paths
 require --cross-subject. --total refuses differing group sets; --total=all opts in.
-Pass seconds (summed) and wall clock are distinct. Item confusion below 80% matched
-key items is omitted. Keys are immutable; subject correction creates a new subject
-and appends to subject_history during migration, without deleting the old subject.
+Pass seconds (summed) and wall clock are distinct. Behavior identity uses exact ids
+and explicit mapping, never fuzzy location overlap. Missing identity makes dependent
+quality unavailable. Keys and original runs are immutable. Subject correction adds
+a new subject and a migration proposal with proposed history, never a new binding
+on the original run. Unknown historical subjects remain unknown.
 Archives contain spec/item text, repository paths and prompts. Keep them private.
 `

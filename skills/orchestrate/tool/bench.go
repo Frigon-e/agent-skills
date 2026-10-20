@@ -165,7 +165,24 @@ func benchSuiteWrite(name string, s benchSuite) error {
 	if e := toml.NewEncoder(&b).Encode(s); e != nil {
 		return e
 	}
-	return benchWrite(filepath.Join(benchDir(), name, "suite.toml"), []byte(b.String()))
+	path := filepath.Join(benchDir(), name, "suite.toml")
+	if e := benchSafe(path); e != nil {
+		return e
+	}
+	data := []byte(b.String())
+	old, e := os.ReadFile(path)
+	if e != nil && !os.IsNotExist(e) {
+		return e
+	}
+	if e == nil {
+		if string(old) == string(data) {
+			return nil
+		}
+		// A new run may suggest another arm/default, but it cannot replace
+		// a historical suite definition. Reports never apply this proposal.
+		path = filepath.Join(benchDir(), name, "reports", "suite-proposals", benchHash(data)+".toml")
+	}
+	return benchImmutable(path, data)
 }
 func benchBuildNow() benchBuild {
 	b := benchBuild{Version: "unknown"}
@@ -290,7 +307,7 @@ func benchCopy(src, dst string) error {
 		if e != nil {
 			return e
 		}
-		return benchWrite(target, b)
+		return benchImmutable(target, b)
 	})
 }
 
@@ -544,9 +561,6 @@ func benchRecordWith(a *app, source, suite, label, arm string, opts benchRecordO
 			}
 			sort.Strings(s.Groups)
 		}
-		if e := benchSuiteWrite(suite, s); e != nil {
-			return e
-		}
 		if e := benchMkdir(filepath.Join(root, "runs")); e != nil {
 			return e
 		}
@@ -611,9 +625,9 @@ func benchRecordWith(a *app, source, suite, label, arm string, opts benchRecordO
 		}
 		if s.Subject.Default == "" {
 			s.Subject.Default = r.Subject
-			if e := benchSuiteWrite(suite, s); e != nil {
-				return e
-			}
+		}
+		if e := benchSuiteWrite(suite, s); e != nil {
+			return e
 		}
 		keys, e := benchKeys(suite)
 		if e != nil {
@@ -1296,43 +1310,11 @@ func cmdBenchKey(a *app, args []string) error {
 		if *key == "" {
 			return fail("rescore requires --key N")
 		}
-		r, e := benchRunLoad(pos[0], pos[1])
+		artifact, e := benchRescoreWrite(pos[0], pos[1], *key)
 		if e != nil {
 			return e
 		}
-		k, e := benchKeyLoad(pos[0], *key)
-		if e != nil {
-			return e
-		}
-		s, e := benchRescore(r, k)
-		if e != nil {
-			return e
-		}
-		e = benchWithLock(filepath.Join(benchDir(), pos[0], ".lock"), func() error {
-			path := filepath.Join(r.dir, "score-"+k.ID+".json")
-			if !benchExists(path) {
-				if e := benchJSON(path, s); e != nil {
-					return e
-				}
-			}
-			var raw map[string]json.RawMessage
-			runPath := filepath.Join(r.dir, "run.json")
-			if e := benchReadJSON(runPath, &raw); e != nil {
-				return e
-			}
-			bindings := r.KeySubjects
-			if bindings == nil {
-				bindings = map[string]string{}
-			}
-			bindings[k.ID] = k.Subject
-			b, _ := json.Marshal(bindings)
-			raw["key_subjects"] = b
-			return benchJSON(runPath, raw)
-		})
-		if e != nil {
-			return e
-		}
-		return json.NewEncoder(a.out).Encode(s)
+		return json.NewEncoder(a.out).Encode(artifact)
 	}
 	return fail("unknown bench key command %q", args[0])
 }
@@ -1404,7 +1386,14 @@ func benchDoctorLine() string {
 	return fmt.Sprintf("bench: %s; %d suites, %d runs, %d keys", benchDir(), suites, runs, keys)
 }
 func benchReadme() error {
-	return benchWrite(filepath.Join(benchDir(), "README.md"), []byte(benchReadmeText+benchReadmeSubjects))
+	path := filepath.Join(benchDir(), "README.md")
+	if e := benchSafe(path); e != nil {
+		return e
+	}
+	if benchExists(path) {
+		return nil
+	}
+	return benchImmutable(path, []byte(benchReadmeText+benchReadmeSubjects))
 }
 
 const benchReadmeText = `# Orchestrate benchmark store
@@ -1425,7 +1414,9 @@ checklist, dossiers and shadow rows. Original sessions are paths only and can va
   and [arms.<name>] with dossier, cache, runners, ctx_tool, context_files,
   shadow, spec_variant and orch flags. Create a suite by recording its first run,
   then edit suite.toml to set the groups for comparisons or add arm definitions.
-  New arm names are captured on first record; existing arm definitions are kept.
+  The first run initializes a suite definition. Later definition changes go to
+  reports/suite-proposals/<sha256>.toml; the existing suite.toml stays byte-identical.
+  Every run also retains its own arm definition. Reports never apply proposals.
 - <suite>/keys/key-N.json: normalized versioned key and class counts.
   key-N.original.json preserves the input; key-N.md preserves provenance and prompt.
 - <suite>/runs/YYYYMMDD-HHMM-label/run.json: schema_version 2. Build, inputs,
@@ -1434,8 +1425,12 @@ checklist, dossiers and shadow rows. Original sessions are paths only and can va
   or empty legacy strings, never inferred from today's environment. Cost has
   basis reported|estimated|none; unknown USD is null. Partial totals are marked.
   snapshot/ holds durable scoring inputs; shadow.jsonl copies shadow rows.
-  score-key-N.json adds a rescore without rewriting run.json. note.md is optional.
-- <suite>/reports/: saved Markdown history reports and index.md.
+  scores/<sha256>.json holds a versioned rescore with population/mapping ids,
+  input hashes, denominators, exclusions and warnings. Old score-key-N.json files
+  remain historical evidence. migrations/<sha256>.json holds reconstruction proposals.
+  Rescore and migration never rewrite run.json, keys, prompts or old scores.
+  note.md is optional.
+- <suite>/reports/history-<sha256>.md: content-addressed history with an idempotent index.md.
 
 ## Commands
 
@@ -1449,10 +1444,12 @@ checklist, dossiers and shadow rows. Original sessions are paths only and can va
   Add --total to sum passes instead of joining per-group values with 'and'.
   --json returns the same table data for scripts. Unknowns print 'not recorded'.
 - Rescore: orch bench key rescore crm-v1-reuse arm1 --key 2
-  Uses the same location-overlap scorer as gate compare. No model calls.
+  Validates an isolated copy before writing a new immutable score artifact.
+  Uses the behavior-identity scorer, with explicit mapping when required.
+  No overlap fuzzy match or model calls. Old scores stay labeled legacy.
 - History: orch bench report crm-v1-reuse --runs run3,arm1 --since 2026-01-01 --key 2 --baseline run3 --md --save
   --json returns the report data. Without --save, print to stdout.
-- Regenerate this guide: orch bench readme
+- Create this guide if missing: orch bench readme. An existing README stays byte-identical.
 
 Gate integration: orch gate spec.md --only group:api --experiment arm1 --bench-suite crm-v1-reuse
 or set bench_suite in user orchestrate.toml. Repo bench_suite is ignored. Default none does not record.
