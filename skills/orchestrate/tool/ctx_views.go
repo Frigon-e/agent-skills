@@ -164,11 +164,21 @@ func inName(in string) string {
 
 // usedBy states a definition's use once: callers outside tests, the files they
 // are in and the test references.
-func usedBy(d symDef, listed int, tests string) string {
-	s := fmt.Sprintf("used by %d", d.Total)
+func usedBy(d symDef, _ int, tests string) string {
 	if d.ByName {
-		s += " (by name)"
+		s := fmt.Sprintf("at least %d non-test name matches (by name, not a call graph)", d.Total)
+		if d.GenHidden > 0 {
+			s += fmt.Sprintf(", +%d in generated", d.GenHidden)
+		}
+		if d.RefsUnknown {
+			return s + "; references unavailable (counts unknown)"
+		}
+		return s + "; test reference count unknown"
 	}
+	if d.RefsUnknown {
+		return "references unavailable (counts unknown)"
+	}
+	s := fmt.Sprintf("used by %d", d.Total)
 	if n := distinctFiles(d.Callers); n > 1 {
 		s += fmt.Sprintf(" in %d%s files", n, map[bool]string{true: "+", false: ""}[d.Total > len(d.Callers)])
 	}
@@ -215,7 +225,13 @@ func testsTitle(d symDef, o symOpts) string {
 // place), the doc comment and a body preview sized by kind, one "used by" line
 // with the callers outside tests, the implementers and where it is wired.
 func (e *ctxEnv) symView(f symFact, o symOpts) *ctxView {
-	v := &ctxView{Kind: "sym", Query: f.Symbol, Unit: "definitions", TestsIn: o.Tests, Total: len(f.Defs)}
+	v := &ctxView{Kind: "sym", Query: f.Symbol, Unit: "definitions", TestsIn: o.Tests, Total: len(f.Defs), Errors: append([]string(nil), f.Errors...), SearchedScope: orDefault(o.In, "repository declarations")}
+	defer func() {
+		v.finishTruth()
+		if v.Head != "" && v.Status == "partial" {
+			v.Head += " (partial; counts not established)"
+		}
+	}()
 	if len(f.Defs) == 0 {
 		v.Zero = fmt.Sprintf("no symbol named %s found (declarations searched in every language of the repo; `orch ctx text` finds a name that is not a declaration)", quoteQuery(f.Symbol))
 		return v
@@ -226,12 +242,22 @@ func (e *ctxEnv) symView(f symFact, o symOpts) *ctxView {
 		if o.Kind != "" && !strings.EqualFold(d.Kind, o.Kind) {
 			continue
 		}
-		if o.In != "" && !strings.HasPrefix(path, strings.TrimSuffix(o.In, "/")) {
+		if o.In != "" && !symPathWithin(path, o.In) {
 			continue
+		}
+		v.Errors = append(v.Errors, d.Errors...)
+		if d.Match == "candidate" || d.ByName || d.RefsUnknown {
+			v.Status = "partial"
+			v.CountKind = "unknown"
 		}
 		defs = append(defs, d)
 	}
-	v.Shown = len(defs)
+	v.Total = len(defs)
+	v.Shown = min(len(defs), goplsMaxDefs)
+	if len(defs) > goplsMaxDefs {
+		v.Cut = fmt.Sprintf("showing %d of %d scoped definitions; narrow with --in and --kind", goplsMaxDefs, len(defs))
+		defs = defs[:goplsMaxDefs]
+	}
 	if len(defs) == 0 {
 		v.Zero = fmt.Sprintf("0 of %d definitions match kind=%q in=%q", len(f.Defs), o.Kind, o.In)
 		return v
@@ -289,6 +315,9 @@ func (e *ctxEnv) symView(f symFact, o symOpts) *ctxView {
 			place = fmt.Sprintf("%s:%d-%d", path, start, end)
 		}
 		head := fmt.Sprintf("%s  %s  %s", f.Symbol, kind, place)
+		if d.Match == "candidate" {
+			head += "  candidate (identity not verified)"
+		}
 		if e.isGenerated(path) {
 			head += "  generated" // the real definition, even though the file is generated
 		}

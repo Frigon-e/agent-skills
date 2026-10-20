@@ -9,9 +9,9 @@ import (
 )
 
 // ctxRepoTrusted reports whether repo-local language servers may run for code.
-// In normal mode a git repository and every linked worktree of it are trusted,
-// ctx_deny excludes a repository (and so its worktrees), and ctx_trust adds
-// paths outside that rule. Read-only mode never trusts a checkout.
+// Only the repository containing the installed skill and explicit ctx_trust
+// entries (including linked worktrees) are trusted. ctx_deny wins over both.
+// Read-only mode never trusts a checkout.
 func ctxRepoTrusted(code string) bool {
 	if ctxReadOnly() {
 		return false
@@ -24,7 +24,13 @@ func ctxRepoTrusted(code string) bool {
 	if ctxRepoListed(code, identity, cfg.CtxDeny) {
 		return false
 	}
-	return identity != "" || ctxRepoListed(code, identity, cfg.CtxTrust)
+	if ctxRepoListed(code, identity, cfg.CtxTrust) {
+		return true
+	}
+	if skill, err := skillDir(); err == nil && identity != "" {
+		return ctxRepoIdentity(skill) == identity
+	}
+	return false
 }
 
 func dirExists(p string) bool {
@@ -91,7 +97,7 @@ func ctxServerSkip(label string) string {
 	if ctxReadOnly() {
 		return label + " server in the repo not run in read-only mode"
 	}
-	return label + " server found in the repo, not run (the repo is in ctx_deny or is not a git repo; add it to ctx_trust)"
+	return label + " server found in the repo, not run (explicit repo trust is required; add its path to ctx_trust in the user config; ctx_deny takes precedence)"
 }
 
 // ctxPathInRoot reports whether path is inside the checkout or any other
@@ -129,7 +135,12 @@ func ctxServerBinary(code, bin string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if ctxPathInRoot(code, real) && !ctxRepoTrusted(code) {
+	local := ctxPathInRoot(code, real)
+	abs, _ := filepath.Abs(path)
+	for _, root := range ctxRepoRoots(code) {
+		local = local || symPathWithin(abs, root)
+	}
+	if local && !ctxRepoTrusted(code) {
 		return "", fmt.Errorf("%s", ctxServerSkip("language"))
 	}
 	return real, nil

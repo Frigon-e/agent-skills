@@ -279,7 +279,7 @@ func TestCtxSymbolOptionsShapeTheAnswer(t *testing.T) {
 	wantContains(t, only, "2 definitions of")
 
 	compact := c.must("ctx", "sym", "StartCheckout", "--compact")
-	wantContains(t, compact, "StartCheckout  method  pay/pay.go:4\n", "used by 8, +1 in tests (--refs N lists them)")
+	wantContains(t, compact, "StartCheckout  method  pay/pay.go:4  candidate (identity not verified)\n", "used by 8, +1 in tests (--refs N lists them)")
 	if strings.Contains(compact, "svc/svc.go") || strings.Contains(compact, "implemented by") {
 		t.Errorf("--compact listed callers:\n%s", compact)
 	}

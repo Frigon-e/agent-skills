@@ -124,7 +124,7 @@ func TestADefinitionInAGeneratedFileIsShownLabelledButNeverAsACaller(t *testing.
 	var sb strings.Builder
 	e.symView(f, defaultSymOpts(ctxFmt{})).write(&sb, ctxFmt{}, nil, 0, 0)
 	out := sb.String()
-	wantContains(t, out, "CreateThing  ", "internal/db/store.sql.go:5", "  generated", "used by 1 (by name)", "+1 in generated", "internal/app/use.go")
+	wantContains(t, out, "CreateThing  ", "internal/db/store.sql.go:5", "  generated", "at least 1 non-test name matches (by name, not a call graph)", "+1 in generated", "internal/app/use.go")
 	if strings.Contains(out, "store.sql.go:7") {
 		t.Errorf("a generated file was listed as a caller:\n%s", out)
 	}
@@ -132,7 +132,7 @@ func TestADefinitionInAGeneratedFileIsShownLabelledButNeverAsACaller(t *testing.
 	o.Generated = "include"
 	sb.Reset()
 	e.symView(f, o).write(&sb, ctxFmt{}, nil, 0, 0)
-	wantContains(t, sb.String(), "used by 2", "store.sql.go")
+	wantContains(t, sb.String(), "at least 2 non-test name matches", "store.sql.go")
 }
 
 func TestGeneratedFilesAreNeverReuseCandidatesOrLookAlikes(t *testing.T) {

@@ -60,13 +60,13 @@ func langGlobs(l *langDef) []string {
 }
 
 // declSites finds the lines of language l's files that declare name.
-func (e *ctxEnv) declSites(l *langDef, name string) []rgHit {
+func (e *ctxEnv) declSites(l *langDef, name string) ([]rgHit, error) {
 	if len(l.Decl) == 0 || !declName.MatchString(name) {
-		return nil
+		return nil, nil
 	}
-	res, err := e.Text(rgQuery{Pattern: declPattern(l, name), Globs: langGlobs(l), CaseSensitive: true, PerFile: 4})
+	res, err := e.Text(rgQuery{Pattern: declPattern(l, name), Globs: langGlobs(l), CaseSensitive: true, ViewFilters: true, Tests: "none", Generated: "include"})
 	if err != nil {
-		return nil
+		return nil, err
 	}
 	var out []rgHit
 	word := regexp.MustCompile(`\b` + regexp.QuoteMeta(name) + `\b`)
@@ -91,7 +91,10 @@ func (e *ctxEnv) declSites(l *langDef, name string) []rgHit {
 		}
 		out = append(out, h)
 	}
-	return out
+	if res.Limited || !res.Complete {
+		return out, fmt.Errorf("%s declaration scan retained a bounded match window; use native scoped rg to inspect omitted declarations", l.ID)
+	}
+	return out, nil
 }
 
 // declFacts resolves names by their declarations in every language of the
@@ -101,22 +104,28 @@ func (e *ctxEnv) declFacts(name string) *symFact {
 	f := &symFact{Symbol: name, Tier: "declaration scan (rg)"}
 	for _, lc := range detectedLangs(e.Code) {
 		l := langByID(lc.ID)
-		if l == nil || len(f.Defs) >= goplsMaxDefs {
+		if l == nil {
 			continue
 		}
-		sites := e.declSites(l, base)
+		sites, err := e.declSites(l, base)
+		if err != nil {
+			f.Errors = append(f.Errors, l.ID+": declarations: "+err.Error())
+		}
 		if len(sites) == 0 {
 			continue
 		}
 		f.Lang = l.ID
 		first := len(f.Defs)
 		for _, h := range sites {
-			if len(f.Defs) >= goplsMaxDefs {
-				break
-			}
 			ls := e.Lines(h.Path)
 			kind, _, _ := l.declOfLine(ls[h.Line-1])
-			f.Defs = append(f.Defs, symDef{Where: fmt.Sprintf("%s:%d", h.Path, h.Line), Kind: declKind(kind)})
+			f.Defs = append(f.Defs, symDef{Where: fmt.Sprintf("%s:%d", h.Path, h.Line), Kind: declKind(kind), Match: "candidate"})
+		}
+		// The declaration scan verifies a name, not a receiver or reference graph.
+		for i := first; i < len(f.Defs); i++ {
+			if f.Defs[i].Kind != "Module" {
+				f.Defs[i].Func, f.Defs[i].ByName = true, true
+			}
 		}
 		// Callers by name, on the first definition of the language.
 		d := &f.Defs[first]
@@ -130,6 +139,7 @@ func (e *ctxEnv) declFacts(name string) *symFact {
 		}
 		res, err := e.Text(rgQuery{Pattern: base, Fixed: true, Word: true, CaseSensitive: true, Globs: langGlobs(l)})
 		if err != nil {
+			symDefError(d, "references", err)
 			continue
 		}
 		for _, h := range res.Hits {
@@ -151,7 +161,7 @@ func (e *ctxEnv) declFacts(name string) *symFact {
 			}
 		}
 	}
-	if len(f.Defs) == 0 {
+	if len(f.Defs) == 0 && len(f.Errors) == 0 {
 		return nil
 	}
 	return f

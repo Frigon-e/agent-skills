@@ -51,18 +51,17 @@ func ctxFakeNativeTS(t *testing.T, code, marker string) string {
 	return path
 }
 
-func TestCtxRepoLocalServersRunInGitReposExceptDeniedAndReadonly(t *testing.T) {
-	for _, mode := range []string{"readonly", "denied", "trusted"} {
+func TestCtxTrustRepoLocalServersRequireExplicitTrust(t *testing.T) {
+	for _, mode := range []string{"unlisted", "readonly", "denied", "trusted"} {
 		t.Run(mode, func(t *testing.T) {
 			c := newCtxHarness(t)
 			marker := filepath.Join(t.TempDir(), "ran")
 			local := filepath.Join(c.repo, "node_modules", ".bin", "ctx-probe")
 			ctxProbeServer(t, local, marker)
 			native := ctxFakeNativeTS(t, c.repo, marker)
-			// A git repo is trusted with no config at all; read-only mode
-			// stays untrusted even when the repo is listed.
+			// Listing is required, and read-only mode still never runs local servers.
 			switch mode {
-			case "readonly":
+			case "readonly", "trusted":
 				if err := os.WriteFile(os.Getenv("ORCH_CONFIG"), []byte(fmt.Sprintf("ctx_trust = [%q]\n", c.repo)), 0o644); err != nil {
 					t.Fatal(err)
 				}
@@ -131,8 +130,7 @@ func TestCtxServerOverridesPATHAndSymlinks(t *testing.T) {
 	path := ctxNoServerPATH(t)
 	t.Setenv("PATH", outside+string(os.PathListSeparator)+path)
 	l := &langDef{ID: "probe", LSPEnv: "ORCH_PROBE_LS", LSP: []lspCmd{{Bin: "ctx-probe"}}}
-	// A git repo is trusted by default, so the normal-mode pass needs the repo
-	// excluded to exercise the symlink boundary.
+	// Denial applies to overrides and PATH symlinks too.
 	if err := os.WriteFile(os.Getenv("ORCH_CONFIG"), []byte(fmt.Sprintf("ctx_deny = [%q]\n", c.repo)), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -203,12 +201,39 @@ func TestCtxServerOverridesPATHAndSymlinks(t *testing.T) {
 	}
 }
 
+func TestCtxTrustInstalledRepositoryOnly(t *testing.T) {
+	c := newCtxHarness(t)
+	t.Setenv("ORCH_SKILL_DIR", filepath.Join(c.repo, "skills", "orchestrate"))
+	os.MkdirAll(os.Getenv("ORCH_SKILL_DIR"), 0755)
+	if !ctxRepoTrusted(c.repo) {
+		t.Fatal("installed repository not trusted")
+	}
+	other := t.TempDir()
+	writeTree(t, other, map[string]string{"a": "a"})
+	if _, err := git(other, "init", "-q"); err != nil {
+		t.Fatal(err)
+	}
+	if ctxRepoTrusted(other) {
+		t.Fatal("unlisted clone trusted")
+	}
+	os.WriteFile(os.Getenv("ORCH_CONFIG"), []byte(fmt.Sprintf("ctx_deny = [%q]\n", c.repo)), 0644)
+	if ctxRepoTrusted(c.repo) {
+		t.Fatal("installed repo bypassed deny")
+	}
+}
+
 func TestCtxTrustCoversGitReposAndTheirWorktrees(t *testing.T) {
 	c := newCtxHarness(t)
 	work := filepath.Join(t.TempDir(), "worktree")
 	c.git("worktree", "add", "--detach", work, "HEAD")
+	if ctxRepoTrusted(c.repo) || ctxRepoTrusted(work) {
+		t.Fatal("unlisted git repositories must not be trusted")
+	}
+	if err := os.WriteFile(os.Getenv("ORCH_CONFIG"), []byte(fmt.Sprintf("ctx_trust = [%q]\n", c.repo)), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	if !ctxRepoTrusted(c.repo) || !ctxRepoTrusted(work) {
-		t.Fatal("a git repo and its linked worktree must be trusted by default")
+		t.Fatal("listing must cover linked worktrees")
 	}
 	plain := t.TempDir()
 	if ctxRepoTrusted(plain) {
@@ -242,8 +267,11 @@ func TestCtxTrustCoversGitReposAndTheirWorktrees(t *testing.T) {
 	}
 }
 
-func TestCtxNativeTSServerFoundThroughAnotherWorktree(t *testing.T) {
+func TestCtxTrustNativeTSServerFoundThroughAnotherWorktree(t *testing.T) {
 	c := newCtxHarness(t)
+	if err := os.WriteFile(os.Getenv("ORCH_CONFIG"), []byte(fmt.Sprintf("ctx_trust = [%q]\n", c.repo)), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	marker := filepath.Join(t.TempDir(), "ran")
 	native := ctxFakeNativeTS(t, c.repo, marker)
 	work := filepath.Join(t.TempDir(), "worktree")
