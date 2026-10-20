@@ -19,7 +19,10 @@ func sweepCard(t *testing.T, topic, key, area string, options ...string) {
 	if area != "" {
 		body += "area: " + area + "\n"
 	}
-	body += "---\n## Context\nWe must choose.\n"
+	if len(options) > 0 {
+		body += "recommend: " + options[0] + "\naction: Record the owner's chosen fixture path.\n"
+	}
+	body += "---\n## Context\nWe must choose a fixture path; the first option is the baseline recommendation, not an authorized decision.\n"
 	if len(options) > 0 {
 		body += "\n## Options\n"
 		for _, o := range options {
@@ -234,7 +237,9 @@ func TestSweepSettlesOnlyWhatIsProved(t *testing.T) {
 		t.Error("a settled question was sent to the user")
 	}
 	askOut := h.must("ask", "--cards", fu)
-	wantContains(t, askOut, "questions: 3")
+	// The option-less free-text card stays for the owner, but D2 withholds it
+	// until research supplies decision-ready tradeoffs. The two ready cards render.
+	wantContains(t, askOut, "questions: 2", "not_ready: 1", "free,missing_tradeoffs")
 	if strings.Contains(askOut, "warnings[") {
 		t.Errorf("a for-user card did not render:\n%s", askOut)
 	}

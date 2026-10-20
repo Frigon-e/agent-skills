@@ -752,8 +752,19 @@ func TestGateQuestionsScopeAndFailures(t *testing.T) {
 	hash := specHash(mustRead(t, filepath.Join(h.repo, "spec.md")))
 	gdir := filepath.Join(filepath.Dir(h.dir("x")), "gate", hash)
 
-	// An unanswered question fails the gate and becomes a card orch ask renders.
-	h.fakePi(gatePasses(map[string]string{"package-api": `{"id":"api","will_change":[],"claims":[],"reuse":[],"questions":[{"package":"api","question":"Soft or hard delete?","answered_by":"","changes_result":true}]}`}))
+	// An unanswered, decision-ready question fails the gate and becomes a card orch ask renders.
+	jb, _, _ := fakeJbcontext(t)
+	t.Setenv("ORCH_JBCONTEXT", jb)
+	question := gateQuestion{Package: "api", Question: "Soft or hard delete?", Decisive: true, Packet: &gateQuestionPacket{
+		Goal: "Choose deletion behavior", KnownFacts: []string{"internal/store.go defines Put; deletion behavior is not specified"}, Unknown: "Should deleted records remain recoverable?",
+		Options:        []gatePacketOption{{"soft", "Soft delete", "Retains recoverable records", "Requires filtering deleted records"}, {"hard", "Hard delete", "Removes records permanently", "Prevents recovery"}},
+		Recommendation: "soft", Rationale: "Retains recovery until the owner confirms permanent deletion", Authority: "Owner decides retention", NextAction: "Record the owner's deletion choice",
+	}}
+	reply, err := json.Marshal(map[string]any{"id": "api", "will_change": []string{}, "claims": []any{}, "reuse": []any{}, "questions": []gateQuestion{question}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.fakePi(gatePasses(map[string]string{"package-api": string(reply)}))
 	code, out := h.run("gate", "spec.md")
 	if code != 1 {
 		t.Fatalf("an open question passed the gate: %d %s", code, out)
