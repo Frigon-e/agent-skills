@@ -30,7 +30,41 @@ project's own words. Every decision you ask for uses this card.
 5. **Change later:** easy or hard. Hard means more care from the user.
 6. **Next:** what happens after the user picks.
 
-A yes-or-no question needs only 1, 2, 3 and 6.
+A yes-or-no question in chat needs only 1, 2, 3 and 6. A file published with
+`orch ask --cards` still needs two explicit options with Gain and Cost effects.
+
+## Research before an owner decision
+
+A **research gap** is a fact the lead must check. An **owner decision** is a
+preference or authorization that the task does not delegate. Do not ask the
+owner to guess missing facts. State what you checked and what remains unknown.
+A failed search is not evidence that no answer exists.
+
+Before publication, the lead prepares Context, options with effects, a
+recommendation, and a next action or owner. Attach retrieval failures to the
+affected card under Review evidence. Retry or resolve the failure before
+asking the user to decide. A real owner choice stays with the owner after
+research; a technical choice stays with the lead only within explicit authority.
+
+For card files, keep `route: owner|lead-may-decide|unclear` separate from
+`ready: ready|missing_context|missing_tradeoffs|missing_evidence|failed_retrieval|unclear`.
+Readiness cannot grant decision authority. Use `ready: missing_evidence` for
+an unresolved research gap and clear it only after research. Other explicit
+missing or failed states also hold the card until the author clears them.
+`orch ask --cards` computes structural readiness for old files too. It does not
+trust a stored `ready: ready` or prove that a cited source supports a claim.
+
+The orchestrator must pass the CLI bucket counts, withheld-card reasons and
+INDEX retrieval warnings to the user with the page. Only ready owner or unclear
+cards have answer forms. Lead-settled and incomplete cards remain visible in
+the output, not silently dropped. Answering one card must leave others open;
+keep answered history under `questions/answered/`.
+
+See [the card file format](../orchestrate/references/question-file.md) for
+parseable Python and TypeScript examples. Python task cancellation changes
+runtime work lifetime. TypeScript unions disappear at runtime and cannot
+validate JSON. Research these language facts first; ask the owner only about
+the delivery or compatibility guarantee that follows from them.
 
 ## Language
 

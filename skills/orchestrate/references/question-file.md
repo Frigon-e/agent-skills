@@ -6,10 +6,15 @@ A lead writes one card per open `needs-decision` or `blocked` line at
 no card still appears, as a free-text question using the status line.
 
 Outside orchestrate (for example the `brainstorm` skill), `orch ask --cards
-<topic>/questions` renders every `<key>.md` in that folder, with no run and
-no `orch send` line. Move an answered card to `questions/answered/` so it
-leaves the page. Includes are confined to `<topic>/`, and the page goes to
-`<topic>/ask/` unless `--out` says otherwise.
+<topic>/questions` checks every root `<key>.md` in that folder, with no run
+and no `orch send` line. Only ready cards routed `owner` or `unclear` enter
+the answer page. The CLI output counts and lists cards settled by the lead
+and cards that need more research or preparation. It also surfaces `INDEX.md`
+notes and retrieval warnings. Give these warnings to the user with the page;
+do not share the page alone. Move an answered card to `questions/answered/`
+so it leaves the page. Asking never changes cards or answered history.
+Includes are confined to `<topic>/`, and the page goes to `<topic>/ask/`
+unless `--out` says otherwise.
 
 ## Format
 
@@ -18,6 +23,9 @@ leaves the page. Includes are confined to `<topic>/`, and the page goes to
 question: Does a script make the question page, or does the orchestrator write it?
 recommend: script
 change: easy
+route: owner
+ready: ready
+owner: orchestrator
 ---
 ## Context
 Markdown, 4-8 sentences or a short list: goal, state (with the files or
@@ -45,11 +53,26 @@ Markdown.
   optional: `easy` or `hard` (how costly it is to change the answer later).
   `area` is optional: the topic of the question. `orch sweep` uses it to
   route human-only areas; the page does not show it.
+- `route` records decision authority: `owner`, `lead-may-decide`, or `unclear`.
+  Product choices stay with their owner unless explicitly delegated. Missing
+  and unknown routes are treated as `unclear`, not as permission for the lead.
+  A ready `lead-may-decide` card is listed under "Settled by lead" in the
+  output, not asked on the page. This routing does not record a user answer.
+- `ready` is separate from `route`. It records preparation, not authority.
+  The check computes readiness even when the field is absent, and a stale
+  `ready: ready` cannot bypass it. Explicit `missing_context`,
+  `missing_tradeoffs`, `missing_evidence`, and `failed_retrieval` values keep
+  recorded gaps open until the author clears them after research. A parseable
+  card marked `ready: unclear` is held as `missing_evidence`, not a parse error.
+- `action` or `owner` may name the required action or responsible person.
+  A nonempty `## Next` also meets the action requirement.
 - Sections are `## Context`, `## Options`, `## Next`. Any other `## `
   section renders after Context.
 - Under Options, each `### <id>: <label>` starts an option. The id is a
   lowercase slug (letters, digits, `-`); the body is markdown. No options
-  means a free-text question. One option is an error.
+  means a free-text question in run-status `orch ask`. One option is an error.
+  For `--cards`, supply at least two options, each with explicit `Gain:` and
+  `Cost:` lines and nonempty effects. Markdown emphasis and bullets are allowed.
 
 ## Includes
 
@@ -74,6 +97,87 @@ theme, so put the colours in a `<style>` with an
 `@media (prefers-color-scheme: dark)` block, and keep text contrast at 4.5:1
 in both themes.
 
-If a card fails to parse or an include is refused, `orch ask` still builds the
-page: that question shows as a free-text fallback with a warning naming the
-error, and the output lists it under `warnings[N]`. Fix the card and rerun.
+## Deterministic readiness (`orch ask --cards`)
+
+Readiness uses no model and performs no search. It reports these states:
+
+| `ready` state | Required repair |
+|---|---|
+| `unclear` | Fix the card's syntax or unreadable file. This state is only for cards that cannot be parsed or loaded. |
+| `failed_retrieval` | Retry or resolve an attached search failure, then update the card with the result and search limits. |
+| `missing_context` | Add Context with the checked state, goal and constraints. |
+| `missing_tradeoffs` | Add two or more options, each with Gain and Cost effects. |
+| `missing_evidence` | Add a recommendation or next action/owner, or resolve an explicit `ready: missing_evidence` research gap. |
+| `ready` | The structural requirements pass. This is not proof that evidence supports a claim. |
+
+The output gives each withheld card's reason and required repair. A refused
+include is `missing_evidence`, not a complete question with a free-text fallback.
+Counts account for every root card, including bad filenames. `INDEX.md` is an
+overview, not a card; its notes and warning sections appear under `warnings`.
+An INDEX warning alone does not mark every unrelated card as failed retrieval.
+Attach failures to affected cards under `## Review evidence`, using explicit
+text such as `Code search failed: timeout`, `Code search did not run: missing
+index`, or `Code search skipped after earlier search failures.` Fenced examples
+are not retrieval reports.
+
+A research gap asks the lead to check facts, not the owner to guess. A true
+owner decision remains with the owner after the research is complete. Do not
+turn missing evidence or a failed search into delegated decision authority.
+
+Run-status `orch ask` keeps its existing behavior: a parse or include error
+produces a free-text fallback and a warning. This readiness filter currently
+applies only to `--cards`; gate publication is a separate integration.
+
+## Language-specific cards
+
+Python task lifetime changes runtime cancellation behavior. Verify the Python
+code and tests before asking the owner about the product guarantee:
+
+```markdown
+---
+question: Should Python writes finish after a client disconnect?
+recommend: finish
+route: owner
+ready: ready
+change: hard
+---
+## Context
+The API uses Python asyncio.TaskGroup in api/stream.py.
+The disconnect test shows cancellation stops unfinished writes.
+The product has no documented guarantee for accepted writes after disconnect.
+## Options
+### finish: Finish accepted writes
+Gain: The service can deliver accepted writes after disconnect.
+Cost: Python tasks need an explicit lifetime outside the cancelled TaskGroup.
+### cancel: Cancel unfinished writes
+Gain: TaskGroup owns each write until disconnect.
+Cost: The service can lose accepted writes before delivery.
+## Next
+The API lead implements the owner's delivery guarantee and cancellation tests.
+```
+
+TypeScript unions do not validate JSON at runtime. Research the boundary first;
+do not ask the owner to choose whether erased types provide validation:
+
+```markdown
+---
+question: Should unknown TypeScript API event kinds be rejected or ignored?
+recommend: reject
+route: owner
+ready: ready
+change: hard
+---
+## Context
+src/events.ts uses a TypeScript union for JSON input.
+The boundary test shows an unknown kind passes the type assertion at runtime.
+Runtime validation is required. The owner must choose the compatibility policy.
+## Options
+### reject: Reject unknown event kinds
+Gain: The caller receives an explicit compatibility error.
+Cost: Older clients cannot accept new event kinds without an update.
+### ignore: Ignore unknown event kinds
+Gain: Older clients can accept a response with new kinds.
+Cost: Clients can omit events, so the UI must disclose incomplete results.
+## Next
+The client lead adds runtime validation and tests the chosen unknown-kind policy.
+```

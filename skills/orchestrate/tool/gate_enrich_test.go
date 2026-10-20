@@ -537,7 +537,7 @@ func TestGateEnrichesItsCardsAndAskStillParsesThem(t *testing.T) {
 	gdir := filepath.Join(runRoot(h.repo), "gate", specHash(mustRead(t, filepath.Join(h.repo, "spec.md"))))
 	wantContains(t, string(mustRead(t, filepath.Join(gdir, "questions", "q1-api.md"))), "## Tag\nowner (mentions refund)")
 	ask := h.must("ask", "--cards", filepath.Join(gdir, "questions"))
-	wantContains(t, ask, "questions: 1")
+	wantContains(t, ask, "questions: 0")
 	// Question context now includes legitimate retrieval uncertainty such as
 	// "Spec hint search ... skipped". Inspect warnings, not arbitrary prose.
 	info := decodedOutput(t, []byte(ask), outputAgent).(map[string]any)
