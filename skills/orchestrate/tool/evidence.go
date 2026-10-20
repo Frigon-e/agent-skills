@@ -257,6 +257,20 @@ type claimSupport struct {
 }
 
 func (s claimSupport) Validate(evidence map[string]evidenceRecord) error {
+	return s.validate(evidence, false)
+}
+
+// ValidateSearch permits an absence assessment to cite search coverage instead
+// of manufacturing a source observation for a lookup that returned nothing.
+// Adequacy (scope, exact counts and completeness) remains reducer policy.
+func (s claimSupport) ValidateSearch(p evidencePacket, ids []string, current *gateSubject) error {
+	if err := p.ValidateLookupAttachment(ids, current); err != nil {
+		return err
+	}
+	return s.validate(p.evidenceIndex(), len(ids) > 0)
+}
+
+func (s claimSupport) validate(evidence map[string]evidenceRecord, hasSearch bool) error {
 	if err := validateEvidenceVersion(s.SchemaVersion); err != nil {
 		return err
 	}
@@ -269,7 +283,7 @@ func (s claimSupport) Validate(evidence map[string]evidenceRecord) error {
 	if err := validateEvidenceIDs(s.EvidenceIDs, evidence); err != nil {
 		return err
 	}
-	if s.State == claimSupported && len(s.EvidenceIDs) == 0 {
+	if s.State == claimSupported && len(s.EvidenceIDs) == 0 && !hasSearch {
 		return fmt.Errorf("supported claim requires evidence IDs")
 	}
 	return nil
@@ -402,6 +416,36 @@ func (p evidencePacket) ValidateAttachment(ids []string, current *gateSubject, c
 		}
 		if !revalidated {
 			return fmt.Errorf("evidence %s is stale or its locator is unvalidated; revalidation required", id)
+		}
+	}
+	return nil
+}
+
+// ValidateLookupAttachment binds search coverage to known lookup records of
+// the current subject, independently of whether any source evidence was shown.
+func (p evidencePacket) ValidateLookupAttachment(ids []string, current *gateSubject) error {
+	if err := p.Validate(); err != nil {
+		return err
+	}
+	if !current.valid() || current.ID != p.Subject.ID {
+		return fmt.Errorf("search coverage is not bound to the current subject")
+	}
+	lookups := make(map[string]evidenceLookup, len(p.Lookups))
+	for _, l := range p.Lookups {
+		lookups[l.ID] = l
+	}
+	seen := map[string]bool{}
+	for _, id := range ids {
+		if strings.TrimSpace(id) == "" || seen[id] {
+			return fmt.Errorf("empty or duplicate lookup ID %q", id)
+		}
+		seen[id] = true
+		l, ok := lookups[id]
+		if !ok {
+			return fmt.Errorf("unknown lookup ID %q", id)
+		}
+		if effectiveSubjectID(l.SubjectID, p.evidenceEnvelope) != current.ID {
+			return fmt.Errorf("lookup %s is not bound to the current subject", id)
 		}
 	}
 	return nil

@@ -59,6 +59,7 @@ type reviewAnswer struct {
 	AnswerState        reviewAnswerState `json:"answer_state"`
 	Judgment           reviewJudgment    `json:"judgment,omitempty"`
 	EvidenceIDs        []string          `json:"evidence_ids"`
+	LookupIDs          []string          `json:"lookup_ids,omitempty"` // search coverage, including zero-result searches
 	Support            *claimSupport     `json:"support,omitempty"`
 	Rationale          string            `json:"rationale"`
 	MissingInformation []string          `json:"missing_information"`
@@ -93,7 +94,16 @@ func (a reviewAnswer) Validate(item reviewItem, packet evidencePacket, current *
 	if err := packet.ValidateAttachment(a.EvidenceIDs, current, hashes); err != nil {
 		return err
 	}
-	if err := validateReviewSupport(a.Support, a.EvidenceIDs, packet.evidenceIndex()); err != nil {
+	if len(a.LookupIDs) > 0 {
+		if err := packet.ValidateLookupAttachment(a.LookupIDs, current); err != nil {
+			return err
+		}
+	}
+	if a.Judgment == reviewJudgmentNew && a.Support != nil && len(a.Support.EvidenceIDs) == 0 && len(a.LookupIDs) > 0 {
+		if err := a.Support.ValidateSearch(packet, a.LookupIDs, current); err != nil {
+			return err
+		}
+	} else if err := validateReviewSupport(a.Support, a.EvidenceIDs, packet.evidenceIndex()); err != nil {
 		return err
 	}
 	return validateUniqueReviewIDs("question", a.QuestionIDs)
