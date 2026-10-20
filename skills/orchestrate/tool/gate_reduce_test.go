@@ -17,6 +17,8 @@ func reducerFixture(language string) (*gateSubject, []reviewCheck, []reviewAnswe
 	}
 	ids := []string{p.Evidence[0].ID}
 	c := reviewCheck{Item: reviewItem{evidenceSchemaVersion, "export#atomic", "r1", "export", "Export a file without partial writes", []string{"reuse"}}, ID: "reuse", Required: true, Actor: "reviewer", Assessors: []string{"reviewer", "owner", "go"}, DecisionOwner: "owner", CanBlock: true}
+	c.SearchScope = p.Lookups[0].Scope
+	c.SearchQuery = p.Lookups[0].Query
 	support := &claimSupport{SchemaVersion: evidenceSchemaVersion, State: claimSupported, Assessor: "reviewer", Method: "model", EvidenceIDs: ids, Rationale: "The writer uses an atomic destination replacement", Excerpt: "rename(temp, destination)", FailureScenario: "A write error must leave the previous destination intact"}
 	a := reviewAnswer{SchemaVersion: evidenceSchemaVersion, ID: "answer-1", ItemID: c.Item.ID, ItemRevision: c.Item.Revision, CheckID: c.ID, AnswerState: reviewAnswerAnswered, Judgment: reviewJudgmentReuse, EvidenceIDs: ids, Support: support, Rationale: support.Rationale, MatchingBehavior: "Atomic replacement on successful write"}
 	f := reviewFinding{SchemaVersion: evidenceSchemaVersion, ID: "finding-1", ItemID: c.Item.ID, ItemRevision: c.Item.Revision, CheckID: c.ID, Disposition: reviewAccepted, Claim: "Failure cleanup deletes the destination", EvidenceIDs: ids, Support: support, Assessor: "reviewer", AuthorityBasis: reviewReducerPolicyVersion, Rationale: "The error path must preserve the previous destination"}

@@ -34,6 +34,15 @@ type reviewCheck struct {
 	DecisionDelegates    []string   `json:"decision_delegates,omitempty"`
 	CanBlock             bool       `json:"can_block"`
 	NotApplicableReasons []string   `json:"not_applicable_reasons,omitempty"`
+	// SearchScope is a trusted repository-relative coverage target, not a
+	// reviewer-selected path. New judgments need a search of this whole scope.
+	SearchScope string `json:"search_scope,omitempty"`
+	// SearchQuery is assigned by Go, never by the reviewer. Omission uses the
+	// canonical behavior query derived from the trusted item's requirement.
+	SearchQuery string `json:"search_query,omitempty"`
+	// AllowedSearchExclusions are exact labels assigned by Go, not glob patterns.
+	// Omission permits only the standard non-production classes below.
+	AllowedSearchExclusions []string `json:"allowed_search_exclusions,omitempty"`
 }
 
 func (c reviewCheck) key() string { return c.Item.ID + "/" + c.ID }
@@ -99,6 +108,7 @@ func legacyReviewStatus(state string, reasons []reviewNextAction) string {
 // ReduceReview performs no I/O, model calls or clock reads. Invalid system
 // inputs are errors; malformed reviewer records remain incomplete claims. In
 // particular, validating a locator never supplies the separate support assessment.
+// A lookup-only producer must assign the requirement/query binding in Go code.
 func ReduceReview(subject *gateSubject, requiredChecks []reviewCheck, answers []reviewAnswer, findings []reviewFinding, policy reviewPolicy) reviewResult {
 	r := reviewResult{SchemaVersion: gateStatusSchemaVersion, State: "pass", Reasons: []reviewNextAction{}, NextActors: []string{}, Failures: []string{}, Findings: append([]reviewFinding{}, findings...), ActiveBlockers: []string{}}
 	checks := append([]reviewCheck(nil), requiredChecks...)
@@ -303,7 +313,7 @@ func ReduceReview(subject *gateSubject, requiredChecks []reviewCheck, answers []
 					addReason(c, reviewUnsupportedClaim, "Describe matching and missing behavior for "+c.key())
 					continue
 				}
-				if a.Judgment == reviewJudgmentNew && !adequateReviewSearch(policy.Packet, a.EvidenceIDs...) {
+				if a.Judgment == reviewJudgmentNew && !adequateScopedReviewSearch(policy.Packet, c, a.LookupIDs, a.EvidenceIDs...) {
 					addReason(c, reviewUnsupportedClaim, "Complete the recorded search before a new judgment")
 					continue
 				}
@@ -444,7 +454,7 @@ func initGateReview(rec *gateRecord, sp *spec, src string, passes []gatePass) {
 			assessors = append(assessors, "go")
 		}
 		for _, check := range checks {
-			rec.Review.Checks = append(rec.Review.Checks, reviewCheck{Item: item, ID: check, Required: true, Actor: actor, Assessors: assessors, DecisionOwner: "owner", CanBlock: true})
+			rec.Review.Checks = append(rec.Review.Checks, reviewCheck{Item: item, ID: check, Required: true, Actor: actor, Assessors: assessors, DecisionOwner: "owner", CanBlock: true, SearchScope: "."})
 		}
 	}
 	add("@spec", "@spec", "Spec structure and ownership", subjectDigest([]byte(src)), []string{"structural"}, "go")
@@ -716,12 +726,29 @@ func reduceGateRecord(rec *gateRecord) {
 	rec.Reasons = slices.Compact(rec.Reasons)
 }
 
+// Legacy item-reply validation uses the repository-wide policy target, so a
+// narrower lookup cannot cover it. Scoped checks also accept an ancestor lookup;
+// containment is path-component-aware, never a lexical prefix match.
 func adequateReviewSearch(p evidencePacket, ids ...string) bool {
-	if p.Completeness != evidenceComplete {
+	return adequateScopedReviewSearch(p, reviewCheck{SearchScope: "."}, nil, ids...)
+}
+
+// adequateScopedReviewSearch checks recorded search coverage, not reviewer prose.
+// A future lookup-only producer must set the check's query binding in Go code.
+func adequateScopedReviewSearch(p evidencePacket, c reviewCheck, lookupIDs []string, ids ...string) bool {
+	target, ok := reviewSearchScope(c.SearchScope)
+	query := c.SearchQuery
+	if query == "" && c.Item.ID != "" {
+		query = "Code that implements " + c.Item.Requirement
+	}
+	if !ok || p.Completeness != evidenceComplete {
 		return false
 	}
 	n := 0
 	attached := map[string]bool{}
+	for _, id := range lookupIDs {
+		attached[id] = true
+	}
 	for _, e := range p.Evidence {
 		if slices.Contains(ids, e.ID) {
 			attached[e.LookupID] = true
@@ -729,13 +756,55 @@ func adequateReviewSearch(p evidencePacket, ids ...string) bool {
 	}
 	for _, l := range p.Lookups {
 		// Tool output observations establish reply validity, not repository search.
-		if l.Unit == "review_reply" || l.Unit == "source_read" || !attached[l.ID] {
+		if !attached[l.ID] {
 			continue
 		}
+		if l.Unit == "review_reply" || l.Unit == "source_read" {
+			// Such observations may accompany valid search coverage, but may
+			// not themselves be cited as search coverage via lookup_ids.
+			if slices.Contains(lookupIDs, l.ID) {
+				return false
+			}
+			continue
+		}
+		if query != "" && l.Query != query {
+			return false
+		}
+		allowed := c.AllowedSearchExclusions
+		if len(allowed) == 0 {
+			// Standard non-production classes, not arbitrary paths or globs.
+			allowed = []string{"tests", "generated", "vendor"}
+		}
+		for _, exclusion := range l.Exclusions {
+			if exclusion == "everything" || !slices.Contains(allowed, exclusion) {
+				return false
+			}
+		}
+		if len(ids) == 0 && (l.Status != "empty" || l.Counts.Total == nil || *l.Counts.Total != 0 || l.CountKind != evidenceCountExact) {
+			return false
+		}
+		actual, valid := reviewSearchScope(l.Scope)
+		if !valid || (actual != "." && actual != target && !strings.HasPrefix(target, actual+"/")) {
+			return false
+		}
 		n++
-		if l.ExecutionStatus != lookupSucceeded || effectiveCompleteness(l.Completeness, p.evidenceEnvelope) != evidenceComplete || len(l.Omissions) > 0 {
+		if l.ExecutionStatus != lookupSucceeded || (l.Status != "ok" && l.Status != "empty") || l.CountKind != evidenceCountExact || effectiveCompleteness(l.Completeness, p.evidenceEnvelope) != evidenceComplete || len(l.Omissions) > 0 || len(l.Errors) > 0 || effectiveSubjectID(l.SubjectID, p.evidenceEnvelope) != p.Subject.ID {
 			return false
 		}
 	}
 	return n > 0
+}
+
+func reviewSearchScope(scope string) (string, bool) {
+	if strings.TrimSpace(scope) == "" {
+		scope = "." // Historical checks omitted the repository-wide default.
+	}
+	if strings.ContainsAny(scope, "\\\\*?[]") || filepath.IsAbs(scope) {
+		return "", false
+	}
+	clean := filepath.ToSlash(filepath.Clean(scope))
+	if clean == ".." || strings.HasPrefix(clean, "../") {
+		return "", false
+	}
+	return clean, true
 }

@@ -124,6 +124,106 @@ func TestPythonWithoutAServerGivesTheDeclarationTierAndTheInstallHint(t *testing
 	}
 }
 
+func TestCtxStatusServerAvailability(t *testing.T) {
+	for _, kind := range []string{"missing", "directory", "non-executable", "broken-symlink", "executable", "symlink", "PATH"} {
+		t.Run(kind, func(t *testing.T) {
+			h := fixtureRepo(t, "ts")
+			bin := filepath.Join(h.tmp, "server")
+			want := kind == "executable" || kind == "symlink" || kind == "PATH"
+			switch kind {
+			case "directory":
+				if err := os.Mkdir(bin, 0755); err != nil {
+					t.Fatal(err)
+				}
+			case "non-executable":
+				if err := os.WriteFile(bin, []byte("#!/bin/sh\nexit 0\n"), 0644); err != nil {
+					t.Fatal(err)
+				}
+			case "broken-symlink":
+				if err := os.Symlink(bin+"-missing", bin); err != nil {
+					t.Fatal(err)
+				}
+			case "executable", "symlink", "PATH":
+				if err := os.WriteFile(bin, []byte("#!/bin/sh\nexit 0\n"), 0755); err != nil {
+					t.Fatal(err)
+				}
+				if kind == "symlink" {
+					if err := os.Symlink(bin, bin+"-link"); err != nil {
+						t.Fatal(err)
+					}
+					bin += "-link"
+				} else if kind == "PATH" {
+					t.Setenv("PATH", h.tmp+string(os.PathListSeparator)+os.Getenv("PATH"))
+					bin = filepath.Base(bin)
+				}
+			}
+			t.Setenv("ORCH_TSLS", bin)
+			out := h.must("ctx", "status", "--json")
+			var envelope struct {
+				Result ctxStatus `json:"result"`
+			}
+			if err := json.Unmarshal([]byte(out), &envelope); err != nil {
+				t.Fatal(err)
+			}
+			if got := envelope.Result.TSServer != ""; got != want {
+				t.Errorf("ctx status availability = %v, want %v: %s", got, want, out)
+			}
+			found := false
+			for _, status := range envelope.Result.Languages {
+				if status.ID == "typescript" {
+					found = true
+					if (status.Server != "") != want || (!want && status.Hint == "") {
+						t.Errorf("language availability disagrees: %+v", status)
+					}
+				}
+			}
+			if !found {
+				t.Fatal("TypeScript language status missing")
+			}
+			e := newCtxEnv(h.repo, ctxOpts{})
+			if got := strings.Contains(ctxReadiness(e), "ts server ok"); got != want {
+				t.Errorf("readiness availability = %v, want %v", got, want)
+			}
+		})
+	}
+}
+
+func TestCtxLangConfiguredServerNotUsable(t *testing.T) {
+	for _, language := range []string{"python", "typescript"} {
+		for _, kind := range []string{"missing", "directory", "non-executable"} {
+			t.Run(language+"/"+kind, func(t *testing.T) {
+				h := fixtureRepo(t, "mixed")
+				bin := filepath.Join(h.tmp, "unusable-server")
+				if kind == "directory" {
+					if err := os.Mkdir(bin, 0755); err != nil {
+						t.Fatal(err)
+					}
+				} else if kind == "non-executable" {
+					if err := os.WriteFile(bin, []byte("#!/bin/sh\n"), 0644); err != nil {
+						t.Fatal(err)
+					}
+				}
+				env := "ORCH_PYLS"
+				if language == "typescript" {
+					env = "ORCH_TSLS"
+				}
+				t.Setenv(env, bin)
+				e := newCtxEnv(h.repo, ctxOpts{})
+				for _, status := range e.langStatuses() {
+					if status.ID != language {
+						continue
+					}
+					if status.Server != "" || !strings.HasPrefix(status.Hint, "configured language server not usable: ") {
+						t.Fatalf("inconsistent unusable-server diagnostic: %+v", status)
+					}
+					return
+				}
+				t.Fatal("language status missing")
+			})
+		}
+	}
+}
+
 func TestCtxLangsConfigAddsALanguage(t *testing.T) {
 	needRG(t)
 	t.Cleanup(func() { applyCtxLangs(nil) })

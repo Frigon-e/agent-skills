@@ -813,6 +813,8 @@ func inOwnsDir(owns []string, dir string) bool {
 
 // ---- servers ----
 
+const configuredServerNotUsable = "configured language server not usable: "
+
 // langServer finds a language server for l in the checkout: the override
 // variable (a command line), then the project's own directories, then PATH.
 func langServer(code string, l *langDef) (bin string, args []string, ok bool) {
@@ -828,7 +830,7 @@ func langServerReason(code string, l *langDef) (bin string, args []string, ok bo
 				if ctxPathInRoot(code, v[0]) {
 					return "", nil, false, ctxServerSkip(l.ID)
 				}
-				return "", nil, false, err.Error()
+				return "", nil, false, configuredServerNotUsable + err.Error()
 			}
 			return p, v[1:], true, ""
 		}
@@ -880,7 +882,14 @@ func (e *ctxEnv) langStatuses() []langStatus {
 		case l.Special == "ts":
 			p, why := tsServerChoice(e.Code)
 			if p != "" {
-				st.Server = p
+				// tsServerChoice deliberately retains missing overrides for
+				// lookup diagnostics. Status describes availability, not just
+				// configuration, without changing lookup execution semantics.
+				if _, err := exec.LookPath(p); err != nil {
+					why = configuredServerNotUsable + err.Error()
+				} else {
+					st.Server = p
+				}
 			}
 			if why != "" {
 				e.note(why)
@@ -896,8 +905,12 @@ func (e *ctxEnv) langStatuses() []langStatus {
 				st.Hint = why
 			}
 		}
-		if st.Server == "" && st.Hint == "" && l != nil {
-			st.Hint = l.Hint
+		if st.Server == "" && l != nil {
+			if st.Hint == "" {
+				st.Hint = l.Hint
+			} else if l.Hint != "" && !strings.Contains(st.Hint, l.Hint) {
+				st.Hint += "; " + l.Hint
+			}
 		}
 		out = append(out, st)
 	}
