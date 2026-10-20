@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	_ "embed"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"html"
@@ -63,6 +64,7 @@ type askPage struct {
 type card struct {
 	question, recommend, change string
 	area                        string // optional: the topic the question belongs to (sweep routing)
+	route, ready, action, owner string // readiness is separate from decision authority
 	context, next               string
 	extra                       []struct{ title, body string }
 	options                     []struct{ id, label, body string }
@@ -125,6 +127,14 @@ func parseCard(src string) (*card, error) {
 			c.change = v
 		case "area":
 			c.area = v
+		case "route":
+			c.route = v
+		case "ready":
+			c.ready = v
+		case "action":
+			c.action = v
+		case "owner":
+			c.owner = v
 		}
 	}
 	if c.question == "" {
@@ -370,6 +380,12 @@ func buildCard(r *renderer, q *askQuestion) error {
 	if err != nil {
 		return fmt.Errorf("%s: %v", r.cardPath, err)
 	}
+	return renderCard(r, q, c)
+}
+
+// Use the same parsed snapshot for readiness and rendering.
+func renderCard(r *renderer, q *askQuestion, c *card) error {
+	var err error
 	q.source = c
 	q.Question, q.Change = c.question, c.change
 	if q.Context, err = r.body(c.context); err != nil {
@@ -435,7 +451,7 @@ func cmdAsk(a *app, args []string) (retErr error) {
 	}()
 	_, _ = human, machine
 	outFlag := fs.String("out", "", "write the page to `DIR` (default <run root>/ask, or <cards dir>/../ask)")
-	cardsFlag := fs.String("cards", "", "render every card in `DIR` instead of the leads' open decisions")
+	cardsFlag := fs.String("cards", "", "ask ready owner/unclear cards in `DIR`; list lead-settled and not-ready cards")
 	pos, err := parseArgs(fs, args)
 	if err != nil {
 		return err
@@ -478,6 +494,9 @@ func cmdAsk(a *app, args []string) (retErr error) {
 
 	var page askPage
 	var warnings []askWarning
+	type cardDisposition struct{ key, ready, reason string }
+	var settled, notReady []cardDisposition
+	cardCount := 0
 	add := func(q askQuestion, r *renderer, fallback string) {
 		q.ID = fmt.Sprintf("q%d", len(page.Questions)+1)
 		var werr error
@@ -517,16 +536,55 @@ func cmdAsk(a *app, args []string) (retErr error) {
 		paths, _ := filepath.Glob(filepath.Join(cardsDir, "*.md"))
 		sort.Strings(paths)
 		for _, cardPath := range paths {
-			if filepath.Base(cardPath) == "INDEX.md" { // the gate's overview of its cards, not a card
+			if filepath.Base(cardPath) == "INDEX.md" { // overview, not an answerable card
+				src, err := os.ReadFile(cardPath)
+				if err != nil {
+					warnings = append(warnings, askWarning{"", "INDEX.md", "cannot read retrieval warnings: " + err.Error()})
+				} else {
+					for _, msg := range cardIndexWarnings(string(src)) {
+						warnings = append(warnings, askWarning{"", "INDEX.md", msg})
+					}
+				}
 				continue
 			}
+			cardCount++
 			key := strings.TrimSuffix(filepath.Base(cardPath), ".md")
 			if !keyRe.MatchString(key) {
-				warnings = append(warnings, askWarning{"", filepath.Base(cardPath), fmt.Sprintf("skipped: the name must match %s.md", keyRe)})
+				msg := fmt.Sprintf("skipped: the name must match %s.md", keyRe)
+				warnings = append(warnings, askWarning{"", filepath.Base(cardPath), msg})
+				notReady = append(notReady, cardDisposition{key, "unclear", msg})
 				continue
 			}
+			src, err := os.ReadFile(cardPath)
+			if err != nil {
+				notReady = append(notReady, cardDisposition{key, "unclear", "cannot read card: " + err.Error()})
+				continue
+			}
+			c, err := parseCard(string(src))
+			if err != nil {
+				notReady = append(notReady, cardDisposition{key, "unclear", err.Error()})
+				continue
+			}
+			readiness := c.readiness(string(src))
+			if readiness.Status != "ready" {
+				notReady = append(notReady, cardDisposition{key, readiness.Status, strings.Join(readiness.Missing, "; ")})
+				continue
+			}
+			if c.route == "lead-may-decide" {
+				settled = append(settled, cardDisposition{key, "ready", c.question})
+				continue
+			}
+			// Missing, unknown and explicit unclear routes stay with the owner.
 			r := &renderer{key: key, cardPath: cardPath, taskDir: topicReal, rawTaskDir: topic, qDir: cardsDir, filesDir: filesDir}
-			add(askQuestion{Label: key}, r, key)
+			q := askQuestion{Label: key}
+			if err := renderCard(r, &q, c); err != nil {
+				msg := strings.TrimPrefix(err.Error(), cardPath+": ")
+				notReady = append(notReady, cardDisposition{key, "missing_evidence", msg})
+				warnings = append(warnings, askWarning{"", key, msg})
+				continue
+			}
+			page.Mermaid = page.Mermaid || r.mermaid
+			add(q, nil, key)
 		}
 	}
 	var leads []openLead
@@ -572,6 +630,22 @@ func cmdAsk(a *app, args []string) (retErr error) {
 		return err
 	}
 	view := askOutputView(path, page.Questions, warnings)
+	if cardsDir != "" {
+		// Preserve B3's output boundary and D2's readiness dispositions.
+		b, _ := json.Marshal(view)
+		var fields map[string]any
+		_ = json.Unmarshal(b, &fields)
+		fields["cards"], fields["settled_by_lead"], fields["not_ready"] = cardCount, len(settled), len(notReady)
+		rows := func(ds []cardDisposition) []map[string]string {
+			out := make([]map[string]string, 0, len(ds))
+			for _, d := range ds {
+				out = append(out, map[string]string{"card": d.key, "ready": d.ready, "reason": d.reason})
+			}
+			return out
+		}
+		fields["lead_cards"], fields["unready_cards"] = rows(settled), rows(notReady)
+		view = fields
+	}
 	return writeOutput(a.out, audience, view)
 }
 

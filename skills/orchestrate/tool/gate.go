@@ -79,9 +79,10 @@ type gateFinding struct {
 }
 
 type gateQuestion struct {
-	Package    string `json:"package"`
-	Question   string `json:"question"`
-	AnsweredBy string `json:"answered_by,omitempty"`
+	Packet     *gateQuestionPacket `json:"packet,omitempty"`
+	Package    string              `json:"package"`
+	Question   string              `json:"question"`
+	AnsweredBy string              `json:"answered_by,omitempty"`
 	// Decisive is true when two reasonable answers would give behaviour a
 	// user or a test could tell apart. Only decisive questions block.
 	Decisive bool `json:"changes_result"`
@@ -90,6 +91,7 @@ type gateQuestion struct {
 func (q gateQuestion) blocks() bool { return q.Decisive && q.AnsweredBy == "" }
 
 type gateRecord struct {
+	DossierManifest *dossierManifest `json:"dossier_manifest,omitempty"`
 	SchemaVersion     int                          `json:"schema_version,omitempty"`
 	State             string                       `json:"state,omitempty"`
 	Completion        reviewCompletion             `json:"completion,omitempty"`
@@ -467,7 +469,7 @@ func gatePrompt(shared, own, tag, task, schema string) string {
 
 func newGatePass(name, class, shared, own, tag, task, schema string, apply func(string, *gateRecord, string, *spec) error) gatePass {
 	sh, tk := gatePromptParts(shared, own, tag, task, schema)
-	return gatePass{name: name, class: class, shared: sh, task: tk, prompt: sh + tk, brief: short(task, 100), apply: apply}
+	return gateEvidenceContract(gatePass{name: name, class: class, shared: sh, task: tk, prompt: sh + tk, brief: short(task, 100), apply: apply})
 }
 
 // specLines splits a spec the way the parser does, so a line index here is
@@ -1265,6 +1267,7 @@ func cmdGate(a *app, args []string) (retErr error) {
 	if opts.dossier != "off" {
 		env := newCtxEnv(code, ctxOpts{Cfg: s.cfg, Skip: []string{rel}})
 		dos = newDossierSet(env, sp, packageBlocks(sp, src))
+		dos.subject = rec.Subject
 		dos.verdicts = opts.verdicts
 	}
 	passes := buildGatePasses(code, src, rel, sp, rec.Groups, dos, opts.dossier == "plan", only)
@@ -1356,7 +1359,10 @@ func cmdGate(a *app, args []string) (retErr error) {
 	}
 	if dos != nil {
 		rec.DossierChars = dos.sizes()
-		_ = dos.write(runDir)
+		rec.DossierManifest = dos.manifest(rec.Subject)
+		if err := dos.write(runDir); err != nil {
+			rec.PassErrors["all"] = "dossier persistence: " + err.Error()
+		}
 	}
 
 	prepareGateReview(rec, code)

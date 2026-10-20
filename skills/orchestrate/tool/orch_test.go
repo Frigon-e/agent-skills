@@ -2436,8 +2436,8 @@ func TestAskCards(t *testing.T) {
 	}
 	writeFiles(t, topic, map[string]string{"map.md": "Idea **map**.\n"})
 	writeFiles(t, qd, map[string]string{
-		"b-pick.md":       "---\nquestion: Pick one?\nrecommend: x\n---\n## Context\ninclude: ../map.md\n\n## Options\n### x: Ex\nGain: a.\n\n### y: Why\nGain: b.\n",
-		"a-out.md":        "---\nquestion: Out?\n---\n## Context\ninclude: ../../secret.md\n",
+		"b-pick.md":       "---\nquestion: Pick one?\nrecommend: x\n---\n## Context\ninclude: ../map.md\n\n## Options\n### x: Ex\nGain: a.\nCost: less b.\n\n### y: Why\nGain: b.\nCost: less a.\n\n## Next\nThe lead implements the choice.\n",
+		"a-out.md":        strings.Replace(readyAskCard, "The Python API uses asyncio.TaskGroup.", "include: ../../secret.md\n\nThe Python API uses asyncio.TaskGroup.", 1),
 		"Bad Name.md":     "---\nquestion: Skipped?\n---\n",
 		"answered/old.md": "---\nquestion: Old?\n---\n",
 	})
@@ -2447,15 +2447,29 @@ func TestAskCards(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantContains(t, out, "page: "+filepath.Join(topic, "ask", "index.html"), "questions: 2\n", "a-out,", "outside the task directory", "Bad Name.md,")
+	wantContains(t, out, "page: "+filepath.Join(topic, "ask", "index.html"), "questions: 1\n", "cards: 3\n", "not_ready: 2\n", "a-out,", "outside the task directory")
+	warnings, ok := decodedOutput(t, []byte(out), outputAgent).(map[string]any)["warnings"].([]any)
+	if !ok {
+		t.Fatal("Ask output has no decoded warning rows")
+	}
+	found := false
+	for _, row := range warnings {
+		warning, ok := row.(map[string]any)
+		if ok && warning["question"] == "Bad Name.md" && warning["message"] == fmt.Sprintf("skipped: the name must match %s.md", keyRe) {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("missing bad-name warning attached to Bad Name.md: %v", warnings)
+	}
 	wantContains(t, string(page), "Pick one?", "Idea <strong>map</strong>.", `data-lavish-question="b-pick"`, `data-lead=""`, "Answer for question ")
 	for _, bad := range []string{"SECRET", "Old?", "Skipped?", `data-lavish-question="/`} {
 		if strings.Contains(string(page), bad) {
 			t.Errorf("page contains %q", bad)
 		}
 	}
-	if strings.Index(string(page), "Out?") > strings.Index(string(page), "Pick one?") {
-		t.Error("cards are not in file name order")
+	if strings.Contains(string(page), `data-lavish-question="a-out"`) {
+		t.Error("a card with an unavailable include was asked as complete")
 	}
 	if code, out := h.run("ask", "--cards", filepath.Join(h.tmp, "nope")); code == 0 || !strings.Contains(out, "is not a directory") {
 		t.Errorf("missing --cards dir: exit %d, %s", code, out)

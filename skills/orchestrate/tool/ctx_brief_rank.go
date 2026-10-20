@@ -135,7 +135,8 @@ func (e *ctxEnv) chunkSnippet(lines []string) []string {
 }
 
 func (e *ctxEnv) assemble(pl *briefPlan) *ctxBrief {
-	d := &ctxBrief{ID: pl.in.ID}
+	d := &ctxBrief{ID: pl.in.ID, Lookups: append([]evidenceLookup{}, pl.lookups...)}
+	sort.Slice(d.Lookups, func(i, j int) bool { return d.Lookups[i].ID < d.Lookups[j].ID })
 	owns := pl.in.Owns
 	files := map[string]*fileEv{}
 	mark := func(path, why, kind string) {
@@ -188,8 +189,28 @@ func (e *ctxEnv) assemble(pl *briefPlan) *ctxBrief {
 			}
 		}
 		var sb strings.Builder
-		e.symView(*f, symOpts{Compact: true}).write(&sb, ctxFmt{Compact: true}, nil, 0, 0)
-		d.Sheet = append(d.Sheet, strings.TrimRight(sb.String(), "\n"))
+		fmt.Fprintf(&sb, "- %s (%s; %s)\n", f.Symbol, f.Lang, f.Tier)
+		for _, df := range f.Defs {
+			path, ln := splitWhere(df.Where)
+			ls := e.Lines(path)
+			if ln < 1 || ln > len(ls) {
+				continue
+			}
+			er := dossierSource(e, path, ln, ln)
+			d.Evidence = append(d.Evidence, er)
+			callers := fmt.Sprint(df.Total)
+			if (!df.Func && !df.ByName) || df.RefsUnknown || len(df.Errors) > 0 {
+				callers = "unknown"
+			}
+			fmt.Fprintf(&sb, "  `%s` [%s] match=%s signature: %s; callers: %s (by_name=%t); tests: %d\n", df.Where, er.ID, df.Match, ls[ln-1], callers, df.ByName, df.Tests)
+			for _, where := range append(append([]string{}, df.Callers...), df.Impls...) {
+				fmt.Fprintf(&sb, "  reference: %s\n", where)
+			}
+		}
+		d.interfaceSummary = append(d.interfaceSummary, strings.TrimRight(sb.String(), "\n"))
+		var legacy strings.Builder
+		e.symView(*f, symOpts{Compact: true}).write(&legacy, ctxFmt{Compact: true}, nil, 0, 0)
+		d.Sheet = append(d.Sheet, strings.TrimRight(legacy.String(), "\n"))
 		d.Facts = append(d.Facts, *f)
 	}
 
@@ -325,6 +346,8 @@ func (e *ctxEnv) assemble(pl *briefPlan) *ctxBrief {
 	}
 	// One entry per file, a quota per code tree (the owns' trees first), the total capped.
 	trees := orderTrees(pl.trees, owns)
+	// Preserve backend rank for equal agreement. Plans and query iteration are
+	// stable already; alphabetic ties can crowd out the most relevant hit.
 	sort.SliceStable(like, func(i, j int) bool { return like[i].agree > like[j].agree })
 	searched := map[string]bool{}
 	for _, q := range pl.concepts {
@@ -362,7 +385,23 @@ func (e *ctxEnv) assemble(pl *briefPlan) *ctxBrief {
 			}
 			via := strings.Join(en.vias, "; ")
 			head += " via " + via
-			d.Like = append(d.Like, head+"\n"+indent(strings.Join(en.snippet, "\n"), "    "))
+			start, end := 1, 1
+			fmt.Sscanf(en.ranges[0], "%d-%d", &start, &end)
+			end = max(start, end)
+			ls := e.Lines(en.path)
+			preview := en.snippet
+			legacy := head + "\n" + indent(strings.Join(en.snippet, "\n"), "    ")
+			if start >= 1 && start <= len(ls) {
+				end = min(len(ls), min(end, start+ctxSnippet-1))
+				preview = append([]string{}, ls[start-1:end]...)
+				er := dossierSource(e, en.path, start, end)
+				d.Evidence = append(d.Evidence, er)
+				if d.nativeLike == nil {
+					d.nativeLike = map[string]briefNativeLike{}
+				}
+				d.nativeLike[legacy] = briefNativeLike{head + "\n" + indent(strings.Join(preview, "\n"), "    "), er}
+			}
+			d.Like = append(d.Like, legacy)
 			d.LikeRows = append(d.LikeRows, briefLike{At: at, In: strings.Join(en.ins, ", "), Via: via, Snippet: en.snippet})
 		}
 		if n == 0 && t != "\x00other" && searched[t] {
