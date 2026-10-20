@@ -313,9 +313,9 @@ esac
 func TestGroupVerdictsAreOffByDefaultAndTheRetryAsksOnlyForMissingItems(t *testing.T) {
 	h := setup(t)
 	gdir := verdictRepo(t, h)
-	group := `{"packages":[{"id":"api","will_change":[],"claims":[],"questions":[],"items":[{"item":"api#1","verdict":"reuse","candidate":"internal/store.go:3","why":"Put exists"}]}]}`
+	group := `{"packages":[{"id":"api","will_change":[],"claims":[],"questions":[],"reuse":[],"items":[{"item":"api#1","verdict":"reuse","candidate":"internal/store.go:3","why":"Put exists"}]}]}`
 	retry := `{"packages":[{"id":"api","items":[{"item":"api#2","verdict":"extend","candidate":"internal/store.go:3","why":"add the route beside Put"}]}]}`
-	dir := scriptPi(t, h, group, retry)
+	dir := scriptPi(t, h, cleanPackageReply, retry)
 
 	// Off by default: no verdict is asked for and no retry runs.
 	out := h.must("gate", "spec.md")
@@ -326,6 +326,7 @@ func TestGroupVerdictsAreOffByDefaultAndTheRetryAsksOnlyForMissingItems(t *testi
 	wantContains(t, string(mustRead(t, filepath.Join(gdir, "items.json"))), `"id": "api#1"`, `"id": "api#2"`)
 
 	os.Remove(filepath.Join(dir, "calls.log"))
+	scriptPi(t, h, group, retry)
 	out = h.must("gate", "spec.md", "--verdicts")
 	calls = string(mustRead(t, filepath.Join(dir, "calls.log")))
 	if n := strings.Count(calls, "GATE-GROUP-ITEMS"); n != 1 {
@@ -350,10 +351,16 @@ func TestGroupVerdictsAreOffByDefaultAndTheRetryAsksOnlyForMissingItems(t *testi
 		t.Errorf("finding kinds %v", src)
 	}
 
-	// A retry that still leaves an item out becomes a note.
+	// A retry that still leaves an item out prevents approval.
 	scriptPi(t, h, group, `{"packages":[{"id":"api","items":[]}]}`)
-	out = h.must("gate", "spec.md", "--verdicts")
-	wantContains(t, out, "no verdict 1", "1 items had no verdict")
+	code, out := h.run("gate", "spec.md", "--verdicts")
+	if code != 1 {
+		t.Fatalf("missing verdict passed: %d %s", code, out)
+	}
+	wantContains(t, out, "gate: unverified", "no verdict 1", "1 items had no verdict", "api#2")
+	if rec := readRecord(t, gdir); len(rec.Reasons) == 0 {
+		t.Fatal("missing verdict has no reason")
+	}
 }
 
 func TestVerdictsDoNotChangeTheSharedPrefix(t *testing.T) {
