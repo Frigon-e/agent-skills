@@ -21,7 +21,11 @@ or compaction.
   Report-back section says. Never commit in the main checkout. Never push,
   merge or open a PR until a message tells you to. If your `base` is an
   `orch/int-*` branch, that is already the tip with your prerequisites
-  merged; never touch that branch, `orch verify` merges your work into it.
+  merged; never touch that branch, `orch verify` requires a clean, committed
+  candidate and merges exactly the commit it checked into it. Checks must not
+  move HEAD or write non-ignored files. Use `orch verify <id> --no-merge` for
+  preliminary working-tree validation; `verify: pass (not integrated)` does
+  not approve integration.
 - **Scout tasks:** don't edit the repo. Write `report.md` in your task
   directory: findings with `path:line` evidence first, then the
   recommendation. It must make sense without your conversation.

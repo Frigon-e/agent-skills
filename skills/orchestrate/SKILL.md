@@ -275,7 +275,7 @@ your turn:
 
 | Event | Do |
 |---|---|
-| `done` | Check the evidence before believing it. Ship: `git log -1 <sha>` on the named branch, then `orch verify <id>`; the lead's own check claim is not evidence. When the spec has dependencies, a passing verify also merges the package into the spec's integration branch; `integration: conflict` or `integration: check failed` is a needs-decision for the user (the tool never resolves it), and dependents cannot spawn until the merge lands. Scout: read `report.md`, or have a scout summarise a long one. Tell the user in a line or two. Merging into the base branch (the integration branch included) is a separate instruction given once the user approves, using the repo's own merge flow. Then `orch close <id>`. |
+| `done` | Check the evidence before believing it. Ship: `git log -1 <sha>` on the named branch, then `orch verify <id>`; the lead's own check claim is not evidence. When the spec has dependencies, verify requires a clean, committed candidate, pins it before checks and merges that exact commit into the spec's integration branch only if HEAD and non-ignored files stay unchanged; the merge result is checked too. `--no-merge` only validates the working tree and reports `verify: pass (not integrated)`; `integration: conflict` or `integration: check failed` is a needs-decision for the user (the tool never resolves it), and dependents cannot spawn until the merge lands. Scout: read `report.md`, or have a scout summarise a long one. Tell the user in a line or two. Merging into the base branch (the integration branch included) is a separate instruction given once the user approves, using the repo's own merge flow. Then `orch close <id>`. |
 | `needs-decision [key]` | If the user's earlier answers settle it, `orch send <id> --resolve <key> "<answer>"`. Otherwise ask the user, batching open decisions, then send the answer. |
 | `needs-decision [context]` | The lead's context is past the limit and the next work is unrelated; it wrote `handoff.md` and stopped. Decide it yourself, without the user: `orch compact <id>` when the next work shares some of its context, `orch respawn <id>` (fresh session on the same task and worktree, started from the handoff) when it shares none. Both resolve the decision. |
 | `escalate [key]` | The lead is out of its depth. Follow the `escalate` rule under "Talking to the user". Never ask the lead to try again on the same model first. |
@@ -304,10 +304,19 @@ other way.
   yes-or-no question stays in chat. Never run `lavish-axi share`.
 - A ship lead's `done` is a claim, not a result. Run `orch verify <id>`
   before you accept it: it runs the repo check command in the lead's
-  worktree and lists files changed outside the task's `owns`. On `fail` or
-  `unverified`, send the output back with `orch send` and do not report the
-  task as done to the user. Set `check` in the repo config, or `verify`
-  cannot pass.
+  worktree and lists files changed outside the task's `owns`. Integration
+  requires no uncommitted or untracked non-ignored files. Verify pins HEAD
+  before scope and acceptance checks, rejects changed HEAD or non-ignored
+  files after checks, then merges only that SHA. It checks the merge result
+  too; conflicts are aborted, failed or mutating checks roll back the merge
+  and clean their non-ignored outputs. Ignored build outputs are allowed.
+  The integrated marker records both candidate and merge SHAs. An already
+  merged candidate records that no post-merge check ran. `--no-merge` keeps
+  preliminary working-tree validation, with `verify: pass (not integrated)`;
+  tasks without an integration branch use the same wording. Neither is
+  integration approval. On `fail` or `unverified`, send the output back with
+  `orch send` and do not report the task as done to the user. Set `check` in
+  the repo config, or `verify` cannot pass.
 - `escalate` means a lead hit something beyond its model. Read its card
   (`questions/<key>.md`: Context, Tried, Blocked). A question about this
   code goes to one fresh Sonnet agent with the card and the paths it names;

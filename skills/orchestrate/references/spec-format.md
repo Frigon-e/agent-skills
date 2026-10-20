@@ -179,9 +179,17 @@ directory by hand and rerun.
 
 When any package has `depends`, plan cuts `orch/int-<spec file name>` from
 the base and gives every ship task that base plus `integration: <branch>`.
-`orch verify` merges a passing package into it; dependents start from its
-tip. The branch is never the base branch: you merge it there and delete it,
-and `orch integration remove <slug>` drops its merge worktree.
+`orch verify` requires a clean, committed candidate, pins HEAD before scope
+and acceptance checks, rejects checks that move HEAD or write non-ignored
+files, and merges only that pinned SHA into it. The merge result is checked
+too, and the integrated marker binds candidate and merge SHAs; dependents
+start from the integration tip. Ignored build outputs are allowed. Use
+`--no-merge` for preliminary working-tree validation, reported as
+`verify: pass (not integrated)`, not integration approval. An already merged
+candidate reports that no post-merge check ran. Conflicts are aborted; failed
+or mutating post-merge checks roll back and clean their non-ignored outputs.
+The branch is never the base branch: you merge it there and delete it, and
+`orch integration remove <slug>` drops its merge worktree.
 
 Output lists each task with its status and the waves: a wave holds the
 packages whose dependencies are all in earlier waves. Check and spawn the
