@@ -519,6 +519,18 @@ func TestGateStateSupportingRepairCompletesTheSameClaim(t *testing.T) {
 	}
 }
 
+func TestGateStateLegacyQuoting(t *testing.T) {
+	for _, tc := range []struct{ value, want string }{
+		{"plain words", "plain words"}, {"true", "true"}, {"null", "null"}, {"", `""`},
+		{"group:api", `"group:api"`}, {" left ", `" left "`}, {"a,b", `"a,b"`},
+		{"line\nnext", `"line\nnext"`}, {`a"b\c`, `"a\"b\\c"`},
+	} {
+		if got := legacyGateValue(tc.value); got != tc.want {
+			t.Errorf("legacy quoting %q: %q != %q", tc.value, got, tc.want)
+		}
+	}
+}
+
 func TestGateStateOutputAudiencesShareV2Selection(t *testing.T) {
 	for _, incomplete := range []bool{false, true} {
 		t.Run(map[bool]string{false: "pass", true: "incomplete"}[incomplete], func(t *testing.T) {
@@ -531,11 +543,16 @@ func TestGateStateOutputAudiencesShareV2Selection(t *testing.T) {
 				wantState, wantStatus, wantCode = "incomplete", "unverified", 1
 			}
 			h.fakePi(gatePasses(over))
+			legacyCode, legacyOut := h.run("gate", "spec.md")
+			if legacyCode != wantCode || !strings.HasPrefix(legacyOut, "gate: "+wantStatus+"\nspec: spec.md (version ") || strings.Contains(legacyOut, "schema_version:") {
+				t.Fatalf("default legacy gate protocol changed: %s", legacyOut)
+			}
+			wantContains(t, legacyOut, "blockers: 0 verified", "concerns: 0 verified, ")
 			var selected any
 			for _, audience := range []struct {
 				flag string
 				kind outputAudience
-			}{{"", outputAgent}, {"--human", outputHuman}, {"--json", outputJSON}} {
+			}{{"--schema-version=2", outputAgent}, {"--human", outputHuman}, {"--json", outputJSON}} {
 				args := []string{"gate", "spec.md"}
 				if audience.flag != "" {
 					args = append(args, audience.flag)

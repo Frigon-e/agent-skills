@@ -721,10 +721,7 @@ func TestGateEvidenceDecidesTheVerdict(t *testing.T) {
 	if code != 1 {
 		t.Fatalf("unsupported blocking claim passed: %d %s", code, out)
 	}
-	wantContains(t, out, "gate: unverified", "blockers: 0 verified", "dropped: 1 claim(s)")
-	if got := ctxTestObject(t, out)["concerns"]; got != "0 verified, 1 unverified" {
-		t.Fatalf("concerns=%#v", got)
-	}
+	wantContains(t, out, "gate: unverified", "blockers: 0 verified", "concerns: 0 verified, 1 unverified", "dropped: 1 claim(s)")
 	gdir := gateDir(h.a.siteRoot(t), specHash(mustRead(t, filepath.Join(h.repo, "spec.md"))))
 	rec := readRecord(t, gdir)
 	if rec.State != "incomplete" || len(rec.Reduction.Reasons) == 0 || rec.Reduction.Reasons[0].Reason != reviewUnsupportedClaim {

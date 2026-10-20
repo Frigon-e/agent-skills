@@ -121,10 +121,10 @@ func shellQuote(s string) string {
 
 func treeWarning(rec *gateRecord) string {
 	if len(rec.TreeChanged) > 0 {
-		return "UNVERIFIED: checkout changed: " + strings.Join(rec.TreeChanged, ", ") + "; in flight: " + strings.Join(rec.TreeChangedPasses, ", ") + ". Findings discarded. Files were NOT reverted."
+		return "UNVERIFIED: checkout changed: " + strings.Join(rec.TreeChanged, ", ") + "; in flight: " + strings.Join(rec.TreeChangedPasses, ", ") + ". Findings retained for inspection; approval withheld. Files were NOT reverted."
 	}
 	if rec.TreeCheckError != "" {
-		return "UNVERIFIED: checkout could not be checked: " + rec.TreeCheckError + ". Findings discarded."
+		return "UNVERIFIED: checkout could not be checked: " + rec.TreeCheckError + ". Findings retained for inspection; approval withheld."
 	}
 	return ""
 }
