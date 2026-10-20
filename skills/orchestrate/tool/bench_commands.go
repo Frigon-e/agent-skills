@@ -125,11 +125,13 @@ func benchKeyBinding(a *app, suite string, items []benchKeyItem, opts benchKeyOp
 			return "", set, e
 		}
 		var rows []struct {
-			ID      string `json:"id"`
-			ItemID  string `json:"item_id"`
-			Package string `json:"package"`
-			Text    string `json:"text"`
-			Item    string `json:"item"`
+			ID         string   `json:"id"`
+			ItemID     string   `json:"item_id"`
+			Package    string   `json:"package"`
+			Text       string   `json:"text"`
+			Item       string   `json:"item"`
+			Revision   string   `json:"revision"`
+			Supersedes []string `json:"supersedes"`
 		}
 		if e := json.Unmarshal(b, &rows); e != nil {
 			return "", set, e
@@ -140,7 +142,7 @@ func benchKeyBinding(a *app, suite string, items []benchKeyItem, opts benchKeyOp
 			if pkg == "" {
 				pkg, _, _ = strings.Cut(id, "#")
 			}
-			its = append(its, gateItem{ID: id, Package: pkg, Text: orDefault(row.Text, row.Item), Kind: "legacy"})
+			its = append(its, gateItem{ID: itemKey(pkg, id), Package: pkg, Text: orDefault(row.Text, row.Item), Kind: "legacy", Revision: row.Revision, Supersedes: row.Supersedes})
 		}
 	} else {
 		for _, it := range items {

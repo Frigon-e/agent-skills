@@ -1,9 +1,12 @@
 package main
 
 import (
+	"crypto/sha256"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -19,6 +22,10 @@ func TestExplicitBuildQueriesAndPointers(t *testing.T) {
 		t.Fatalf("legacy items: %+v %v", old, err)
 	}
 	p := &specPackage{id: "p", body: "Body", builds: got}
+	items := packageItems(p)
+	if items[0].ID != "p#1" || items[1].ID != "p#2" {
+		t.Fatalf("legacy item keys changed: %+v", items)
+	}
 	task := specText(p)
 	wantContains(t, task, "store.go#Save, data.sql:2-4", "search: Code that refreshes display details")
 }
@@ -185,4 +192,271 @@ func TestReferenceScoresLocationsAcrossDifferentItems(t *testing.T) {
 	var out strings.Builder
 	printLocationScores(&out, []*armData{a}, map[string]refEntry{"old#7": {Verdict: "duplicate", Candidate: "store.go:12"}}, []string{"group"})
 	wantContains(t, out.String(), "1 found, 1 in the reference, 1 match; precision 100%, recall 100%")
+}
+
+func TestBuildsExplicitIdentityRevisionAndReordering(t *testing.T) {
+	first := "- Saves methods.\n  id: save.v1\n  search: Code that saves methods\n  reuse: store.py#Store.save\n"
+	second := "- Lists methods.\n  id: list-methods\n  reuse: view.ts#View.render\n"
+	items := func(text string) []gateItem {
+		t.Helper()
+		builds, problems := parseBuilds(text)
+		if len(problems) > 0 {
+			t.Fatal(problems)
+		}
+		return packageItems(&specPackage{id: "api", builds: builds})
+	}
+	before, after := items(first+second), items(second+first)
+	if !reflect.DeepEqual(before[0], after[1]) || !reflect.DeepEqual(before[1], after[0]) || before[0].ID != "api#save.v1" {
+		t.Fatalf("reordered identities changed: %+v %+v", before, after)
+	}
+	for _, changed := range []string{
+		strings.Replace(first, "Saves methods.", "Saves methods durably.", 1),
+		strings.Replace(first, "Code that saves methods", "Code that persists methods", 1),
+		strings.Replace(first, "Store.save", "Store.persist", 1),
+		strings.Replace(first, "Saves methods.", "Saves  methods.", 1),
+		strings.Replace(first, "search: Code", "search:  Code", 1),
+	} {
+		got := items(changed)[0]
+		if got.ID != before[0].ID || got.Revision == before[0].Revision || len(got.Revision) != 64 {
+			t.Fatalf("edited content retained its revision: %+v %+v", before[0], got)
+		}
+	}
+	if got := items(strings.Replace(first, "id: save.v1", "id: renamed", 1))[0]; got.Revision != before[0].Revision {
+		t.Fatal("identity was included in content revision")
+	}
+	for _, input := range []string{"save.v1", "#save.v1", "api#save.v1"} {
+		if got := itemKey("api", input); got != "api#save.v1" {
+			t.Fatalf("%q: %q", input, got)
+		}
+	}
+	for _, input := range []string{"2", "#2", "api#2"} {
+		if got := itemKey("api", input); got != "api#2" {
+			t.Fatalf("legacy %q: %q", input, got)
+		}
+	}
+}
+
+func TestBuildsIdentityErrorsAndSupersession(t *testing.T) {
+	for _, tc := range []struct{ text, want string }{
+		{"- One\n  id: same\n- Two\n  id: same\n", "duplicate Builds id"},
+		{"- One\n  id: 1\n", "invalid id"},
+		{"- One\n  id: Bad\n", "invalid id"},
+		{"- One\n  id:\n", "invalid id"},
+		{"- One\n  id: one\n  id: two\n", "repeated id"},
+		{"- One\n  supersedes: old\n", "requires a new explicit id"},
+		{"- One\n  id: one\n  supersedes: one\n", "cannot supersede itself"},
+		{"- One\n  id: one\n  supersedes: old,\n", "invalid supersedes"},
+		{"- One\n  id: one\n  supersedes: old, old\n", "repeats supersedes"},
+		{"- One\n  id: one\n  supersedes: two\n- Two\n  id: two\n", "still-active id"},
+	} {
+		_, problems := parseBuilds(tc.text)
+		if !strings.Contains(strings.Join(problems, "; "), tc.want) {
+			t.Errorf("%q: %v", tc.text, problems)
+		}
+	}
+	// A split maps both new identities to the same predecessor; a merge lists
+	// both predecessors in declaration order. No source-function deduplication.
+	builds, problems := parseBuilds("- Saves.\n  id: save\n  supersedes: durable\n- Restores.\n  id: restore\n  supersedes: durable\n- Shows transfers.\n  id: combined\n  supersedes: queued, running\n")
+	if len(problems) != 0 {
+		t.Fatal(problems)
+	}
+	p := &specPackage{id: "api", builds: builds}
+	its := packageItems(p)
+	if !reflect.DeepEqual(its[0].Supersedes, []string{"api#durable"}) || !reflect.DeepEqual(its[1].Supersedes, its[0].Supersedes) || !reflect.DeepEqual(its[2].Supersedes, []string{"api#queued", "api#running"}) || its[0].Text != "Saves." {
+		t.Fatalf("supersession: %+v", its)
+	}
+	wantContains(t, specText(p), "- api#save: Saves.", "supersedes: api#durable", "supersedes: api#queued, api#running")
+	sp := parseSpec(planHeader + "### api: API\nkind: ship\nowns: api/\n\nBody.\n#### Builds\n- One\n  id: same\n- Two\n  id: same\n#### Acceptance\nTests.\n" + planTail)
+	wantContains(t, strings.Join(sp.problems, "; "), "package api", "duplicate Builds id")
+	other, problems := parseBuilds("- Another package's save.\n  id: save\n")
+	if len(problems) != 0 || packageItems(&specPackage{id: "other", builds: other})[0].ID != "other#save" {
+		t.Fatalf("slug was not package-local: %v", problems)
+	}
+}
+
+func TestSpecIDsPreviewIsNonMutatingAndRejectsInvalidIDs(t *testing.T) {
+	dir := t.TempDir()
+	src := planHeader + "### api: API\nkind: ship\nowns: api/\n\nBody.\n#### Builds\n- Saves methods.\n  id: saves-methods\n- Saves methods.\n- Saves methods.\n- 123.\n#### Acceptance\nTests.\n" + planTail
+	path := filepath.Join(dir, "spec.md")
+	writeTree(t, dir, map[string]string{"spec.md": src})
+	var out, errs strings.Builder
+	a := &app{cwd: dir, out: &out, errw: &errs}
+	if code := a.run([]string{"spec", "ids", "spec.md"}); code != 0 {
+		t.Fatalf("preview: %d %s %s", code, &out, &errs)
+	}
+	wantContains(t, out.String(), "keep api#saves-methods", "api#2 -> api#saves-methods-2", "api#3 -> api#saves-methods-3", "id: requirement-123", "ambiguous history", "explicit mapping", "Proposed IDs: 3")
+	first := out.String()
+	out.Reset()
+	if code := a.run([]string{"spec", "ids", path}); code != 0 || out.String() != first {
+		t.Fatalf("unstable preview: %d %s", code, &out)
+	}
+	if string(mustRead(t, path)) != src {
+		t.Fatal("preview modified the spec")
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("preview wrote extra artifacts: %v %v", entries, err)
+	}
+	if err := os.WriteFile(path, []byte(strings.Replace(src, "id: saves-methods", "id: 123", 1)), 0644); err != nil {
+		t.Fatal(err)
+	}
+	for _, sub := range []string{"ids", "queries"} {
+		out.Reset()
+		errs.Reset()
+		if code := a.run([]string{"spec", sub, path}); code != 1 || !strings.Contains(out.String()+errs.String(), "invalid id") {
+			t.Fatalf("invalid spec accepted: %d %s %s", code, &out, &errs)
+		}
+	}
+}
+
+func TestSpecIDsPreviewDoesNotReviveSupersededIDs(t *testing.T) {
+	dir := t.TempDir()
+	src := planHeader + "### api: API\nkind: ship\nowns: api/\n\nBody.\n#### Builds\n- Old save.\n- Persists values.\n  id: persist\n  supersedes: old-save\n#### Acceptance\nTests.\n" + planTail
+	writeTree(t, dir, map[string]string{"spec.md": src})
+	var out, errs strings.Builder
+	a := &app{cwd: dir, out: &out, errw: &errs}
+	if code := a.run([]string{"spec", "ids", "spec.md"}); code != 0 {
+		t.Fatalf("%d %s", code, &errs)
+	}
+	wantContains(t, out.String(), "api#1 -> api#old-save-2", "id: old-save-2")
+}
+
+func TestSpecStableItemsPythonAndTypeScriptFixtures(t *testing.T) {
+	for _, fixture := range []struct{ name, path, code, pointer string }{
+		{"python", "store.py", "class Store:\n    def save(self, value):\n        return value\n", "store.py#Store.save"},
+		{"typescript", "store.ts", "export class Store {\n  save(value: string): string { return value; }\n}\n", "store.ts#Store.save"},
+	} {
+		t.Run(fixture.name, func(t *testing.T) {
+			repo := t.TempDir()
+			src := planHeader + fmt.Sprintf("### api: Store\nkind: ship\nowns: %s\n\nBody.\n#### Builds\n- Stores values.\n  id: save\n  reuse: %s\n- Rejects invalid values before storing.\n  id: validate\n  reuse: %s\n#### Acceptance\nTests.\n", fixture.path, fixture.pointer, fixture.pointer) + planTail
+			writeTree(t, repo, map[string]string{fixture.path: fixture.code, "spec.md": src})
+			sp := parseSpec(src)
+			if len(sp.problems) > 0 {
+				t.Fatal(sp.problems)
+			}
+			items := packageItems(sp.packages[0])
+			if len(items) != 2 || items[0].ID != "api#save" || items[1].ID != "api#validate" || items[0].Reuse[0] != items[1].Reuse[0] {
+				t.Fatalf("shared function collapsed requirements: %+v", items)
+			}
+			if note, err := checkPointer(repo, fixture.pointer); err != nil || note != "" {
+				t.Fatalf("qualified %s pointer did not resolve: %s %v", fixture.name, note, err)
+			}
+			if _, err := checkPointer(repo, strings.Replace(fixture.pointer, "Store.save", "Wrong.save", 1)); err == nil {
+				t.Fatal("wrong class qualified method accepted")
+			}
+			candidate := reuseCand{Path: fixture.path, Start: 1, End: 3, Lines: strings.Split(strings.TrimSpace(fixture.code), "\n"), Total: 3}
+			text := renderChecklist([]itemCands{{Item: items[0], Cands: []reuseCand{candidate}}, {Item: items[1], Cands: []reuseCand{candidate}}}, nil)
+			wantContains(t, text, "`api#save`", "`api#validate`", "also for api#validate", "shown above")
+			var out, errs strings.Builder
+			a := &app{cwd: repo, out: &out, errw: &errs}
+			if code := a.run([]string{"spec", "queries", "spec.md", "--item", "api#validate", "--generate", "--dry-run"}); code != 0 {
+				t.Fatalf("%d %s", code, &errs)
+			}
+			wantContains(t, out.String(), "id: validate", fixture.pointer)
+		})
+	}
+}
+
+func TestBenchItemsOldArchiveHashesStillVerify(t *testing.T) {
+	// Frozen pre-ID-extension canonical bytes: unmarshalling must not populate
+	// new fields, change field order, or silently upgrade old stored itemsets.
+	canonical := `[{"id":"api#1","package":"api","text":"Saves.","kind":"builds","queries":["Code that saves"],"reuse":["store.py#Store.save"]}]`
+	sum := sha256.Sum256([]byte(canonical))
+	id := fmt.Sprintf("%x", sum)[:16]
+	archive := fmt.Sprintf(`{"schema_version":1,"id":%q,"origin":"spec","items":%s}`, id, canonical)
+	if err := benchObjectCheck("itemset", id, []byte(archive)); err != nil {
+		t.Fatalf("old itemset no longer verifies: %v", err)
+	}
+	var set benchItemset
+	if err := json.Unmarshal([]byte(archive), &set); err != nil {
+		t.Fatal(err)
+	}
+	got, err := benchCanonicalItems(set.Items)
+	if err != nil || string(got) != canonical || set.Items[0].Revision != "" || len(set.Items[0].Supersedes) != 0 {
+		t.Fatalf("old itemset changed: %s %v", got, err)
+	}
+	builds, _ := parseBuilds("- Saves.\n  id: save\n  supersedes: old-save\n  reuse: store.py#Store.save\n")
+	current := benchMakeItemset("spec", "", packageItems(&specPackage{id: "api", builds: builds}))
+	encoded, err := json.Marshal(current)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := benchObjectCheck("itemset", current.ID, encoded); err != nil {
+		t.Fatal(err)
+	}
+	encoded = []byte(strings.Replace(string(encoded), "old-save", "different", 1))
+	if err := benchObjectCheck("itemset", current.ID, encoded); err == nil {
+		t.Fatal("tampered supersession retained an itemset hash")
+	}
+}
+
+func TestSpecItemAnswersCannotMoveAcrossVersions(t *testing.T) {
+	for _, tc := range []struct{ name, builds, changed, id string }{
+		{"legacy-reorder", "- Saves values.\n- Lists values.\n", "- Lists values.\n- Saves values.\n", "api#1"},
+		{"explicit-content-edit", "- Saves values.\n  id: save\n", "- Saves valid values only.\n  id: save\n", "api#save"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := setup(t)
+			src := planHeader + "### api: API\nkind: ship\nowns: api/\n\nBody.\n#### Builds\n" + tc.builds + "#### Acceptance\nTests.\n" + planTail
+			h.commitSpec(src)
+			old := packageItems(parseSpec(src).packages[0])
+			if old[0].ID != tc.id {
+				t.Fatal(old)
+			}
+			rec, _, oldDir := saveSubjectApproval(t, h, h.repo)
+			rec.Items = []gateItemResult{{ID: old[0].ID, Package: "api", Text: old[0].Text, Verdict: verdictNew}}
+			if err := writeGate(oldDir, rec); err != nil {
+				t.Fatal(err)
+			}
+			if !gatePassed(h.a.siteRoot(t), h.repo, []byte(src)) {
+				t.Fatal("original answer not usable in its exact subject")
+			}
+			changed := strings.Replace(src, tc.builds, tc.changed, 1)
+			items := packageItems(parseSpec(changed).packages[0])
+			if items[0].ID != old[0].ID || items[0].Revision == old[0].Revision {
+				t.Fatal("item key or content revision incorrect")
+			}
+			// Even forcibly copying an old approval to the new storage locator
+			// cannot attach an old answer to an edited or reordered requirement.
+			rec.Hash = specHash([]byte(changed))
+			if err := writeGate(gateDir(h.a.siteRoot(t), rec.Hash), rec); err != nil {
+				t.Fatal(err)
+			}
+			if gatePassed(h.a.siteRoot(t), h.repo, []byte(changed)) {
+				t.Fatal("coinciding ID inherited an old answer across spec versions")
+			}
+		})
+	}
+}
+
+func TestSpecCompareRecoversExplicitRequirementIDs(t *testing.T) {
+	dir := t.TempDir()
+	writeTree(t, dir, map[string]string{"dossier/api.md": "### Reuse checklist\n- `api#1` Legacy.\n- `api#save.v1` Saves.\n  1. `store.py:1-3` Store.save\n- `api#load_state-2` Restores.\n"})
+	got := legacyChecklist(dir)["api"]
+	if len(got) != 3 || got[0].Item.ID != "api#1" || got[1].Item.ID != "api#save.v1" || got[2].Item.ID != "api#load_state-2" || len(got[1].Cands) != 1 {
+		t.Fatalf("lost legacy or explicit requirement IDs: %+v", got)
+	}
+}
+
+func TestItemsExplicitVerdictsDoNotAliasOrdinals(t *testing.T) {
+	builds, _ := parseBuilds("- Saves.\n  id: save\n- Validates.\n  id: validate\n")
+	items := packageItems(&specPackage{id: "api", builds: builds})
+	if err := validateVerdicts("api", items, []itemVerdict{{Item: "1", Verdict: verdictNew}}); err == nil {
+		t.Fatal("a display ordinal was accepted as an explicit requirement identity")
+	}
+	verdicts := []itemVerdict{{Item: "save", Verdict: verdictNew}, {Item: "#validate", Verdict: verdictUnclr}}
+	if err := validateVerdicts("api", items, verdicts); err != nil {
+		t.Fatal(err)
+	}
+	rec := &gateRecord{}
+	rec.ensureItems(items)
+	rec.applyVerdicts("group", t.TempDir(), items, verdicts[:1])
+	missing := rec.missingItems(items)
+	if len(missing) != 1 || missing[0].ID != "api#validate" {
+		t.Fatalf("one requirement's answer covered another: %+v", rec.Items)
+	}
+	rec.applyVerdicts("retry", t.TempDir(), items, verdicts[1:])
+	if missing := rec.missingItems(items); len(missing) != 0 {
+		t.Fatal(missing)
+	}
 }

@@ -505,8 +505,7 @@ func renderChecklist(ics []itemCands, only map[string]bool) string {
 	answers := map[string][]string{}
 	for _, ic := range append(append([]itemCands{}, main...), more...) {
 		for _, c := range ic.Cands {
-			_, n, _ := strings.Cut(ic.Item.ID, "#")
-			answers[c.at()] = append(answers[c.at()], "#"+n)
+			answers[c.at()] = append(answers[c.at()], checklistItemRef(ic.Item))
 		}
 	}
 	part := func(list []itemCands, cap int) {
@@ -522,10 +521,9 @@ func renderChecklist(ics []itemCands, only map[string]bool) string {
 				seen[c.at()] = true
 				unique = append(unique, c)
 				if ids := answers[c.at()]; len(ids) > 1 {
-					_, n, _ := strings.Cut(ic.Item.ID, "#")
 					var others []string
 					for _, id := range ids {
-						if id != "#"+n {
+						if id != checklistItemRef(ic.Item) {
 							others = append(others, id)
 						}
 					}
