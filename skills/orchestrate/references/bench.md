@@ -136,8 +136,9 @@ orch bench key add reuse key-v2.json --note 'Independent review' \
   --items blind-items.json --base-key key-1 --prompt group1.md --prompt group2.md
 ```
 
-Old reference arrays and new `class`/`target` keys normalize to the same location
-scorer. Originals and prompt blobs are preserved. Blind items accept `text` or
+Old reference arrays and new `class`/`target` keys remain readable. Current
+quality scoring uses behavior identities; historical location-overlap scores
+remain visible only as `legacy` heuristics. Originals and prompt blobs are preserved. Blind items accept `text` or
 legacy `item`. IDs must match. Old reference item text must also match; a new
 key's `seeks` description remains in its original JSON while blind items supply
 the canonical deliverable text. Repeated `--prompt`
@@ -159,19 +160,102 @@ orch bench report reuse --runs original,short --since 2026-01-01 --key 2 --save
 orch bench report reuse --json
 ```
 
-The newest key is the default and is always identified. Scoring is recomputed
-from snapshots, using the same location-overlap matcher as `gate compare`.
-Key coverage is restricted to packages in the compared groups. Per-item
-confusion joins by item ID for equal item sets, otherwise by 60% word overlap;
-it is omitted below 80% matched key items. Unknown metrics print `not recorded`,
-not zero. Partial cost totals are marked incomplete. A smaller reuse count is
-not by itself proof of better quality.
+The newest key is the default and is always identified. Read-only comparisons
+recompute scores in memory from snapshots. They do not write runs, keys or score
+artifacts. Key coverage is restricted to packages in the compared groups.
+
+A key behavior keeps its own ID even when another behavior has the same target.
+`candidate` is one acceptable evidence target; optional `candidates` is an array
+of alternatives, not extra behaviors. These optional fields can be supplied in
+the immutable original key JSON. Scoring also reads optional `revision`, or
+recovers it from the key's stored itemset. Evidence alternatives use existing
+`path:line[-line]` or `path#Symbol` pointers. Identity matches exact stable ID and
+revision first. Legacy IDs without revisions join directly only within the same
+known itemset. There is no approximate text join and no 80% match threshold.
+Any missing, ambiguous or stale mapping makes dependent quality metrics
+`unavailable`; the full key population and identity issues remain in the report.
+
+Cross-version mappings are explicit, hand-written `mapping.json` next to the key
+files, for example `<suite>/keys/mapping.json`. The file can contain bindings for
+several keys and run itemsets:
+
+```json
+{
+  "schema_version": 1,
+  "mappings": [{
+    "key": "key-2",
+    "from_itemset": "KEY_ITEMSET_ID",
+    "to_itemset": "RUN_ITEMSET_ID",
+    "items": [{
+      "key_id": "api#save",
+      "key_revision": "KEY_REVISION",
+      "item_id": "api#persist",
+      "item_revision": "RUN_REVISION",
+      "candidates": ["src/store.py:10-30", "src/store.ts:20-40"]
+    }]
+  }]
+}
+```
+
+Both population IDs must match stored itemsets. Each source and target identity
+must exist exactly once and revisions must match. Empty revisions are permitted
+only when the archived identity has no revision, with both itemsets still bound.
+Duplicate population bindings, split/merge mappings, unknown IDs, stale revisions
+and invalid target pointers cannot authorize quality claims. Optional mapping
+`candidates` overrides the key's targets when source locations moved. Omit it to
+retain the key's alternatives. An unmatched population binding is not applied.
+Mappings are never proposed or written by compare/report. A non-mutating
+`bench key --map-preview` is not part of this implementation.
+
+`gate compare --reference FILE` uses the same rules and an adjacent mapping file.
+Its mapping `key` is the reference file's basename, `from_itemset` is SHA256 of
+its exact bytes, and `to_itemset` is the canonical itemset ID for that arm's
+`items.json`. Reference rows can include `id`, `revision` and `candidates`.
+Legacy text references stay visible as legacy location evidence, but do not
+silently join current behaviors.
+
+Current accuracy scores explicit `reuse`, `extend`, `new` and `unclear`
+judgments. A generic reuse finding is not an explicit duplicate judgment. Current
+answers must validate against the recorded review item/revision, evidence packet
+and explicit support assessment. An unverified or invalid candidate cannot be a
+correct positive. Historical findings, shadow rows without support assessments,
+and locator-only verification remain inspectable but are not supported answers.
+Historical range-overlap scores are labeled `legacy` and never rank workflows.
+
+Each quality section states its denominator and exclusions:
+
+- Answer coverage is answers present / all keyed behaviors, including unclear.
+  Valid and supported coverage use the same denominator. Missing, invalid and
+  unsupported answers are counted separately, never dropped from that population.
+- Conditional accuracy is correct supported answers / supported mapped answers.
+  Reuse/extend correctness also requires an acceptable target. If identity is not
+  established, conditional accuracy is unavailable, not zero.
+- Precision is supported correct predictions / supported predictions of that
+  class within the mapped key. Non-key predictions are excluded. Recall is
+  supported correct predictions / all keyed behaviors of that class, including
+  behaviors without a supported answer. F1 uses those two behavior denominators.
+- Retrieval, author hints and rendered targets are separate counts / all key
+  behaviors with targets. Only a valid rendered source manifest spanning the
+  entire acceptable target establishes body visibility. A checklist candidate,
+  same-file author hint or overlapping signature does not. Missing delivery
+  instrumentation is unknown, not unseen. No checklist means retrieval unknown.
+
+Unknown metrics print `not recorded`, not zero. Historical total native reads are
+recovered only from an actual total-read counter. Missing range or shell
+breakdowns remain unknown, including in JSON output. Partial cost totals are
+marked incomplete. A smaller reuse count is not by itself proof of better quality.
 
 Same-subject comparisons are direct. Other commits warn about location drift.
 Other versions of the same spec path join package content hashes; registered
 variants are allowed and identified. Other repos or spec paths require
 `--cross-subject`. Group rows use the intersection. `--total` refuses different
 group sets; `--total=all` explicitly opts into all recorded passes with a warning.
+These switches permit display, not a ranking. Comparative change claims and
+quality/cost Pareto rankings require identical known subjects, itemsets and full
+pass/package coverage. Quality rankings also require identical mapped key
+populations, complete supported-answer coverage and complete known costs. A run
+with no compatible eligible peer is explicitly not ranked. Thus one-group and
+eleven-pass runs can be inspected together without producing an unlabeled winner.
 
 Reports include Subjects, tested-on lines, configuration and subject differences,
 runner/lane subtotals, quality/cost, shadow confusion, caveats and reproduction.

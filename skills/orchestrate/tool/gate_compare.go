@@ -17,7 +17,7 @@ import (
 
 func cmdGateCompare(a *app, args []string) error {
 	fs := a.flags("gate")
-	refPath := fs.String("reference", "", "a JSON file of item verdicts from a strong model: [{\"package\":..,\"item\":\"id or text\",\"verdict\":\"duplicate|extend|new|unclear\",\"candidate\":\"path:line\",\"note\":\"\"}]")
+	refPath := fs.String("reference", "", "JSON reference [{id,revision,package,item,verdict,candidate,candidates}]; cross-version identities require adjacent mapping.json")
 	pos, err := parseArgs(fs, args)
 	if err != nil {
 		return err
@@ -71,9 +71,24 @@ func cmdGateCompare(a *app, args []string) error {
 		if err != nil {
 			return fail("%v", err)
 		}
-		all := append(append([]gateItem{}, arms[0].items...), arms[1].items...)
-		ref = resolveReference(entries, all)
-		fmt.Fprintf(a.out, "reference: %d entries, %d matched to items\n", len(entries), len(ref))
+		data, err := os.ReadFile(expandHome(*refPath))
+		if err != nil {
+			return err
+		}
+		for i, arm := range arms {
+			set := benchMakeItemset("gate-compare", "", arm.items)
+			mapping, mappingErr := readItemMapping(filepath.Join(filepath.Dir(expandHome(*refPath)), "mapping.json"), filepath.Base(*refPath), benchHash(data), set.ID)
+			arm.reference = resolveMappedReference(entries, arm.items, benchHash(data), set.ID, mapping)
+			if mappingErr != nil {
+				for id, r := range arm.reference {
+					r.Issue = mappingErr.Error()
+					arm.reference[id] = r
+				}
+			}
+			issues := referenceIssues(arm.reference)
+			fmt.Fprintf(a.out, "reference %s: %d entries, %d mapped to items; %d unmapped/ambiguous\n", string(rune('A'+i)), len(entries), len(arm.reference)-len(issues), len(issues))
+		}
+		ref = arms[0].reference
 	}
 	printItemComparison(a.out, arms, ref, *refPath != "")
 	return nil
@@ -210,7 +225,7 @@ func printOverlap(w io.Writer, what, nameA, nameB string, a, b []string) {
 	if union > 0 {
 		jac = float64(matched) / float64(union)
 	}
-	fmt.Fprintf(w, "overlap of %s: %d matched, %d in %s, %d in %s, Jaccard %.2f (items match when 60%% of their words agree)\n", what, matched, len(a), nameA, len(b), nameB, jac)
+	fmt.Fprintf(w, "legacy descriptive overlap of %s: %d matched, %d in %s, %d in %s, Jaccard %.2f (items match when 60%% of their words agree)\n", what, matched, len(a), nameA, len(b), nameB, jac)
 	for _, s := range onlyA {
 		fmt.Fprintf(w, "  only in %s: %s\n", nameA, short(flat(s), 80))
 	}

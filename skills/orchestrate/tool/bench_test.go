@@ -448,13 +448,13 @@ func TestBenchKeyFormatsCoverageAndSharedScorer(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
-	if score.Classes["duplicate"].Total != 1 || score.Classes["duplicate"].Match != 1 {
-		t.Fatalf("score: %+v", score)
+	if score.Classes["duplicate"].Total != 1 || score.Classes["duplicate"].Match != 0 || score.LegacyClasses["duplicate"].Match != 1 || score.Unavailable == "" {
+		t.Fatalf("historical findings must be legacy, not supported behavior judgments: %+v", score)
 	}
 	wantContains(t, score.Coverage, "1 of 2")
 	rec := readRecord(t, filepath.Join(r.dir, "snapshot"))
 	ad := loadArm(filepath.Join(r.dir, "snapshot"), rec.Experiment, filepath.Join(r.dir, "snapshot"), &rec)
-	ref := resolveReference([]refEntry{{Package: "api", Item: "Save a record", Verdict: verdictReuse, Candidate: "internal/store.go:3"}}, ad.items)
+	ref := resolveReference(benchKeyReferences(&benchKey{Items: k.Items[:1], Itemset: k.Itemset}), ad.items)
 	if want := scoreLocations(ad, ref, "group", verdictReuse); !reflect.DeepEqual(score.Classes["duplicate"], want) {
 		t.Fatalf("bench and gate scores differ: %+v %+v", score.Classes["duplicate"], want)
 	}

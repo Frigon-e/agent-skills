@@ -657,12 +657,14 @@ func benchRecordWith(a *app, source, suite, label, arm string, opts benchRecordO
 
 // A key keeps the complete original entries as well as normalized scoring fields.
 type benchKeyItem struct {
-	ID        string          `json:"id"`
-	Package   string          `json:"package"`
-	Item      string          `json:"item"`
-	Class     string          `json:"class"`
-	Candidate string          `json:"candidate"`
-	Original  json.RawMessage `json:"original"`
+	Revision   string          `json:"revision,omitempty"`
+	Candidates []string        `json:"candidates,omitempty"`
+	ID         string          `json:"id"`
+	Package    string          `json:"package"`
+	Item       string          `json:"item"`
+	Class      string          `json:"class"`
+	Candidate  string          `json:"candidate"`
+	Original   json.RawMessage `json:"original"`
 }
 type benchKey struct {
 	Format         string         `json:"format"`
@@ -931,14 +933,18 @@ func benchKeyAdd(a *app, suite, file, note, prompt string, from bool, options ..
 }
 
 type benchScore struct {
-	Classes      map[string]locationScore `json:"classes"`
-	Judges       map[string]benchJudge    `json:"judges"`
-	Coverage     string                   `json:"coverage"`
-	KeySubject   string                   `json:"key_subject"`
-	MatchedItems int                      `json:"matched_items"`
-	ItemNote     string                   `json:"item_note,omitempty"`
-	// Seen counts the key's targets that were among the candidates or hints the
-	// judges were shown; KeyAgree is each judge's agreement with the key.
+	LegacyClasses map[string]locationScore `json:"legacy_classes,omitempty"`
+	Unavailable   string                   `json:"unavailable,omitempty"`
+	MappingIssues []string                 `json:"mapping_issues,omitempty"`
+	Population    []string                 `json:"population,omitempty"`
+	Classes       map[string]locationScore `json:"classes"`
+	Judges        map[string]benchJudge    `json:"judges"`
+	Coverage      string                   `json:"coverage"`
+	KeySubject    string                   `json:"key_subject"`
+	MatchedItems  int                      `json:"matched_items"`
+	ItemNote      string                   `json:"item_note,omitempty"`
+	// Seen separates retrieval, hints, rendered spans and unknown visibility.
+	// KeyAgree includes coverage for missing, invalid and unsupported answers.
 	Seen     map[string]seenCount `json:"seen,omitempty"`
 	KeyAgree map[string]keyAgree  `json:"key_agree,omitempty"`
 }
@@ -951,30 +957,74 @@ type benchJudge struct {
 	Seconds   float64                   `json:"seconds"`
 }
 
-func benchScoreArm(ad *armData, k *benchKey) benchScore {
-	refs := make([]refEntry, 0, len(k.Items))
+func benchKeyReferences(k *benchKey) []refEntry {
+	var set benchItemset
+	if path, err := benchObjectPath("itemset", k.Itemset); err == nil {
+		_ = benchReadJSON(path, &set)
+	}
+	var refs []refEntry
 	for _, it := range k.Items {
 		v := judgeVerdict(it.Class)
 		if it.Class == "unknown" {
 			v = verdictUnclr
 		}
-		refs = append(refs, refEntry{Package: it.Package, Item: it.Item, Verdict: v, Candidate: it.Candidate})
+		r := refEntry{ID: it.ID, Revision: it.Revision, Package: it.Package, Item: it.Item, Verdict: v, Candidate: it.Candidate, Candidates: it.Candidates}
+		// Key import paths remain untouched. Optional scoring metadata can be
+		// recovered from the immutable original or its canonical source itemset.
+		var extra struct {
+			Revision   string   `json:"revision"`
+			Candidates []string `json:"candidates"`
+		}
+		_ = json.Unmarshal(it.Original, &extra)
+		if r.Revision == "" {
+			r.Revision = extra.Revision
+		}
+		if len(r.Candidates) == 0 {
+			r.Candidates = extra.Candidates
+		}
+		for _, source := range set.Items {
+			if source.ID == it.ID && r.Revision == "" {
+				r.Revision = source.Revision
+			}
+		}
+		refs = append(refs, r)
 	}
-	ref := resolveReference(refs, ad.items)
-	s := benchScore{Classes: map[string]locationScore{}, Judges: map[string]benchJudge{}}
+	return refs
+}
+
+func benchScoreArm(ad *armData, k *benchKey) benchScore {
+	ref := ad.reference
+	if ref == nil {
+		ref = resolveReference(benchKeyReferences(k), ad.items)
+	}
+	s := benchScore{Classes: map[string]locationScore{}, LegacyClasses: map[string]locationScore{}, Judges: map[string]benchJudge{}, MappingIssues: referenceIssues(ref)}
+	if len(s.MappingIssues) > 0 {
+		s.Unavailable = "quality unavailable: " + strings.Join(s.MappingIssues, "; ")
+	}
+	for _, id := range benchSortedKeys(ref) {
+		r := ref[id]
+		s.Population = append(s.Population, r.ID+"@"+r.Revision)
+	}
 	kv := keyViewOf(ad, ref)
 	s.Seen, s.KeyAgree = kv.Seen, kv.Agree
-	for _, kind := range []string{verdictReuse, verdictExtend} {
+	for _, kind := range []string{verdictReuse, verdictExtend, verdictNew, verdictUnclr} {
 		s.Classes[benchClass(kind)] = scoreLocations(ad, ref, "group", kind)
+		if kind == verdictReuse || kind == verdictExtend {
+			s.LegacyClasses[benchClass(kind)] = scoreLegacyLocations(ad, ref, "group", kind)
+		}
 	}
 	for judge, verdicts := range ad.judges {
 		j := benchJudge{Confusion: map[string]map[string]int{}, Cost: benchCost{Basis: "none"}}
 		cost := 0.0
 		known := 0
 		for id, v := range verdicts {
+			ans := ad.answer(judge, id)
+			if len(s.MappingIssues) > 0 || !ans.Valid || !ans.Supported {
+				continue
+			}
 			actual := benchClass(ref[id].Verdict)
 			pred := benchClass(v)
-			if actual != "" && actual != "unknown" && pred != "" {
+			if actual != "" && pred != "" {
 				if j.Confusion[actual] == nil {
 					j.Confusion[actual] = map[string]int{}
 				}
@@ -1013,6 +1063,9 @@ func benchRescore(r *benchRun, k *benchKey) (benchScore, error) {
 	}
 	var s benchScore
 	if r.Kind == "report-only" {
+		s.Unavailable = "quality unavailable: report-only run has no scoring inputs"
+		s.ItemNote = s.Unavailable
+		s.Coverage = "key coverage: not recorded (report-only)"
 		return s, nil
 	}
 	snap := filepath.Join(r.dir, "snapshot")
@@ -1034,24 +1087,41 @@ func benchRescore(r *benchRun, k *benchKey) (benchScore, error) {
 			filtered.Items = append(filtered.Items, it)
 		}
 	}
+	from, to := k.Itemset, r.Itemset
+	mappingPath := filepath.Join(benchDir(), r.Suite, "keys", "mapping.json")
+	var mapping *itemMapping
+	var mappingErr error
+	if err := benchSafe(mappingPath); err != nil {
+		mappingErr = err
+	} else {
+		mapping, mappingErr = readItemMapping(mappingPath, k.ID, from, to)
+	}
+	// Validate against the complete key and run itemset before applying scope.
+	allItems := readItemsFile(snap)
+	if len(allItems) == 0 {
+		allItems = ad.items
+	}
+	resolved := resolveMappedReference(benchKeyReferences(k), allItems, from, to, mapping)
+	ad.reference = map[string]refEntry{}
+	for id, ref := range resolved {
+		if len(packages) > 0 && !packages[ref.Package] {
+			continue
+		}
+		if mappingErr != nil {
+			ref.Issue = mappingErr.Error()
+		}
+		ad.reference[id] = ref
+	}
 	s = benchScoreArm(ad, &filtered)
 	s.Coverage = fmt.Sprintf("key coverage: %d of %d items in the compared groups", len(filtered.Items), len(k.Items))
 	if changed, known := benchChangedKeyItems(r, &filtered); known {
 		s.Coverage += fmt.Sprintf("; %d key items whose package changed between versions", changed)
 	}
 	s.KeySubject = k.Subject
-	s.MatchedItems = 0
-	for _, it := range filtered.Items {
-		for _, actual := range ad.items {
-			if (r.Itemset != "" && r.Itemset == k.Itemset && it.ID == actual.ID) || (r.Itemset != k.Itemset && it.Package == actual.Package && wordShare(it.Item, actual.Text) >= itemMatchShare) {
-				s.MatchedItems++
-				break
-			}
-		}
-	}
-	if len(filtered.Items) > 0 && s.MatchedItems*100 < len(filtered.Items)*80 {
-		s.Judges = nil
-		s.ItemNote = fmt.Sprintf("per-item section omitted: %d of %d key items matched (below 80%%)", s.MatchedItems, len(filtered.Items))
+	s.MatchedItems = len(ad.reference) - len(s.MappingIssues)
+	s.ItemNote = fmt.Sprintf("identity coverage: %d/%d key behaviors mapped; %d excluded from conditional quality; no fuzzy joins; legacy location heuristics are not behavior accuracy", s.MatchedItems, len(filtered.Items), len(s.MappingIssues))
+	if len(s.MappingIssues) > 0 {
+		s.ItemNote += "; " + s.Unavailable
 	}
 	return s, nil
 }
@@ -1302,8 +1372,14 @@ func cmdBenchList(a *app, args []string) error {
 				if e != nil {
 					return e
 				}
-				c := v.Classes["duplicate"]
-				score = fmt.Sprintf("%s %d/%d", k.ID, c.Match, c.Total)
+				if c, known := v.Classes["duplicate"]; known {
+					if v.Unavailable != "" {
+						score = k.ID + " unavailable (identity mapping)"
+					} else {
+						coverage := v.KeyAgree["group"]
+						score = fmt.Sprintf("%s supported duplicate matches %d/%d key behaviors; answer coverage %d/%d", k.ID, c.Match, c.Total, coverage.Answered, coverage.Items)
+					}
+				}
 			}
 			fmt.Fprintf(a.out, "%s | %s | %s | %s | %s | %s | %s | %s | %s\n", s, r.ID, r.Label, r.CreatedAt.Format("2006-01-02"), r.Arm, r.Inputs.SpecHash, benchCostText(cost), benchGroupText(r, "wall", nil, false), score)
 			fmt.Fprintln(a.out, benchTestedOn(r))

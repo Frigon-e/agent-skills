@@ -519,7 +519,7 @@ func TestSessionProfileSeparatesOrchCtxFromRawShellAndRangedReads(t *testing.T) 
 func TestBenchToolRowsCountOrchCtxAgainstRawShell(t *testing.T) {
 	r := &benchRun{Groups: map[string]benchGroup{
 		"g1": {Exploration: &sessionProfile{Calls: map[string]int{"bash": 5, "read": 3}, Shell: map[string]int{"orch ctx batch": 2, "orch ctx": 1, "shell search": 2}, BatchLookups: 7, RangedReads: 2, WholeReads: 1}},
-		"g2": {Exploration: &sessionProfile{Calls: map[string]int{"bash": 1}, Shell: map[string]int{"orch ctx piped": 1}}},
+		"g2": {Exploration: &sessionProfile{Calls: map[string]int{"bash": 1, "read": 0}, Shell: map[string]int{"orch ctx piped": 1}, readBreakdownKnown: true}},
 	}}
 	want := map[string]float64{"orch ctx calls": 4, "orch ctx lookups (a batch counts each -q)": 9, "orch ctx piped into another tool": 1, "Raw shell search (grep, rg, find, ls)": 2, "Native reads": 3, "Native reads with a range": 2}
 	for _, m := range benchToolRows {
