@@ -385,6 +385,10 @@ ignore). jbcontext indexes a git revision (`index --revision`, default HEAD), so
   source if the claim needs more evidence. Symbols can be candidates; missing
   servers and reference failures are not evidence of zero callers.
 - No retrieval result alone establishes that a behavior does not exist.
+- The gate's dossier prints one line per distinct lookup failure, with the
+  queries it affected, and shortens machine paths; every lookup still keeps its
+  id, state, count and scope. A failed, unavailable or empty lookup is not
+  evidence of absence.
 
 ## Staleness
 

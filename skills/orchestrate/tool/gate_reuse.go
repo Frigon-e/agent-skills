@@ -530,7 +530,7 @@ func candidateText(n int, c reuseCand, full bool) string {
 	return b.String()
 }
 
-func itemText(ic itemCands, full bool) string {
+func itemText(ic itemCands, full bool, root string) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "- `%s` %s\n", ic.Item.ID, ic.Item.Text)
 	for _, p := range ic.Item.Reuse {
@@ -539,8 +539,11 @@ func itemText(ic itemCands, full bool) string {
 	if len(ic.Queries) == 0 {
 		b.WriteString("  search: not_requested (no explicit queries; unresolved work)\n")
 	}
+	if reasons := lookupReasonGroups(ic.Lookups, root); reasons != "" {
+		b.WriteString("  " + strings.ReplaceAll(reasons, "\n", "\n  ") + "\n")
+	}
 	for _, lk := range ic.Lookups {
-		b.WriteString(lookupObservation(lk) + "\n")
+		b.WriteString(lookupLine(lk, root) + "\n")
 	}
 	if len(ic.Cands) == 0 && len(ic.Queries) > 0 {
 		if ic.QueriesRun == len(ic.Queries) {
@@ -557,7 +560,7 @@ func itemText(ic itemCands, full bool) string {
 
 // renderChecklist writes the checklist of the items in ics (restricted to
 // the ids in only when it is not nil), capped, saying what was cut.
-func renderChecklist(ics []itemCands, only map[string]bool) string {
+func renderChecklist(ics []itemCands, only map[string]bool, root string) string {
 	var selected []itemCands
 	for _, ic := range ics {
 		if only == nil || only[ic.Item.ID] {
@@ -567,5 +570,5 @@ func renderChecklist(ics []itemCands, only map[string]bool) string {
 	if len(selected) == 0 {
 		return ""
 	}
-	return (&ctxBrief{ReuseItems: selected}).Render("", "package", dossierTotal)
+	return (&ctxBrief{ReuseItems: selected, root: root}).Render("", "package", dossierTotal)
 }

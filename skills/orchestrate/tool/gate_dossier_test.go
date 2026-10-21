@@ -273,3 +273,125 @@ func TestChangePathDropsTrailingRemarks(t *testing.T) {
 		}
 	}
 }
+
+// legacyObservation is the previous per-lookup rendering, kept only so a test
+// can show how many bytes grouping saves. It repeats the exclusions sentence and
+// the full machine path on every line.
+func legacyObservation(l evidenceLookup) string {
+	count := "unknown"
+	if l.Counts.Total != nil {
+		count = fmt.Sprint(*l.Counts.Total)
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "  observation %s: %s status=%s completeness=%s count=%s (%s) query=%q scope=%s exclusions=%s", l.ID, l.ExecutionStatus, l.Status, l.Completeness, count, l.CountKind, l.Query, l.Scope, strings.Join(l.Exclusions, ", "))
+	for _, err := range l.Errors {
+		fmt.Fprintf(&b, "\n    search failure: %s", err)
+	}
+	return b.String()
+}
+
+// TestDossierObservationSectionGroupsRepeatedLookupFailures builds the reported
+// shape: twelve concept lookups that all fail because one backend is missing.
+func TestDossierObservationSectionGroupsRepeatedLookupFailures(t *testing.T) {
+	root := t.TempDir()
+	binary := filepath.Join(root, "home", ".jbcontext", "bin", "jbcontext")
+	msg := "no concept search: " + binary + " was not found"
+	queries := []string{
+		"admin staff", "admin customers", "provides staff roles", "staff permissions",
+		"customer list", "managed accounts", "staff invitations", "role assignments",
+		"account settings", "member directory", "team owners", "access review",
+	}
+	lks := make([]evidenceLookup, 0, len(queries))
+	var legacy strings.Builder
+	legacy.WriteString("## Package web\n### Observations (bounded tool results, not semantic proof)\n")
+	for i, q := range queries {
+		l := dossierLookup(q, "web/", "concept", 0, 4, nil, msg)
+		l.ID = fmt.Sprintf("lookup-%012d", i)
+		lks = append(lks, l)
+		legacy.WriteString(legacyObservation(l) + "\n")
+	}
+	legacy.WriteString("### Candidates\n")
+	d := &ctxBrief{ID: "web", root: root, Lookups: lks}
+	text := d.Render("## Package web", "package", dossierTotal)
+	start, end := strings.Index(text, "### Observations"), strings.Index(text, "### Candidates")
+	if start < 0 || end < start {
+		t.Fatalf("no observations section:\n%s", text)
+	}
+	section := text[start:end]
+	// One reason line for the whole missing backend, one line per lookup.
+	exclusions := lookupExclusionsLine(lks)
+	wantContains(t, section,
+		`12 lookups unavailable: no concept search: jbcontext not found; affected queries: "admin staff", "admin customers"`,
+		exclusions, lookupAbsenceLine, "scope=web/",
+	)
+	if n := strings.Count(section, "  observation lookup-"); n != len(queries) {
+		t.Errorf("observation lines = %d, want every lookup (%d):\n%s", n, len(queries), section)
+	}
+	for i := range queries {
+		wantContains(t, section, fmt.Sprintf("lookup-%012d", i), queries[i])
+	}
+	// The exclusions sentence, the failure text and the machine paths render once
+	// or not at all, and an empty status leaves no empty field behind.
+	if n := strings.Count(section, exclusions); n != 1 {
+		t.Errorf("exclusions line rendered %d times, want once:\n%s", n, section)
+	}
+	for _, bad := range []string{"exclusions=", "search failure:", "status=", root, "was not found"} {
+		if strings.Contains(section, bad) {
+			t.Errorf("section still contains %q:\n%s", bad, section)
+		}
+	}
+	if len(section) >= len(legacy.String())/2 {
+		t.Errorf("grouped section is %d bytes; ungrouped was %d, want under half", len(section), legacy.Len())
+	}
+	t.Logf("12 failed lookups: %d bytes before, %d bytes after", legacy.Len()-len("### Candidates\n"), len(section))
+	t.Logf("rendered section after:\n%s", section)
+}
+
+func TestDossierMixedLookupsKeepEveryIDAndUnprovenAbsence(t *testing.T) {
+	root := t.TempDir()
+	binary := filepath.Join(root, "bin", "jbcontext")
+	ok := dossierLookup("SendTransfer", "internal/queue", "text", 3, 0, nil, "")
+	ok.ID = "lookup-ok"
+	empty := dossierLookup("Nonexistent", ".", "text", 0, 0, nil, "")
+	empty.ID = "lookup-empty"
+	unavailable := dossierLookup("admin staff", "web/", "concept", 0, 4, nil, "no concept search: "+binary+" was not found")
+	unavailable.ID = "lookup-unavailable"
+	failed := dossierLookup("SettingsPage", "web/", "symbol", 0, 1, fmt.Errorf("%s: no TypeScript facts: no native TypeScript 7 server found (typescript@7 in a node_modules/.pnpm store); set ORCH_TSLS to one", root), "")
+	failed.ID = "lookup-failed"
+	lks := []evidenceLookup{ok, empty, unavailable, failed}
+	d := &ctxBrief{
+		ID:         "web",
+		root:       root,
+		Lookups:    lks,
+		PlannedIDs: []string{ok.ID, empty.ID, unavailable.ID, failed.ID},
+	}
+	d.Planned = []string{
+		plannedEntry(root, "text", "SendTransfer", "who sends", ok, "internal/store.go\n3: func SendTransfer() {}"),
+		plannedEntry(root, "text", "Nonexistent", "missing rows", empty, "no matches"),
+		plannedEntry(root, "concept", "admin staff", "staff pages", unavailable, ""),
+		plannedEntry(root, "symbol", "SettingsPage", "settings", failed, ""),
+	}
+	text := d.Render("## Package web", "package", dossierTotal)
+	for _, id := range []string{ok.ID, empty.ID, unavailable.ID, failed.ID} {
+		if n := strings.Count(text, id); n < 2 {
+			t.Errorf("lookup id %s rendered %d times, want it in the observations and in section 5:\n%s", id, n, text)
+		}
+	}
+	if n := strings.Count(text, lookupAbsenceLine); n != 1 {
+		t.Errorf("%q rendered %d times, want once:\n%s", lookupAbsenceLine, n, text)
+	}
+	wantContains(t, text,
+		"succeeded status=ok completeness=complete count=3 (exact)",
+		"succeeded status=empty completeness=complete count=0 (exact)",
+		"unavailable completeness=unknown",
+		"failed status=failed completeness=unknown",
+		`1 lookup failed: typescript@7 server not found (set ORCH_TSLS); affected queries: "SettingsPage"`,
+		`1 lookup unavailable: no concept search: jbcontext not found; affected queries: "admin staff"`,
+	)
+	if strings.Contains(text, root) || strings.Contains(text, binary) {
+		t.Errorf("a machine path survived rendering:\n%s", text)
+	}
+	if n := strings.Count(text, "status= completeness="); n != 0 {
+		t.Errorf("an empty status was rendered %d times:\n%s", n, text)
+	}
+}
