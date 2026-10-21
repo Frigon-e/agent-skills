@@ -570,6 +570,6 @@ func TestBeforeAfterTimeout(t *testing.T) {
 	})
 	t.Run("AFTER", func(t *testing.T) {
 		TestGateTimedOutPassGetsCtrlCAndDoesNotStallTheOthers(t)
-		beforeAfterEmit(t, "gate-timeout-message", "AFTER", "pass_errors.adversary-a = timed out after 3s; unverified")
+		beforeAfterEmit(t, "gate-timeout-message", "AFTER", "pass_errors.adversary-a = timed out after 3s; incomplete")
 	})
 }
