@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // jbRateFake is a jbcontext stand-in for `search`: it logs each call to
@@ -91,12 +92,15 @@ func TestJbcontextIdenticalQueriesRunOneProcess(t *testing.T) {
 	}
 }
 
-func TestJbcontextRunsAtMostTwoProcessesAtOnce(t *testing.T) {
+// jbRateBurst runs n different searches at once and returns the fake's dir.
+func jbRateBurst(t *testing.T, n int, sleep string) string {
+	t.Helper()
 	bin, dir := jbRateFake(t)
-	os.WriteFile(filepath.Join(dir, "sleep"), []byte("0.3"), 0o644)
+	os.WriteFile(filepath.Join(dir, "sleep"), []byte(sleep), 0o644)
+	jbMarkWarm()
 	code, cache := t.TempDir(), t.TempDir()
 	var wg sync.WaitGroup
-	for i := 0; i < 6; i++ {
+	for i := 0; i < n; i++ {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
@@ -106,11 +110,70 @@ func TestJbcontextRunsAtMostTwoProcessesAtOnce(t *testing.T) {
 		}(i)
 	}
 	wg.Wait()
-	if n := len(jbRateLines(dir, "conc.log")); n != 6 {
-		t.Errorf("jbcontext ran %d times, want 6", n)
+	if got := len(jbRateLines(dir, "conc.log")); got != n {
+		t.Errorf("jbcontext ran %d times, want %d", got, n)
 	}
-	if m := jbRateMax(dir); m > 2 {
-		t.Errorf("%d jbcontext processes ran at once, want at most 2", m)
+	return dir
+}
+
+func TestJbcontextRunsAtMostEightProcessesAtOnce(t *testing.T) {
+	dir := jbRateBurst(t, 12, "0.4")
+	if m := jbRateMax(dir); m > 8 || m < 6 {
+		t.Errorf("%d jbcontext processes ran at once, want 6 to 8", m)
+	}
+}
+
+func TestJbcontextSlotsEnvOneSerializes(t *testing.T) {
+	t.Setenv("ORCH_JB_SLOTS", "1")
+	dir := jbRateBurst(t, 4, "0.1")
+	if m := jbRateMax(dir); m != 1 {
+		t.Errorf("%d jbcontext processes ran at once with ORCH_JB_SLOTS=1, want 1", m)
+	}
+}
+
+func TestJbcontextSlotsEnvInvalidFallsBackToEight(t *testing.T) {
+	for _, v := range []string{"", "0", "33", "-1", "many"} {
+		t.Setenv("ORCH_JB_SLOTS", v)
+		if n := jbSlotCount(); n != 8 {
+			t.Errorf("ORCH_JB_SLOTS=%q gives %d slots, want 8", v, n)
+		}
+	}
+	t.Setenv("ORCH_JB_SLOTS", "32")
+	if n := jbSlotCount(); n != 32 {
+		t.Errorf("ORCH_JB_SLOTS=32 gives %d slots", n)
+	}
+}
+
+// A cold stamp lets one call run alone; the rest start only after it ends.
+func TestJbcontextColdStampRunsOneCallFirst(t *testing.T) {
+	bin, dir := jbRateFake(t)
+	os.WriteFile(filepath.Join(dir, "sleep"), []byte("0.4"), 0o644)
+	code, cache := t.TempDir(), t.TempDir()
+	var wg sync.WaitGroup
+	start := time.Now()
+	for i := 0; i < 5; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			if _, err := searchCode(bin, code, cache, "", "", 3, fmt.Sprintf("question %d", i)); err != nil {
+				t.Error(err)
+			}
+		}(i)
+	}
+	wg.Wait()
+	conc := jbRateLines(dir, "conc.log")
+	if len(conc) != 5 || conc[0] != "1" {
+		t.Errorf("conc.log = %v, want 5 calls and the first one alone", conc)
+	}
+	// One call of 0.4 s, then the other four together: two rounds, not one.
+	if el := time.Since(start); el < 750*time.Millisecond {
+		t.Errorf("5 cold calls took %s, want at least two rounds of 0.4 s", el)
+	}
+	if jbCold() {
+		t.Error("stamp is still cold after successful calls")
+	}
+	if m := jbRateMax(dir); m < 2 {
+		t.Errorf("max %d: slots did not open after the first call", m)
 	}
 }
 
@@ -125,6 +188,7 @@ func TestJbcontextCapHoldsAcrossProcesses(t *testing.T) {
 		}
 		return
 	}
+	t.Setenv("ORCH_JB_SLOTS", "2")
 	bin, dir := jbRateFake(t)
 	os.WriteFile(filepath.Join(dir, "sleep"), []byte("0.4"), 0o644)
 	code := t.TempDir()

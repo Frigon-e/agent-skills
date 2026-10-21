@@ -106,7 +106,9 @@ func jbSearchOnce(bin, dir, cache, rev, pathFilter string, limit int, query stri
 // ---- rate limit ----
 
 const (
-	jbSlots         = 2                // jbcontext searches running at once, machine-wide
+	jbSlots         = 8                // jbcontext searches running at once, machine-wide; ORCH_JB_SLOTS overrides (1 to 32)
+	jbSlotsMax      = 32               // largest accepted ORCH_JB_SLOTS
+	jbColdAfter     = 10 * time.Minute // no jbcontext answer this long: the token may be stale, so one call goes first
 	jbRetries       = 3                // retries after a rate limited answer
 	jbBackoff       = 2 * time.Second  // first wait; doubles, plus up to 50% jitter
 	jbCooldown      = 20 * time.Second // after retries ran out, skip jbcontext this long
@@ -127,6 +129,15 @@ func jbRateErr(query string, skipped bool) error {
 
 func jbRateLimitedOutput(out string) bool {
 	return strings.Contains(out, "429") || strings.Contains(strings.ToLower(out), "limit reached")
+}
+
+// jbSlotCount is the slot cap: ORCH_JB_SLOTS when it is an integer from 1 to
+// jbSlotsMax, else jbSlots.
+func jbSlotCount() int {
+	if n, err := strconv.Atoi(os.Getenv("ORCH_JB_SLOTS")); err == nil && n >= 1 && n <= jbSlotsMax {
+		return n
+	}
+	return jbSlots
 }
 
 func jbBackoffBase() time.Duration {
@@ -176,6 +187,9 @@ func jbRun(bin, dir string, args []string, query string) (jbResult, error) {
 		runErr := cmd.Run()
 		timedOut := ctx.Err() != nil
 		cancel()
+		if runErr == nil && !jbRateLimitedOutput(out.String()+errBuf.String()) {
+			jbMarkWarm()
+		}
 		release()
 		if runErr == nil || timedOut || !jbRateLimitedOutput(out.String()+errBuf.String()) {
 			return jbResult{out, runErr, timedOut, errBuf.String()}, nil
@@ -202,29 +216,88 @@ func jbSlotDir() string {
 	return filepath.Join(root, "jb-slots")
 }
 
-// jbAcquireSlot takes one of jbSlots flock files. The kernel drops a flock when
-// its process dies, so a crashed holder never leaves a stale slot.
+// jbWarmStamp is touched after each jbcontext answer that was not rate limited.
+func jbWarmStamp() string { return filepath.Join(jbSlotDir(), "warm") }
+
+func jbMarkWarm() {
+	p := jbWarmStamp()
+	now := time.Now()
+	if os.Chtimes(p, now, now) != nil {
+		if f, err := os.OpenFile(p, os.O_CREATE|os.O_WRONLY, 0o644); err == nil {
+			f.Close()
+		}
+	}
+}
+
+// jbCold reports that no jbcontext call answered in the last jbColdAfter.
+func jbCold() bool {
+	st, err := os.Stat(jbWarmStamp())
+	return err != nil || time.Since(st.ModTime()) > jbColdAfter
+}
+
+// jbLockFile tries a non-blocking flock on dir/name. The kernel drops a flock
+// when its process dies, so a crashed holder never leaves a stale lock.
+func jbLockFile(dir, name string) (release func(), ok bool, err error) {
+	f, err := os.OpenFile(filepath.Join(dir, name), os.O_CREATE|os.O_RDWR, 0o644)
+	if err != nil {
+		return nil, false, fmt.Errorf("jbcontext slots: %w", err)
+	}
+	if syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB) != nil {
+		f.Close()
+		return nil, false, nil
+	}
+	return func() { _ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN); f.Close() }, true, nil
+}
+
+// jbAcquireSlot takes one of jbSlotCount flock files. When the stamp is cold it
+// first takes warm.lock, so one call runs alone while the others wait; the
+// holder releases it after jbMarkWarm, and then every slot is open.
 func jbAcquireSlot() (release func(), err error) {
 	dir := jbSlotDir()
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, fmt.Errorf("jbcontext slots: %w", err)
 	}
 	deadline := time.Now().Add(jbSlotWaitLimit)
-	for {
-		for i := 0; i < jbSlots; i++ {
-			f, err := os.OpenFile(filepath.Join(dir, fmt.Sprintf("slot-%d.lock", i)), os.O_CREATE|os.O_RDWR, 0o644)
-			if err != nil {
-				return nil, fmt.Errorf("jbcontext slots: %w", err)
-			}
-			if syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB) == nil {
-				return func() { _ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN); f.Close() }, nil
-			}
-			f.Close()
-		}
+	pause := func() error {
 		if time.Now().After(deadline) {
-			return nil, fmt.Errorf("jbcontext: no free search slot after %s", jbSlotWaitLimit)
+			return fmt.Errorf("jbcontext: no free search slot after %s", jbSlotWaitLimit)
 		}
 		time.Sleep(25*time.Millisecond + time.Duration(rand.Int63n(int64(50*time.Millisecond))))
+		return nil
+	}
+	unwarm := func() {}
+	for jbCold() {
+		rel, ok, err := jbLockFile(dir, "warm.lock")
+		if err != nil {
+			return nil, err
+		}
+		if ok {
+			if jbCold() {
+				unwarm = rel
+			} else {
+				rel() // another call warmed the stamp while this one waited
+			}
+			break
+		}
+		if err := pause(); err != nil {
+			return nil, err
+		}
+	}
+	for {
+		for i := 0; i < jbSlotCount(); i++ {
+			rel, ok, err := jbLockFile(dir, fmt.Sprintf("slot-%d.lock", i))
+			if err != nil {
+				unwarm()
+				return nil, err
+			}
+			if ok {
+				return func() { rel(); unwarm() }, nil
+			}
+		}
+		if err := pause(); err != nil {
+			unwarm()
+			return nil, err
+		}
 	}
 }
 
