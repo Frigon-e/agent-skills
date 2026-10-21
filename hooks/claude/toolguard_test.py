@@ -109,7 +109,7 @@ REQUIRED = [
 
 # The line a kind renders, and the generic reason that must survive byte for
 # byte when the pattern hint is off.
-KIND_MARKERS = {"symbol": "orch ctx sym", "text": "orch ctx text", "concept": "orch ctx find"}
+KIND_MARKERS = {"symbol": "orch ctx sym", "text": "orch ctx batch -q \"text:'", "concept": "orch ctx find"}
 
 GENERIC_ORCH_GREP = (
     "orch tool guard (deny-grep-rg): a plain grep, rg, ag or git grep over files is blocked.\n"
@@ -127,8 +127,10 @@ TAILORED = [
     ("grep -rn Normalize src", "Use orch ctx sym Normalize --refs 3."),
     (
         'rg "cannot find user" internal/',
-        "Use orch ctx text 'cannot find user' --glob 'internal/**'.",
+        "Use orch ctx batch -q \"text:'cannot find user' glob=internal/**\".",
     ),
+    ("grep -rn 'a$b' .", "Use orch ctx batch -q \"text:'a\\$b'\"."),
+    ("grep -rn \"it's here\" lib", "Use orch ctx text 'it'\\''s here' --glob 'lib/**'."),
 ]
 
 

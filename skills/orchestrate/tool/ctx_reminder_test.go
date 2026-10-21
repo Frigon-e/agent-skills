@@ -644,7 +644,7 @@ func sharedGuardFile(t *testing.T) sharedToolguardFile {
 // each one replaces.
 var kindLines = map[string]string{
 	"symbol":  "orch ctx sym",
-	"text":    "orch ctx text",
+	"text":    `orch ctx batch -q "text:'`,
 	"concept": "orch ctx find",
 }
 
@@ -666,7 +666,9 @@ func TestCtxReminderPatternHint(t *testing.T) {
 	examples := []struct{ command, line string }{
 		{`grep -rn "refund.*failed" src`, `Use orch ctx find "Code that refund failed" (a broader search; use it when no name or string is known).`},
 		{`grep -rn Normalize src`, `Use orch ctx sym Normalize --refs 3.`},
-		{`rg "cannot find user" internal/`, `Use orch ctx text 'cannot find user' --glob 'internal/**'.`},
+		{`rg "cannot find user" internal/`, `Use orch ctx batch -q "text:'cannot find user' glob=internal/**".`},
+		{`grep -rn 'a$b' .`, `Use orch ctx batch -q "text:'a\$b'".`},
+		{`grep -rn "it's here" lib`, `Use orch ctx text 'it'\''s here' --glob 'lib/**'.`},
 	}
 	var cases []reminderCase
 	kinds := map[string]string{}

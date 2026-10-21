@@ -469,7 +469,7 @@ func TestCtxTextOptionsReachRipgrep(t *testing.T) {
 	wantContains(t, ctxTestStrings(t, files), "files[2]:\n  pay/pay.go\n  pay/pay_test.go")
 	sourced := c.must("ctx", "text", "StartCheckout", "--fields", "src", "-p", "pay")
 	wantContains(t, ctxTestStrings(t, sourced), "pay/pay.go")
-	if r := ctxTestObject(t, sourced); !strings.Contains(r["sources"].(string), "rg ") || r["result"].(map[string]any)["kind"] != "text" {
+	if r := ctxTestObject(t, sourced); r["sources"] != "rg" || r["result"].(map[string]any)["kind"] != "text" {
 		t.Fatalf("missing text provenance: %#v", r)
 	}
 	counts := c.must("ctx", "text", "x", "-c")
@@ -606,6 +606,9 @@ func TestCtxErrorsAreStructuredOnStdoutWithExitCode2(t *testing.T) {
 	}{
 		{[]string{"ctx", "bogus"}, []string{"error: unknown subcommand bogus", "help: valid subcommands: status, refresh, watch, find, sym, text, batch, brief"}},
 		{[]string{"ctx", "text", "x", "--bogus"}, []string{"error: unknown flag --bogus for `ctx text`", "valid flags for `ctx text`: ", "--glob", "--word", "--tests"}},
+		{[]string{"ctx", "batch", "-q", "text:x", "--glob", "parser/**"}, []string{"error: unknown flag --glob for `ctx batch`: per-query options go inside the query, for example -q \"text:x glob=parser/**\" instead of --glob", "valid flags for `ctx batch`: ", "--compact", "--tests"}},
+		{[]string{"ctx", "batch", "-q", "text:x", "-w"}, []string{"unknown flag -w for `ctx batch`: per-query options go inside the query, for example -q \"text:x word=true\" instead of -w"}},
+		{[]string{"ctx", "batch", "-q", "text:x", "--bogus"}, []string{"error: unknown flag --bogus for `ctx batch`", "valid flags for `ctx batch`: "}},
 		{[]string{"ctx", "text", "x", "--fields", "nope"}, []string{"error: unknown field nope", "valid fields: src"}},
 		{[]string{"ctx", "text"}, []string{"error: ctx text needs one pattern"}},
 		{[]string{"ctx", "sym"}, []string{"error: ctx sym needs one symbol name"}},

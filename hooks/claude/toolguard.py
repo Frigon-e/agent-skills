@@ -551,6 +551,19 @@ def shell_quoted(text):
     return "'" + text.replace("'", "'\\''") + "'"
 
 
+def text_hint(pattern, where):
+    """The literal-string line, in the batch form the rest of the guard shows: the
+    pattern in single quotes inside the query, the query one double-quoted shell
+    word. A pattern or directory that cannot sit in both keeps the single command."""
+    if "'" not in pattern and not (where and re.search(r"[\s'\"\\$`]", where)):
+        escaped = re.sub(r'([\\$`"])', r"\\\1", pattern)
+        glob = f" glob={where}/**" if where else ""
+        return f'Use orch ctx batch -q "text:\'{escaped}\'{glob}".'
+    if where:
+        return f"Use orch ctx text {shell_quoted(pattern)} --glob {shell_quoted(where + '/**')}."
+    return f"Use orch ctx text {shell_quoted(pattern)}."
+
+
 def concept_words(pattern):
     """The concept phrase: the model's own words with the regex dropped."""
     cleaned = ESCAPE.sub(" ", pattern)
@@ -578,10 +591,7 @@ def pattern_hint(segment):
             f'Use orch ctx find "Code that {phrase}" '
             "(a broader search; use it when no name or string is known)."
         )
-    where = search_dir(args)
-    if where:
-        return f"Use orch ctx text {shell_quoted(pattern)} --glob {shell_quoted(where + '/**')}."
-    return f"Use orch ctx text {shell_quoted(pattern)}."
+    return text_hint(pattern, search_dir(args))
 
 
 def grep_searches(segment, tools):

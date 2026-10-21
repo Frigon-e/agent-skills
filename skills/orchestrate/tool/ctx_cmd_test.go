@@ -214,7 +214,10 @@ func TestCtxFindSymTextBatchAndBriefOutsideAnyRunState(t *testing.T) {
 	if strings.Contains(sym, "pay_test.go") {
 		t.Errorf("default sym listed test references:\n%s", sym)
 	}
-	wantContains(t, lastOutLine(sym), "gopls ")
+	wantContains(t, lastOutLine(sym), "gopls")
+	if strings.Contains(lastOutLine(sym), "/") {
+		t.Errorf("sources line carries a binary path: %q", lastOutLine(sym))
+	}
 	if got := ctxTestObject(t, c.must("ctx", "sym", "NoSuchSymbol"))["result"].(map[string]any); got["total"] != float64(0) || got["status"] != "empty" {
 		t.Fatalf("missing symbol=%#v", got)
 	}

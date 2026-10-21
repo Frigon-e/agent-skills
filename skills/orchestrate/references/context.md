@@ -78,7 +78,7 @@ web/apps/crm/src/features/admin/sales/gateways.tsx
   60- /** What the connect form checks ... */
   61: export const createGatewaySchema = z
   97: resolver: zodResolver(createGatewaySchema),  [in function CreateGatewayForm]
-sources: rg /opt/homebrew/bin/rg
+sources: rg
 ```
 
 - The first line counts the result ("3 of 3"). A path is printed once, then one
@@ -89,6 +89,13 @@ sources: rg /opt/homebrew/bin/rg
   whole repo`. Negative text results also state `searched_scope` and `excluded`.
   This is no match within that scope, not proof that behavior is absent.
 - Anything left out is named with the flag that shows it, see Pagination.
+- A reader sees only what carries information: `sources` names the tools and any
+  staleness note, not the binary path; `omissions` and `notes` appear only when
+  they have content; the `match` flag appears only when a row is a context line;
+  the excerpt byte counters are not printed. `--json` keeps all of them.
+- Per-lookup options (`--glob`, `--word`, `-p`, ...) are flags of `text`, `sym`
+  and `find`. A batch takes them inside the query, `-q "text:x glob=dir/**"`; a
+  batch-level `--glob` is an error that shows the rewritten form.
 - Test files are hidden by default and counted: `(+18 in tests;
   tests=include|only)`. `--tests only` lists only test files, `--tests include`
   both. One matcher everywhere: `_test.go`, `*.test.*`, `*.spec.*`,

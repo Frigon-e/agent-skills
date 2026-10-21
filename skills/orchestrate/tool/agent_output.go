@@ -312,6 +312,45 @@ type ctxV2Selection struct {
 	Sources       string          `json:"sources"`
 }
 
+// ctxV2Agent is the same selection as ctxV2Selection for a model or a person:
+// empty omissions and notes, the excerpt byte counters and the binary path in
+// sources add tokens and no information, so they are left out. --json keeps
+// the full selection.
+type ctxV2Agent struct {
+	SchemaVersion int             `json:"schema_version"`
+	Status        string          `json:"status"`
+	Common        []ctxCommonFile `json:"common,omitempty"`
+	Result        any             `json:"result"`
+	Omissions     []ctxOmission   `json:"omissions,omitempty"`
+	Notes         []string        `json:"notes,omitempty"`
+	Sources       string          `json:"sources"`
+}
+
+// ctxDropMatch clears the match flag on every line when none of the lines is a
+// context row: a match flag that is true on every row says nothing.
+func ctxDropMatch(views []*ctxView) {
+	for _, v := range views {
+		for _, p := range v.Parts {
+			for _, f := range p.Files {
+				for _, l := range f.Lines {
+					if !l.Match {
+						return
+					}
+				}
+			}
+		}
+	}
+	for _, v := range views {
+		for _, p := range v.Parts {
+			for fi := range p.Files {
+				for li := range p.Files[fi].Lines {
+					p.Files[fi].Lines[li].Match = false
+				}
+			}
+		}
+	}
+}
+
 func ctxEvidenceID(path string, line int, text string) string {
 	hash := sha256.Sum256(fmt.Appendf(nil, "%s:%d\n%s", path, line, text))
 	return fmt.Sprintf("ctx-%x", hash[:8])
@@ -321,6 +360,7 @@ func ctxEvidenceID(path string, line int, text string) string {
 // Legacy v1 machine JSON deliberately retains its old indentation transforms
 // and prose-only caps. --json --schema-version 2 opts into this same selection.
 func (a *app) ctxEmitV2(e *ctxEnv, data any, f ctxFmt, budget int) error {
+	var shown []*ctxView // the selected copies, for the agent-facing trims
 	selection := ctxV2Selection{SchemaVersion: 2, Status: "ok", Result: data, ExcerptBudget: budget, Omissions: []ctxOmission{}, Notes: e.Notes(), Sources: e.Sources()}
 	remaining := budget
 	seenSources := map[string]bool{}
@@ -384,6 +424,7 @@ func (a *app) ctxEmitV2(e *ctxEnv, data any, f ctxFmt, budget int) error {
 				file.Lines = lines
 			}
 		}
+		shown = append(shown, &out)
 		return &out, nil
 	}
 	switch v := data.(type) {
@@ -493,7 +534,12 @@ func (a *app) ctxEmitV2(e *ctxEnv, data any, f ctxFmt, budget int) error {
 		selection.Status = "partial"
 	}
 	selection.Notes, selection.Sources = e.Notes(), e.Sources()
-	return writeOutput(a.out, ctxAudience(a.out), selection)
+	audience := ctxAudience(a.out)
+	if audience == outputJSON {
+		return writeOutput(a.out, audience, selection)
+	}
+	ctxDropMatch(shown)
+	return writeOutput(a.out, audience, ctxV2Agent{selection.SchemaVersion, selection.Status, selection.Common, selection.Result, selection.Omissions, selection.Notes, e.SourcesBrief()})
 }
 
 // agentScalar is the shared boundary for legacy prose renderers and embedded

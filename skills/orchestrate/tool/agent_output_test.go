@@ -28,6 +28,66 @@ func decodedOutput(t *testing.T, b []byte, audience outputAudience) any {
 	return v
 }
 
+// agentTrimmed is the full v2 selection as the agent and human views print it:
+// no excerpt counters, no empty omissions or notes, no binary path in sources,
+// and no match flag when every line is a match. --json keeps all of them.
+func agentTrimmed(v any) any {
+	obj, ok := v.(map[string]any)
+	if !ok {
+		return v
+	}
+	out := map[string]any{}
+	for k, val := range obj {
+		out[k] = val
+	}
+	delete(out, "excerpt_budget_bytes")
+	delete(out, "excerpt_bytes")
+	if o, ok := out["omissions"].([]any); ok && len(o) == 0 {
+		delete(out, "omissions")
+	}
+	if n, ok := out["notes"]; ok && (n == nil || len(n.([]any)) == 0) {
+		delete(out, "notes")
+	}
+	if src, ok := out["sources"].(string); ok {
+		var parts []string
+		for _, p := range strings.Split(src, "; ") {
+			tool, detail, _ := strings.Cut(p, " ")
+			if strings.HasPrefix(detail, "/") || strings.HasPrefix(detail, "~/") {
+				p = tool
+			}
+			parts = append(parts, p)
+		}
+		out["sources"] = strings.Join(parts, "; ")
+	}
+	var lines []map[string]any
+	var walk func(any)
+	walk = func(x any) {
+		switch x := x.(type) {
+		case map[string]any:
+			if _, ok := x["n"]; ok {
+				lines = append(lines, x)
+			}
+			for _, c := range x {
+				walk(c)
+			}
+		case []any:
+			for _, c := range x {
+				walk(c)
+			}
+		}
+	}
+	walk(out["result"])
+	for _, l := range lines {
+		if l["match"] != true {
+			return out
+		}
+	}
+	for _, l := range lines {
+		delete(l, "match")
+	}
+	return out
+}
+
 // ctxTestObject/assertions inspect selected data, not incidental TOON layout.
 func ctxTestObject(t *testing.T, out string) map[string]any {
 	t.Helper()
@@ -331,6 +391,9 @@ func TestAgentOutputV2BatchConceptTipOnceWithoutMutatingViews(t *testing.T) {
 			t.Fatal(err)
 		}
 		decoded := decodedOutput(t, b.Bytes(), audience)
+		if audience == outputJSON {
+			decoded = agentTrimmed(decoded)
+		}
 		results := decoded.(map[string]any)["result"].([]any)
 		tips := 0
 		for i, result := range results {
@@ -371,6 +434,9 @@ func TestAgentOutputV2BudgetAndSource(t *testing.T) {
 			t.Fatal(err)
 		}
 		got := decodedOutput(t, b.Bytes(), audience)
+		if audience == outputJSON {
+			got = agentTrimmed(got)
+		}
 		if audience == outputHuman {
 			want = got
 		} else if !reflect.DeepEqual(got, want) {
@@ -400,14 +466,23 @@ func TestAgentOutputV2BudgetAndSource(t *testing.T) {
 			t.Fatal(err)
 		}
 		got := decodedOutput(t, b.Bytes(), audience)
+		if audience == outputJSON {
+			if got.(map[string]any)["excerpt_bytes"].(float64) > 5 {
+				t.Fatalf("budget not enforced %s", b.String())
+			}
+			got = agentTrimmed(got)
+		}
 		if audience == outputHuman {
 			want = got
 		} else if !reflect.DeepEqual(got, want) {
 			t.Fatal("budget differs by serializer")
 		}
 		obj := got.(map[string]any)
-		if obj["status"] != "partial" || obj["excerpt_bytes"].(float64) > 5 {
+		if obj["status"] != "partial" {
 			t.Fatalf("budget not enforced %s", b.String())
+		}
+		if _, ok := obj["excerpt_bytes"]; ok {
+			t.Fatalf("excerpt counter printed for a reader: %s", b.String())
 		}
 		omissions := obj["omissions"].([]any)
 		if len(omissions) == 0 {
@@ -473,7 +548,7 @@ func TestAgentOutputCtxCommandEquality(t *testing.T) {
 		agent := c.must(args...)
 		machine := c.must(append(append([]string{}, args...), "--json", "--schema-version", "2")...)
 		human := c.must(append(append([]string{}, args...), "--human")...)
-		want := decodedOutput(t, []byte(machine), outputJSON)
+		want := agentTrimmed(decodedOutput(t, []byte(machine), outputJSON))
 		if got := decodedOutput(t, []byte(agent), outputAgent); !reflect.DeepEqual(got, want) {
 			t.Fatalf("ctx audiences differ\nagent %s\njson %s", agent, machine)
 		}
@@ -501,4 +576,51 @@ func TestAgentOutputCtxCommandEquality(t *testing.T) {
 			t.Fatalf("unstructured error %s", out)
 		}
 	}
+}
+
+func TestAgentOutputTrimsWhatAReaderCannotUse(t *testing.T) {
+	emit := func(audience outputAudience, lines ...ctxLine) string {
+		e := newCtxEnv(t.TempDir(), ctxOpts{Cfg: config{}})
+		e.use("rg", "/opt/homebrew/bin/rg")
+		e.use("jbcontext", "index abc1234 (HEAD abc1234, stale)")
+		view := &ctxView{Kind: "text", Query: "x", Unit: "matches", Total: 1, Shown: 1, Parts: []*ctxPart{{Files: []ctxFileHits{{Path: "a.py", Lines: lines}}}}}
+		var b bytes.Buffer
+		a := &app{out: ctxV2Output{&b, audience}}
+		if err := a.ctxEmitV2(e, view, ctxFmt{SchemaVersion: 2}, 1000); err != nil {
+			t.Fatal(err)
+		}
+		return b.String()
+	}
+	hit := ctxLine{N: 2, Text: "return False", Match: true, In: "def check"}
+	agent := emit(outputAgent, hit, ctxLine{N: 3, Text: "x = 1", Match: true})
+	for _, gone := range []string{"match:", "omissions", "notes:", "excerpt_budget_bytes", "excerpt_bytes", "/opt/homebrew"} {
+		if strings.Contains(agent, gone) {
+			t.Errorf("%q printed for a reader:\n%s", gone, agent)
+		}
+	}
+	if !strings.Contains(agent, `sources: "jbcontext index abc1234 (HEAD abc1234, stale); rg"`) {
+		t.Errorf("tool names and the staleness note must stay:\n%s", agent)
+	}
+	withContext := emit(outputAgent, ctxLine{N: 1, Text: "def check():"}, hit)
+	if !strings.Contains(withContext, "match: true") {
+		t.Errorf("match must stay when a row is a context line:\n%s", withContext)
+	}
+	full := ctxTestObjectJSON(t, emit(outputJSON, hit))
+	for _, kept := range []string{"excerpt_budget_bytes", "excerpt_bytes", "omissions", "notes", "sources"} {
+		if _, ok := full[kept]; !ok {
+			t.Errorf("--json lost %q: %#v", kept, full)
+		}
+	}
+	if !strings.Contains(full["sources"].(string), "/opt/homebrew/bin/rg") {
+		t.Errorf("--json sources lost the path: %#v", full["sources"])
+	}
+	line := full["result"].(map[string]any)["parts"].([]any)[0].(map[string]any)["files"].([]any)[0].(map[string]any)["lines"].([]any)[0].(map[string]any)
+	if line["match"] != true {
+		t.Errorf("--json lost match: %#v", line)
+	}
+}
+
+func ctxTestObjectJSON(t *testing.T, out string) map[string]any {
+	t.Helper()
+	return decodedOutput(t, []byte(out), outputJSON).(map[string]any)
 }
