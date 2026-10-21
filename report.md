@@ -74,6 +74,7 @@ The live store was opened only for read-only discovery and a copy. Every benchma
 - Initial listing SHA256: `e2f6647ced1ea8ac251436b083d8374ef620580a608070b3f90a87a026c29f1c`.
 - Listing fields: relative path, type, mode, size, nanosecond mtime and regular-file SHA256.
 - Private listing/copy location: recorded in the task directory at `checks/work-dir.txt`. Store contents, private source/spec/keys and raw model transcripts will not be committed.
+- Phase-1 after-listing comparison: PASS, byte-identical to the initial listing, including all 466 file hashes, sizes, modes and mtimes.
 - Final listing and byte-for-byte comparison: pending after execution or cancellation. Never modify the source to make a comparison pass.
 
 ## Verification
@@ -87,7 +88,9 @@ go vet ./...
 go test -p 2 -count=1 -run 'Fixture|Manifest' .
 ```
 
-Build/vet/fixture outcome: pending. This command makes no model calls and does not run the full test suite.
+Outcome: **PASS**, exit 0. Build and vet emitted no failures. The focused fixture/manifest suite passed in **17.960 seconds**. The task acquired and released the CPU lock successfully. This command made no model calls and did not run the full test suite.
+
+Evidence: background task `b9b8d4023`, output `.pi/tasks/cfaff92d-0a36-4cc7-9074-22d8e4108bf0-58502/b9b8d4023.output`.
 
 Independent no-spend manifest checks passed:
 
