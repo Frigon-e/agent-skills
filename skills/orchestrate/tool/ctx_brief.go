@@ -27,7 +27,6 @@ const (
 	dossierConcept     = 300
 	dossierConceptHits = 4  // chunks kept per concept query
 	dossierAccept      = 6  // acceptance bullets used as concept queries
-	dossierDirs        = 3  // owned directories used as concept queries
 	dossierLike        = 8  // look-alikes kept
 	dossierLikeTree    = 4  // look-alikes kept per code tree
 	dossierDocs        = 5  // docs listed

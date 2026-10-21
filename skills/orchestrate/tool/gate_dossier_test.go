@@ -80,7 +80,7 @@ func TestDossierRanksFilesAndFindsWhatExistsAndWhatDoesNot(t *testing.T) {
 		// a concept hit (2) and a rare rg hit (1) in the same file, plus 2 for two kinds agreeing
 		"`internal/store.go` (score 5: jb+text): concept search; text `SendTransfer`",
 		// outside the owns, with the line and a snippet
-		"- `internal/store.go` (lines 3, 4) in func SendTransfer via concept \"SendTransfer Nonexistent transfer_rows queue api\"; concept \"code queues transfer serves post api transfers\"; concept \"internal queue\"\n    func SendTransfer() {}",
+		"- `internal/store.go` (lines 3, 4) in func SendTransfer via concept \"Code that queues a transfer and serves POST /api/transfers.\"; text `SendTransfer`; text `POST /api/transfers`\n    func SendTransfer() {}",
 		// names that exist nowhere, and a pointer to a file that does not exist
 		"Names looked up that were not found: ", "`Nonexistent`", "`transfer_rows`", "`internal/gone.go`")
 	if strings.Contains(text, "`internal/queue/queue.go:") {

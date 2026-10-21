@@ -28,7 +28,7 @@ Out: {{what it must not touch, and which other task owns it if any}}
 
 # Acceptance
 
-{{How the lead proves it is done: commands to run and their expected result, tests that must exist, or for scout the evidence each finding needs.}}
+{{How the lead proves it is done: commands to run and their expected result, tests that must exist, or for scout the evidence each finding needs. For Go tests in orch write `orch test-changed`, not a `-run` pattern; never ask for the full suite.}}
 
 # Authority
 
