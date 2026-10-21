@@ -164,7 +164,12 @@ enforce mode refuses with the same manual-profile/`--tier` guidance.
 Gate agents use the plain `orch ctx` CLI, not a server or generated adapter.
 `--ctx-tool on|off` defaults to on: a read-only notice is first in the shared
 prompt prefix, `ORCH_CTX_ROOT` pins lookups to the code checkout, and a PATH
-shim resolves `orch` to this binary. Pi adds `bash`; Claude adds Bash with the
+shim resolves `orch` to this binary. `--ctx-shell ctx-only` is the default for
+Pi: native `read` plus a shell limited to one `orch ctx` call. Pi starts with
+read alone; the loaded guard enables bash and acknowledges activation. If the
+extension cannot be written or loaded, the pass is an execution failure, never
+an open-shell fallback. `--ctx-shell open` restores Pi's native read/search tools
+and unrestricted bash. Claude ignores this setting and adds Bash with the
 `Bash(orch ctx:*)` permission. Prefer one `orch ctx batch` over several greps;
 read what it returns before searching again. With ctx off, the original read
 and search tools remain and the ctx notice/env are absent.
@@ -172,7 +177,9 @@ and search tools remain and the ctx notice/env are absent.
 uses `--settings '{"claudeMdExcludes":["**"]}'` instead of `--bare`, so disabling
 CLAUDE.md discovery does not disable subscription authentication. On removes
 those exclusions. The dossier stays in the task text, not in a context file.
-Both settings are in gate/experiment records, reports, and compare output.
+These settings, including the effective `ctx_shell` (`open` with ctx off), are
+in gate/experiment records, reports, and compare output. Old records without
+`ctx_shell` still display `open`.
 
 Every runner, including ctx-off runs, gets a post-pass unchanged-checkout
 check against the pre-pass baseline: Git status, diff and untracked-file
@@ -181,9 +188,11 @@ passes, sets state to `stale` (or `error` if the subject cannot be checked), and
 The record names changed files and passes in flight, not a proven culprit.
 Files are never reverted. Ignored files and writes outside the checkout are
 not covered; edits restored before the check can also escape detection.
-Pi's shell tool has no command allowlist: it can still read outside the repo,
-write ignored/outside files, or use the network. Its protection is the prompt,
-orch's pinned read-only ctx mode, and this post-pass check, not a sandbox.
+Pi's default ctx-only shell blocks unrelated commands, pipes and redirects.
+With `--ctx-shell open`, its shell is unrestricted and can write ignored/outside
+files or use the network. Native read can still read outside the repo in either
+mode. The guard, prompt, pinned read-only ctx mode and post-pass check are not
+an operating-system sandbox.
 
 Gate options. Before each group pass the gate puts a code-built dossier after
 the package text (`--dossier code`, the default; `off` is the old prompt, `plan`

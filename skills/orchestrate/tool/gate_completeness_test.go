@@ -172,8 +172,7 @@ func TestGateSchemaRepairSharesCoverageSlot(t *testing.T) {
 			dir := scriptPi(t, h, `{}`, repaired)
 			// A schema repair replaces the whole group response, unlike an
 			// item-only coverage retry. Record every invocation to bound it.
-			writeFiles(t, dir, map[string]string{"pi": `#!/bin/sh
- echo "$*" >> "` + dir + `/calls.log"
+			writeFiles(t, dir, map[string]string{"pi": "#!/bin/sh\n" + fakeCtxOnlyActivation + ` echo "$*" >> "` + dir + `/calls.log"
  case "$*" in
  *'Schema repair:'*) cat "` + dir + `/retry.json";;
  *GATE-GROUP*) echo '{}';;

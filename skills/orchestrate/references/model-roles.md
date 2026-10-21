@@ -9,6 +9,7 @@ no inherited model choices, even when a command supplies a runner override.
 
 ```toml
 [roles.gate]
+# Pi gate passes default to ctx-only with ctx enabled; CLI --ctx-shell open opts out.
 use = [
   { harness = "pi", model = "openrouter/~deepseek/deepseek-flash-latest" },
   { harness = "claude", model = "haiku", effort = "low" },
@@ -376,9 +377,14 @@ session/transcript.
 `ORCH_CTX_ROOT`, harness-specific tools and a notice placed first in the
 shared prefix. Agents call `orch ctx find|sym|text|batch` through the shell.
 The notice bytes are shared across passes of a class; dossiers remain in the
-per-pass task. Pi adds `bash`; Claude exposes Bash with the ctx command
-permission pattern supplied by `CtxCLIFor`. Task A's installed-harness probe
-also allowed `cat file` as a safe read, so the pattern is not an exclusive
+per-pass task. Pi defaults to `--ctx-shell ctx-only`: native read plus bash
+limited to one `orch ctx` command. It starts with read alone; the guard activates
+bash only after loading. Missing activation or extension-write failure fails the
+pass, never falling back to an open shell. Use `--ctx-shell open` to opt into
+native read/search tools and unrestricted bash. Claude ignores `--ctx-shell`
+and exposes Bash with the ctx command permission pattern supplied by `CtxCLIFor`.
+Task A's installed-harness probe also allowed `cat file` as a safe read, so the
+pattern is not an exclusive
 shell-command allowlist. Its stricter requested cat refusal remains an
 integration limitation for the parent to resolve. Off keeps the original read/search
 tools without adding the notice or ctx environment. Tool-less planner and
@@ -390,7 +396,10 @@ off, and omits it when on. Claude gets
 This controls CLAUDE.md discovery without `--bare`, whose documented auth
 restriction would break subscription users. It is the nearest Claude
 equivalent, not a promise that every harness loads AGENTS.md identically.
-Gate/experiment records, reports and compare identify both switch values.
+Gate/experiment records, reports and compare identify these switch values and
+`ctx_shell` (effective `open` with ctx off; absent historical fields read as `open`).
+For example, `orch gate spec.md --ctx-tool on --ctx-shell ctx-only --context-files off`
+spells out the defaults; no config key changes this default.
 
 Before any model pass, the gate fingerprints Git status (NUL-separated,
 including every non-ignored untracked file), the diff against HEAD, HEAD
@@ -407,10 +416,11 @@ A checkout already dirty before the baseline is allowed if unchanged.
 The check does not cover ignored files, paths outside the checkout, or edits
 reverted before a check. Keep gate state artifacts outside the code checkout
 or ignored, since the scan deliberately does not exempt non-ignored orch
-artifacts. Pi has no shell command allowlist: it can read outside the repo,
-write ignored/outside files, or use the network. Its protections are the
-read-only prompt, pinned read-only orch ctx commands, and the post-pass
-check. These do not constitute a sandbox.
+artifacts. Pi's default shell has the ctx-only command guard; explicit
+`--ctx-shell open` can write ignored/outside files or use the network. Native
+read can still read outside the repo in either mode. The read-only prompt,
+guard, pinned ctx commands and post-pass check are not an operating-system
+sandbox.
 
 Fake tests cover argv, environment exports, prompt/cache bytes, context
 switches, transcripts and mutations under both harnesses. Opt-in installed

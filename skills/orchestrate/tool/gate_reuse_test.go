@@ -296,8 +296,7 @@ func scriptPi(t *testing.T, h *harness, groupReply, retryReply string) string {
 	os.MkdirAll(dir, 0o755)
 	os.WriteFile(filepath.Join(dir, "group.json"), []byte(groupReply), 0o644)
 	os.WriteFile(filepath.Join(dir, "retry.json"), []byte(retryReply), 0o644)
-	script := `#!/bin/sh
-echo "$*" >> "` + dir + `/calls.log"
+	script := "#!/bin/sh\n" + fakeCtxOnlyActivation + `echo "$*" >> "` + dir + `/calls.log"
 case "$*" in
 *GATE-GROUP-ITEMS*) cat "` + dir + `/retry.json";;
 *GATE-GROUP*) cat "` + dir + `/group.json";;

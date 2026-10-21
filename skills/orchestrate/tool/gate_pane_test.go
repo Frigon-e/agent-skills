@@ -123,6 +123,9 @@ func fakeGatePaneVerbs(path string, args []string) (int, bool) {
 		if b, err := os.ReadFile(filepath.Join(panes, args[2]+".env")); err == nil {
 			pi.Env = append(os.Environ(), "PI_CACHE_RETENTION="+strings.TrimSpace(string(b)))
 		}
+		if b, err := os.ReadFile(filepath.Join(panes, args[2]+".ready")); err == nil {
+			pi.Env = agentEnv(pi.Env, []string{"ORCH_CTX_ONLY_READY=" + string(b)})
+		}
 		// <state>.budget holds "soft:N" or "hard:N": the pass first makes N turns
 		// of tool calls and then waits to be told to answer.
 		if b, err := os.ReadFile(path + ".budget"); err == nil && strings.Contains(string(prompt), "GATE-GROUP") {
@@ -237,6 +240,8 @@ func fakeGatePaneVerbs(path string, args []string) (int, bool) {
 			os.WriteFile(envF, []byte(v), 0o644)
 		} else if cmd == "unset PI_CACHE_RETENTION" {
 			os.Remove(envF)
+		} else if v, ok := strings.CutPrefix(cmd, "export ORCH_CTX_ONLY_READY="); ok {
+			os.WriteFile(filepath.Join(panes, args[2]+".ready"), []byte(strings.Trim(v, "'")), 0o644)
 		}
 		fmt.Println("{}")
 		return 0, true
@@ -251,7 +256,11 @@ func fakeGatePaneVerbs(path string, args []string) (int, bool) {
 		// The final prompt after ctrl+c: answer from the stored prompt.
 		session, _ := os.ReadFile(filepath.Join(panes, args[2]+".session"))
 		prompt, _ := os.ReadFile(filepath.Join(panes, args[2]+".prompt"))
-		out, _ := exec.Command(envOr("ORCH_PI", "pi"), "-p", string(prompt)).Output()
+		pi := exec.Command(envOr("ORCH_PI", "pi"), "-p", string(prompt))
+		if b, err := os.ReadFile(filepath.Join(panes, args[2]+".ready")); err == nil {
+			pi.Env = agentEnv(nil, []string{"ORCH_CTX_ONLY_READY=" + string(b)})
+		}
+		out, _ := pi.Output()
 		msg, _ := json.Marshal(map[string]any{"type": "message", "message": map[string]any{"role": "assistant", "content": []map[string]any{{"type": "text", "text": string(out)}}}})
 		f, _ := os.OpenFile(filepath.Join(string(session), "session.jsonl"), os.O_APPEND|os.O_WRONLY, 0o644)
 		f.Write(append(msg, '\n'))
@@ -714,8 +723,8 @@ func TestGatePaneLoadsHerdrExtensionOnlyWhenItExists(t *testing.T) {
 	h.sessionPi(gatePasses(nil))
 	h.must("gate", "spec.md")
 	for _, c := range h.gateCalls("agent", "start") {
-		if flagValue(c.Args, "-e") != "" {
-			t.Fatalf("a missing extension was passed to pi: %v", c.Args)
+		if got := flagValue(c.Args, "-e"); !strings.HasSuffix(got, "orch-ctx-only.ts") {
+			t.Fatalf("expected only the ctx guard, not the missing herdr extension: %v", c.Args)
 		}
 	}
 

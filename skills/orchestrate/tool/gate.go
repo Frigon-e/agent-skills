@@ -733,6 +733,7 @@ func runPi(repo, model string, p gatePass, sessionDir, cache string) (string, er
 	if err != nil {
 		return "", err
 	}
+	defer os.Remove(p.cli.Ready)
 	_ = os.MkdirAll(sessionDir, 0o755)
 	ctx, cancel := context.WithTimeout(passContext(p), gateTimeout)
 	defer cancel()
@@ -782,6 +783,9 @@ func runPi(repo, model string, p gatePass, sessionDir, cache string) (string, er
 	}
 	if err != nil {
 		return "", fmt.Errorf("pi failed: %w: %s", err, short(strings.TrimSpace(stderr.String()), 200))
+	}
+	if err := ctxOnlyReady(p); err != nil {
+		return "", err
 	}
 	if err := sessionFailure(sessionDir); err != nil {
 		return "", err
@@ -1147,7 +1151,7 @@ func cmdGate(a *app, args []string) (retErr error) {
 	headless := fs.Bool("headless", false, "run the passes without herdr panes (ORCH_HEADLESS=1 does the same)")
 	ctxTool := fs.String("ctx-tool", "on", "on or off: read-only orch ctx CLI in gate agents (default on)")
 	contextFiles := fs.String("context-files", "off", "on or off: load repository context files (default off)")
-	ctxShell := fs.String("ctx-shell", "open", "open or ctx-only: with ctx-only a pi pass has the read tool and a shell that runs only orch ctx (default open)")
+	ctxShell := fs.String("ctx-shell", "ctx-only", "open or ctx-only: pi with ctx-tool on defaults to read plus an orch ctx-only shell; open opts out; ignored by Claude and with ctx-tool off")
 	ctxProfile := fs.String("ctx-profile", "default", "orch ctx tuning for the gate agents: "+ctxProfileNames+" (default default)")
 	verdicts := fs.Bool("verdicts", false, "experimental: the group pass returns a reuse|extend|new|unclear verdict for each reuse-checklist item, with a coverage retry (off: the checklist is only facts)")
 	runnerF := fs.String("runner", "", "ordered harness:model[:effort],... choices for this run")

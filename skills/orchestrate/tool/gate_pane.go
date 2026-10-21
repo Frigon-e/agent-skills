@@ -178,6 +178,7 @@ func runPaneChoice(pane *string, repo string, choice profile, gdir string, p gat
 	if err != nil {
 		return "", "", err
 	}
+	defer os.Remove(p.cli.Ready)
 	if err = writeSharedFile(gdir, p); err != nil {
 		return "", "", err
 	}
@@ -329,6 +330,12 @@ func runPaneChoice(pane *string, repo string, choice profile, gdir string, p gat
 		screen, _ := herdrCmd(herdrTimeout, "agent", "read", *pane, "--source", "recent-unwrapped", "--lines", "30")
 		leavePane(pane, repo, true)
 		return "", hit, fmt.Errorf("%s is blocked waiting for input: %s", choice.Harness, short(strings.Join(strings.Fields(string(screen)), " "), 300))
+	}
+	if choice.Harness == "pi" {
+		if failure := ctxOnlyReady(p); failure != nil {
+			leavePane(pane, repo, true)
+			return "", hit, failure
+		}
 	}
 	if transcript != "" {
 		copyClaudeTranscript(transcript, session)

@@ -419,6 +419,8 @@ type CtxCLI struct {
     Env    []string
     Tools  []string
     Notice string
+    Extension string // pi guard path
+    Ready string     // gate invocation's activation acknowledgement
 }
 ```
 
@@ -431,10 +433,18 @@ the shim. Shim creation is idempotent; a conflicting entry is an error.
 
 Keep Claude's native `Read,Grep,Glob` in both the tool and allowed-tool lists,
 add `Bash` to the tool list, and add `Bash(orch ctx:*)` to `--allowedTools` with
-`dontAsk` permission handling. Keep Pi's native `read,grep,find,ls` and append
-`bash`. `CtxCLI.Tools` contains only the extra shell entry, not a replacement
-for the native tools. Agents use native Read/read with offset and limit for
-files; never the ctx read command, batch read kind, sed, cat, head or tail.
+`dontAsk` permission handling. Pi defaults to `--ctx-shell ctx-only` with ctx on:
+only native `read` and guarded bash. It starts with
+`--no-builtin-tools --tools +read`: read is active, while bash stays registered
+but inactive. After its command guard is installed, the extension enables bash
+and acknowledges startup. A hard `--tools read` allowlist would exclude bash
+from the registry and prevent activation.
+A missing acknowledgement or extension-write error fails the pass, without an
+open-shell fallback. `--ctx-shell open` keeps Pi's native `read,grep,find,ls`
+and appends unrestricted `bash`. Claude ignores `--ctx-shell`; ctx off keeps the
+original native tools. `CtxCLI.Tools` contains only the extra shell entry.
+Agents use native Read/read with offset and limit for files; never the ctx read
+command, batch read kind, sed, cat, head or tail.
 
 Installed Claude 2.1.303 refused the chaining, redirection, write and
 substitution probes, but **also allowed `cat file`** as a safe read command.
@@ -446,13 +456,13 @@ Read, even where its safe-shell check refuses cat. This does not prove that
 every outside path or every shell read is allowed or refused. `ORCH_CTX_ROOT`
 constrains orch, not native Read; it is not a file-confidentiality boundary.
 
-Pi's shell is unrestricted:
-orch read-only mode protects ctx operations, not other shell commands. A Pi
-pass can still edit files, read outside the repository, run arbitrary programs,
-or use the network. The prompt forbids writes and network use; the gate's
-post-pass unchanged check is a separate layer, not a sandbox. Ignored files
-are not covered by that check. Do not claim that it prevents outside reads or
-network access.
+Pi's default ctx-only shell accepts only one `orch ctx find|sym|text|batch|refs`
+call, without pipes, redirects or unrelated commands. `--ctx-shell open` opts
+out and permits arbitrary shell programs, including writes and network access.
+Native read is not root-confined in either mode. The prompt and post-pass
+unchanged check remain separate layers, not an operating-system sandbox;
+ignored files and outside paths are not covered by that check. Gate records,
+reports and compare show `ctx_shell`; missing historical fields display `open`.
 
 Harness verification uses only local mock endpoints, never a paid model:
 
