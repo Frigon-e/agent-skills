@@ -93,6 +93,10 @@ func fakeHerdr(path string, args []string) int {
 		}
 		return print(map[string]any{"result": map[string]any{"agents": agents}})
 	case "pane get":
+		if st.Down {
+			fmt.Fprintln(os.Stderr, "connection refused")
+			return 1
+		}
 		if _, ok := st.Panes[args[2]]; !ok {
 			fmt.Fprintf(os.Stderr, `{"error":{"code":"pane_not_found","message":"pane %s not found"}}`+"\n", args[2])
 			return 1
@@ -409,10 +413,9 @@ func TestSpawnGridAndCap(t *testing.T) {
 	for _, id := range ids {
 		h.task(id)
 	}
-	for i, id := range ids[:5] {
+	for _, id := range ids[:5] {
 		h.now = h.now.Add(time.Second)
 		h.must("spawn", id)
-		_ = i
 	}
 	pa, pb, pc := h.lead("a").PaneID, h.lead("b").PaneID, h.lead("c").PaneID
 	var splits [][2]string
@@ -1541,8 +1544,13 @@ func TestWatchCheckpointTimeout(t *testing.T) {
 	h := setup(t)
 	h.task("t1")
 	h.must("spawn", "t1")
-	h.a.now = time.Now
-	code, out := h.run("watch", "--timeout", "1", "--interval", "0.05")
+	// Advance the injected clock instead of waiting a wall-clock second.
+	h.a.now = func() time.Time {
+		now := h.now
+		h.now = h.now.Add(250 * time.Millisecond)
+		return now
+	}
+	code, out := h.run("watch", "--timeout", "1", "--interval", "0")
 	if code != 124 || !strings.Contains(out, "checkpoint") {
 		t.Fatalf("checkpoint = %d %q", code, out)
 	}
@@ -1624,6 +1632,13 @@ func TestUnownedLeadsAreShared(t *testing.T) {
 // exits, so the upgrade neither nags nor starts a duplicate.
 func TestLegacyWatcherCountsDuringUpgrade(t *testing.T) {
 	h := setup(t)
+	pidFile := filepath.Join(h.tmp, "empty-watch.pid")
+	for _, contents := range []string{"", " \t\n"} {
+		writeFiles(t, h.tmp, map[string]string{filepath.Base(pidFile): contents})
+		if pid := pidRunsWatch(pidFile); pid != 0 {
+			t.Fatalf("empty watcher pid %q reported running process %d", contents, pid)
+		}
+	}
 	h.task("t1")
 	h.must("spawn", "t1")
 	old := exec.Command("bash", "-c", `exec -a "orch watch" sleep 30`)
@@ -1900,6 +1915,10 @@ func TestOrchestratorHooks(t *testing.T) {
 	}
 	wantContains(t, out, "load the `orchestrate` skill", "t1", "Watcher stopped")
 
+	edit["session_id"] = "s1"
+	if code, _ := h.hook("pretool", edit); code != 2 {
+		t.Fatal("original session lost the orchestrator role before become --off")
+	}
 	h.must("become", "--off")
 	if code, _ := h.hook("pretool", edit); code != 0 {
 		t.Fatal("role still on after become --off")
@@ -1971,6 +1990,11 @@ func TestRunRootFollowsHerdrConfig(t *testing.T) {
 	if got, _ := repoRoot(wt); got != h.repo {
 		t.Fatalf("repoRoot from worktree = %s", got)
 	}
+	t.Setenv("ORCH_HERDR_CONFIG", cfg)
+	h.a.cwd = wt
+	if got, want := h.a.siteRoot(t), runRoot(h.repo); got != want {
+		t.Fatalf("run root from worktree = %s, want %s", got, want)
+	}
 }
 
 // Two repos with the same folder name never share run state. Locks stay
@@ -1989,14 +2013,15 @@ func TestSameNameReposStayApart(t *testing.T) {
 	first := runRoot(h.repo)
 
 	h.a.cwd = other
-	if got := runRoot(other); got == first {
-		t.Fatalf("both repos use run root %s", got)
+	second := runRoot(other)
+	if second == first {
+		t.Fatalf("both repos use run root %s", second)
 	}
 	if out := h.must("status"); !strings.Contains(out, "no tasks yet") {
 		t.Fatalf("second repo sees the first repo's task:\n%s", out)
 	}
 	h.task("t1")
-	if got := runRoot(other); got != runRoot(other) || !strings.Contains(filepath.Base(filepath.Dir(got))+filepath.Base(got), "repo-") {
+	if got := runRoot(other); got != second || !strings.HasPrefix(filepath.Base(got), "repo-") {
 		t.Fatalf("second repo's root is not a stable hashed name: %s", got)
 	}
 	if _, err := os.Stat(filepath.Join(runRoot(other), "t1", "task.md")); err != nil {
@@ -2110,6 +2135,8 @@ func TestLocks(t *testing.T) {
 	wantContains(t, h.must("status"), "lock: e2e-vm held by t1")
 
 	// A waiter reports paused, so the board shows why it is idle.
+	// One failed attempt covers this outcome; retry timing is not under test.
+	t.Setenv("ORCH_LOCK_POLL_MS", "1000")
 	code, _ = h.run("lock", "acquire", "e2e-vm", "--dir", h.dir("t2"), "--wait", "1")
 	if code != 75 || !strings.Contains(lastLine(h.dir("t2")), "paused") || !strings.Contains(lastLine(h.dir("t2")), "waiting for lock e2e-vm") {
 		t.Fatalf("waiter: %d, status %q", code, lastLine(h.dir("t2")))
@@ -2122,6 +2149,16 @@ func TestLocks(t *testing.T) {
 		t.Fatalf("close note: %q", lastLine(h.dir("t1")))
 	}
 	h.must("lock", "acquire", "e2e-vm", "--dir", h.dir("t2"))
+
+	// A transport failure cannot prove that the holder's pane is gone.
+	h.editFake(func(st *fakeState) { st.Down = true })
+	if code, out := h.run("lock", "acquire", "e2e-vm", "--dir", h.dir("t3")); code != 75 || !strings.Contains(out, "held by t2") {
+		t.Fatalf("unreachable Herdr freed a live lock: %d %q", code, out)
+	}
+	if held, err := readLock("e2e-vm"); err != nil || held == nil || held.Dir != h.dir("t2") {
+		t.Fatalf("unreachable Herdr changed the holder: %+v, %v", held, err)
+	}
+	h.editFake(func(st *fakeState) { st.Down = false })
 
 	// A holder whose pane died is stale: the next acquire takes over.
 	h.editFake(func(st *fakeState) { delete(st.Panes, h.lead("t2").PaneID) })
@@ -2144,20 +2181,26 @@ func TestLocks(t *testing.T) {
 
 // Racing takers get exactly one winner.
 func TestLockRace(t *testing.T) {
-	h := setup(t)
+	tmp := t.TempDir()
+	t.Setenv("ORCH_LOCKS_DIR", filepath.Join(tmp, "locks"))
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 	winners := 0
+	start := make(chan struct{})
 	for i := range 12 {
-		dir := filepath.Join(h.tmp, fmt.Sprintf("task%d", i))
-		os.MkdirAll(dir, 0o755)
-		os.WriteFile(filepath.Join(dir, "task.md"), []byte("x"), 0o644)
+		dir := filepath.Join(tmp, fmt.Sprintf("task%d", i))
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		writeFiles(t, dir, map[string]string{"task.md": "x"})
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			<-start
 			held, err := tryLock(lockHolder{Name: "vm", Lead: filepath.Base(dir), Dir: dir})
 			if err != nil {
 				t.Error(err)
+				return
 			}
 			if held == nil {
 				mu.Lock()
@@ -2166,6 +2209,7 @@ func TestLockRace(t *testing.T) {
 			}
 		}()
 	}
+	close(start)
 	wg.Wait()
 	if winners != 1 {
 		t.Fatalf("%d leads took the lock", winners)
@@ -2329,6 +2373,14 @@ func TestAsk(t *testing.T) {
 }
 
 func TestAskRefusals(t *testing.T) {
+	h := setup(t)
+	qd := askLead(t, h, "k")
+	outside := filepath.Join(h.tmp, "secret.svg")
+	writeFiles(t, h.tmp, map[string]string{"secret.svg": "<svg>SECRET</svg>"})
+	writeFiles(t, qd, map[string]string{"a.png": "x", "a.txt": "x"})
+	if err := os.Symlink(outside, filepath.Join(qd, "link.svg")); err != nil {
+		t.Fatal(err)
+	}
 	cases := map[string]struct{ card, want string }{
 		"outside":   {"---\nquestion: Q one?\n---\n## Context\ninclude: ../../x.svg\n", "outside the task directory"},
 		"symlink":   {"---\nquestion: Q one?\n---\n## Context\ninclude: link.svg\n", "outside the task directory"},
@@ -2341,14 +2393,7 @@ func TestAskRefusals(t *testing.T) {
 	}
 	for name, c := range cases {
 		t.Run(name, func(t *testing.T) {
-			h := setup(t)
-			qd := askLead(t, h, "k")
-			outside := filepath.Join(h.tmp, "secret.svg")
-			writeFiles(t, h.tmp, map[string]string{"secret.svg": "<svg>SECRET</svg>"})
-			writeFiles(t, qd, map[string]string{"k.md": c.card, "a.png": "x", "a.txt": "x"})
-			if err := os.Symlink(outside, filepath.Join(qd, "link.svg")); err != nil {
-				t.Fatal(err)
-			}
+			writeFiles(t, qd, map[string]string{"k.md": c.card})
 			code, out := h.run("ask")
 			if code != 0 {
 				t.Fatalf("exit %d: %s", code, out)

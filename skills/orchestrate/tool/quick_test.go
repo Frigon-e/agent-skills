@@ -212,6 +212,10 @@ func TestIgnoredFilesAreNeverChecked(t *testing.T) {
 	if worktreeFingerprint(wt) != before {
 		t.Fatal("ignored files counted as progress for the stall detector")
 	}
+	os.WriteFile(filepath.Join(wt, "slug.py"), []byte("x = 2\n"), 0o644)
+	if worktreeFingerprint(wt) == before {
+		t.Fatal("changing an owned file did not count as progress")
+	}
 	h.gitIn(wt, "add", "slug.py")
 	h.gitIn(wt, "commit", "-q", "-m", "work")
 	h.must("report", "--dir", h.dir("q1"), "done", "branch orch/q1")
