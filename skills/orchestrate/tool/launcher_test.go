@@ -91,9 +91,10 @@ func TestCtxCLILauncherFingerprint(t *testing.T) {
 	if err := os.WriteFile(os.Getenv("ORCH_CONFIG"), []byte("invalid = ["), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	launch := path
 	run := func(alias string, builds int) string {
 		t.Helper()
-		cmd := exec.Command(path, alias)
+		cmd := exec.Command(launch, alias)
 		cmd.Dir = root // Deliberately outside any git repository.
 		var stderr bytes.Buffer
 		cmd.Stderr = &stderr
@@ -114,6 +115,23 @@ func TestCtxCLILauncherFingerprint(t *testing.T) {
 	if got := run("--version", 1); got != first {
 		t.Fatalf("unchanged tree rebuilt: %q != %q", got, first)
 	}
+	// A PATH entry such as ~/.local/bin/orch links to the launcher, possibly
+	// through a relative link: it must find the skill, not the link's directory.
+	links := filepath.Join(root, "links")
+	if err := os.MkdirAll(links, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(path, filepath.Join(links, "abs")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("abs", filepath.Join(links, "orch")); err != nil {
+		t.Fatal(err)
+	}
+	launch = filepath.Join(links, "orch")
+	if got := run("version", 1); got != first {
+		t.Fatalf("launcher through a symlink: %q != %q", got, first)
+	}
+	launch = path
 	policy := filepath.Join(tool, "pi_ctx_only.ts")
 	st, err := os.Stat(policy)
 	if err != nil {

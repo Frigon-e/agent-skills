@@ -370,10 +370,12 @@ Headless Claude uses `claude -p`, Read/Grep/Glob, non-interactive `dontAsk`
 permissions and disabled slash commands. The existing strict empty server
 configuration excludes ambient servers; the gate runs no ctx server and
 loads no generated adapter. Tool-less tasks still have no tools. Inside
-Herdr the gate uses `herdr agent start --kind claude` and a dedicated
-session/transcript.
+Herdr the gate starts Claude from a pane launcher (`sh <launcher>`, which
+execs `claude`) with a dedicated session/transcript, then waits for the
+agent's turn to begin.
 
-`--ctx-tool on|off` defaults to on. `CtxCLIFor` supplies a PATH shim,
+`--ctx-tool on|off` defaults to on. `CtxCLIFor` supplies a PATH shim (headless
+passes only; a pane uses its own PATH),
 `ORCH_CTX_ROOT`, harness-specific tools and a notice placed first in the
 shared prefix. Agents call `orch ctx find|sym|text|batch` through the shell.
 The notice bytes are shared across passes of a class; dossiers remain in the
