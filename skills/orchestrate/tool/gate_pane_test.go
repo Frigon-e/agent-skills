@@ -720,6 +720,35 @@ func TestPruneGateKeepsNewestRunsAndRecentOnes(t *testing.T) {
 	}
 }
 
+func TestPruneGateKeepsRunningGates(t *testing.T) {
+	root := t.TempDir()
+	now := time.Unix(1_800_000_000, 0)
+	mk := func(name string, json bool, mtime time.Time) string {
+		d := filepath.Join(root, "gate", name)
+		os.MkdirAll(filepath.Join(d, "sessions", "s"), 0o755)
+		os.MkdirAll(filepath.Join(d, "passes"), 0o755)
+		if json {
+			os.WriteFile(filepath.Join(d, "gate.json"), []byte(fmt.Sprintf(`{"at":%d}`, now.Add(-time.Hour).Unix())), 0o644)
+		}
+		os.Chtimes(d, mtime, mtime)
+		return d
+	}
+	running := mk("running", false, now.Add(-time.Minute))
+	abandoned := mk("abandoned", false, now.Add(-gateKeepDays*24*time.Hour-time.Second))
+	mk("cur", false, now)
+	for i := 0; i < gateKeepRuns; i++ {
+		mk(fmt.Sprintf("done%d", i), true, now)
+	}
+	pruneGate(root, "cur", now)
+
+	if !exists(filepath.Join(running, "sessions")) || !exists(filepath.Join(running, "passes")) {
+		t.Error("a gate that is still running was pruned")
+	}
+	if exists(filepath.Join(abandoned, "sessions")) {
+		t.Error("a gate without gate.json, stale beyond the retention window, kept its sessions")
+	}
+}
+
 func TestGatePaneLoadsHerdrExtensionOnlyWhenItExists(t *testing.T) {
 	h := setup(t)
 	h.gateRepo(1)

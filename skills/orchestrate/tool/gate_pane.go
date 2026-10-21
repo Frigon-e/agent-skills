@@ -408,6 +408,8 @@ func keptFiles(gdir, name string, pane bool) string {
 // than gateKeepDays lose them, and so does every run beyond the newest
 // gateKeepRuns (the run being started counts as the newest). gate.json,
 // report.md and questions/ are never touched. keep is the current run's hash.
+// A run with no gate.json is still running: it is skipped until its directory
+// has not changed for gateKeepDays.
 func pruneGate(root, keep string, now time.Time) {
 	entries, err := os.ReadDir(filepath.Join(root, "gate"))
 	if err != nil {
@@ -426,6 +428,8 @@ func pruneGate(root, keep string, now time.Time) {
 		var rec gateRecord
 		if b, err := os.ReadFile(filepath.Join(dir, "gate.json")); err == nil {
 			_ = json.Unmarshal(b, &rec)
+		} else if info, err := e.Info(); err == nil && now.Sub(info.ModTime()) <= gateKeepDays*24*time.Hour {
+			continue
 		}
 		runs = append(runs, run{dir, rec.At})
 	}
