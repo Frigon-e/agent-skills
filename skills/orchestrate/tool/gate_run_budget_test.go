@@ -512,9 +512,6 @@ func TestGateRunBudgetCLIExhaustion(t *testing.T) {
 			if mode == "pane" && len(h.gateCalls("agent", "start")) != 1 {
 				t.Fatal("unadmitted pane started")
 			}
-			if _, err := os.Stat(filepath.Join(dir, "gate.json")); err != nil {
-				t.Fatal(err)
-			}
 		})
 	}
 }

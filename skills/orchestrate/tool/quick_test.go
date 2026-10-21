@@ -185,6 +185,9 @@ func TestQuickIsNotJudgedTwice(t *testing.T) {
 	os.WriteFile(os.Getenv("ORCH_CONFIG"), []byte("triage_mode = \"enforce\"\nweak_models = [\"flash\"]\n"+cfg), 0o644)
 	h.dec.set(200, decReply(settledAnswers))
 	wantContains(t, h.must("quick", "q1", "--owns", "slug.py", quickRequest), "spawned lead-q1 (pi flash)")
+	if n := h.dec.count(); n != 1 {
+		t.Fatalf("quick with enforced spawn triage asked %d times, want once", n)
+	}
 }
 
 // Files the repo's .gitignore covers are build output, not the lead's work:

@@ -105,6 +105,7 @@ func runCtxReminderStubbed(t *testing.T, onPath []string, stubs map[string]strin
 	}
 	script := `
 import ext from ` + string(mustJSON(t, ext)) + `;
+if (process.env.ORCH_TEST_CWD) process.chdir(process.env.ORCH_TEST_CWD);
 const handlers = {};
 ext({ on: (name, fn) => {
   if (name === "tool_result" && process.env.NO_RESULT_HOOK) throw new Error("unsupported event");
@@ -705,6 +706,90 @@ func TestCtxReminderGuardBuiltinSearch(t *testing.T) {
 	})
 }
 
+func TestCtxReminderBuiltinRepositoryBoundary(t *testing.T) {
+	root := t.TempDir()
+	repo := filepath.Join(root, "repo")
+	nested := filepath.Join(repo, "nested")
+	if err := os.MkdirAll(nested, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command("git", "init", "-q", repo).CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v\n%s", err, out)
+	}
+	if err := os.Symlink(root, filepath.Join(repo, "outside-link")); err != nil {
+		t.Fatal(err)
+	}
+	insideAlias := filepath.Join(root, "inside-link")
+	if err := os.Symlink(repo, insideAlias); err != nil {
+		t.Fatal(err)
+	}
+	cases := []reminderCase{
+		{Name: "missing path", Tool: "grep", Input: map[string]any{"pattern": "Gateway"}, Blocks: "builtin-grep"},
+		{Name: "relative inside", Tool: "grep", Input: map[string]any{"pattern": "Gateway", "path": "../inside"}, Blocks: "builtin-grep"},
+		{Name: "relative outside", Tool: "grep", Input: map[string]any{"pattern": "Gateway", "path": "../../outside"}},
+		{Name: "find relative outside", Tool: "find", Input: map[string]any{"pattern": "*.go", "path": "../../outside"}},
+		{Name: "symlink outside", Tool: "grep", Input: map[string]any{"pattern": "Gateway", "path": "../outside-link"}},
+		{Name: "symlink inside", Tool: "grep", Input: map[string]any{"pattern": "Gateway", "path": insideAlias}, Blocks: "builtin-grep"},
+	}
+	checkReminder(t, runCtxReminder(t, []string{"ORCH_TEST_CWD=" + nested}, cases), cases)
+	for i := range cases {
+		cases[i].Blocks = ""
+	}
+	checkReminder(t, runCtxReminder(t, []string{"ORCH_TEST_CWD=" + root}, cases), cases)
+}
+
+func TestCtxReminderBuiltinHintsPreserveShellArguments(t *testing.T) {
+	cases := []struct {
+		pattern string
+		path    string
+		want    []string
+	}{
+		{"$(printf EXPANDED)", "", []string{"ctx", "batch", "-q", "text:'$(printf EXPANDED)'"}},
+		{"`printf EXPANDED`", "", []string{"ctx", "batch", "-q", "text:'`printf EXPANDED`'"}},
+		{"it's $HOME", "", []string{"ctx", "text", "--", "it's $HOME"}},
+		{"a\"b\\c", "", []string{"ctx", "batch", "-q", "text:'a\"b\\c'"}},
+		{"/api/users", "dir space'\"\\$HOME`printf EXPANDED`", []string{"ctx", "text", "--glob", "dir space'\"\\$HOME`printf EXPANDED`/**", "--", "/api/users"}},
+		{"refund.*`printf EXPANDED`", "", []string{"ctx", "batch", "-q", "find:Code that refund `printf EXPANDED`"}},
+		{"--bad'query", "", []string{"ctx", "text", "--", "--bad'query"}},
+		{"--scoped'query", "dir space", []string{"ctx", "text", "--glob", "dir space/**", "--", "--scoped'query"}},
+	}
+	inputs := make([]reminderCase, len(cases))
+	for i, c := range cases {
+		inputs[i] = reminderCase{Name: c.pattern, Tool: "grep", Input: map[string]any{"pattern": c.pattern, "path": c.path}, Blocks: "builtin-grep"}
+	}
+	got := runCtxReminder(t, []string{"ORCH_TOOL_GUARD_HINT=pattern"}, inputs)
+	rgPath, err := exec.LookPath("rg")
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := newCtxHarness(t)
+	t.Setenv("ORCH_RG", rgPath)
+	if err := os.MkdirAll(filepath.Join(c.repo, "dir space"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFiles(t, c.repo, map[string]string{"dir space/dash.txt": "--bad'query\n--scoped'query\n"})
+	for _, tc := range cases {
+		var hint string
+		for _, line := range strings.Split(got.Out[tc.pattern].Block, "\n") {
+			if strings.HasPrefix(line, "Use ") {
+				hint = strings.TrimSuffix(strings.TrimPrefix(line, "Use "), ".")
+			}
+		}
+		if hint == "" {
+			t.Fatalf("no generated hint for %q", tc.pattern)
+		}
+		cmd := exec.Command("/bin/sh", "-c", `orch() { printf '%s\000' "$@"; }; `+hint)
+		out, err := cmd.CombinedOutput()
+		want := strings.Join(tc.want, "\x00") + "\x00"
+		if err != nil || string(out) != want {
+			t.Errorf("hint for %q at %q produced %q, want %q: %v", tc.pattern, tc.path, out, want, err)
+		} else if strings.HasPrefix(tc.pattern, "--") {
+			argv := strings.Split(strings.TrimSuffix(string(out), "\x00"), "\x00")
+			wantContains(t, c.must(argv...), "path: dir space/dash.txt")
+		}
+	}
+}
+
 // Without orch on PATH every rule still blocks, pointing at the built-ins, and
 // no note is appended because there is nothing to name. rg is the exception:
 // with no orch it is the preferred grep, so it is never blocked.
@@ -921,7 +1006,7 @@ func TestCtxReminderPatternHint(t *testing.T) {
 		{`grep -rn Normalize src`, `Use orch ctx sym Normalize --refs 3.`},
 		{`rg "cannot find user" internal/`, `Use orch ctx batch -q "text:'cannot find user' glob=internal/**".`},
 		{`grep -rn 'a$b' .`, `Use orch ctx batch -q "text:'a\$b'".`},
-		{`grep -rn "it's here" lib`, `Use orch ctx text 'it'\''s here' --glob 'lib/**'.`},
+		{`grep -rn "it's here" lib`, `Use orch ctx text --glob 'lib/**' -- 'it'\''s here'.`},
 	}
 	var cases []reminderCase
 	kinds := map[string]string{}

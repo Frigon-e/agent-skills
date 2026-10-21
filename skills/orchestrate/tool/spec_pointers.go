@@ -23,6 +23,9 @@ func checkPointer(repo, ptr string) (string, error) {
 	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 		return "", fmt.Errorf("pointer %s is outside the repo", ptr)
 	}
+	if info, err := os.Stat(full); err == nil && !info.Mode().IsRegular() {
+		return "", fmt.Errorf("pointer %s is not a regular file", ptr)
+	}
 	b, err := os.ReadFile(full)
 	if err != nil {
 		if m != nil && m[4] == "" {

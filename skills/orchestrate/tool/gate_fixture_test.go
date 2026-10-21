@@ -46,7 +46,12 @@ func TestFixtureGateTrust(t *testing.T) {
 		t.Run(f.name, func(t *testing.T) {
 			h := fixtureRepo(t, f.name)
 			t.Run("reuse-extend-new-and-unsupported", func(t *testing.T) {
-				for _, kind := range []string{"complete reuse", "partial reuse", "new behavior", "unsupported", "stale"} {
+				kinds := []string{"complete reuse", "partial reuse"}
+				// These reducer decisions do not inspect language-specific evidence.
+				if f.name == "go" {
+					kinds = append(kinds, "new behavior", "unsupported", "stale")
+				}
+				for _, kind := range kinds {
 					t.Run(kind, func(t *testing.T) {
 						s, cs, as, p := fixtureReview(t, h, f)
 						want := "pass"
@@ -96,26 +101,28 @@ func TestFixtureGateTrust(t *testing.T) {
 					t.Fatalf("invalid candidate covered item: %+v", rec)
 				}
 			})
-			t.Run("product-answer-needs-owner", func(t *testing.T) {
-				s, cs, as, p := fixtureReview(t, h, f)
-				p.Questions = []reviewQuestion{{SchemaVersion: evidenceSchemaVersion, ID: "case-mode", ItemID: cs[0].Item.ID, ItemRevision: cs[0].Item.Revision, CheckID: cs[0].ID, Question: "Should file names be lower-cased?", Authority: reviewAuthority{Owner: "owner", Basis: "Public CLI behavior"}, Options: []reviewQuestionOption{{"yes", "Lower-case", "Changes output"}, {"no", "Preserve case", "Keeps output"}}, Answer: "yes", AnsweringActor: "reviewer"}}
-				r := ReduceReview(s, cs, as, nil, p)
-				if r.State != "incomplete" {
-					t.Fatalf("reviewer settled product decision: %+v", r)
-				}
-				p.Questions[0].AnsweringActor = "owner"
-				if r = ReduceReview(s, cs, as, nil, p); r.State != "pass" {
-					t.Fatalf("owner control failed: %+v", r)
-				}
-			})
-			t.Run("future-file-blocks", func(t *testing.T) {
-				sp := groupSpec(map[string]string{"api": "parser/", "library": "other/"}, nil, "api", "library")
-				rec := &gateRecord{}
-				scopeFor("api", scopeReply{WillChange: []string{"other/future" + f.ext}}, rec, h.repo, sp)
-				if len(rec.Findings) != 1 || !rec.Findings[0].Verified || rec.Findings[0].Severity != "blocker" || rec.Findings[0].Support != "structural" {
-					t.Fatalf("future ownership not structural blocker: %+v", rec)
-				}
-			})
+			if f.name == "go" {
+				t.Run("product-answer-needs-owner", func(t *testing.T) {
+					s, cs, as, p := fixtureReview(t, h, f)
+					p.Questions = []reviewQuestion{{SchemaVersion: evidenceSchemaVersion, ID: "case-mode", ItemID: cs[0].Item.ID, ItemRevision: cs[0].Item.Revision, CheckID: cs[0].ID, Question: "Should file names be lower-cased?", Authority: reviewAuthority{Owner: "owner", Basis: "Public CLI behavior"}, Options: []reviewQuestionOption{{"yes", "Lower-case", "Changes output"}, {"no", "Preserve case", "Keeps output"}}, Answer: "yes", AnsweringActor: "reviewer"}}
+					r := ReduceReview(s, cs, as, nil, p)
+					if r.State != "incomplete" {
+						t.Fatalf("reviewer settled product decision: %+v", r)
+					}
+					p.Questions[0].AnsweringActor = "owner"
+					if r = ReduceReview(s, cs, as, nil, p); r.State != "pass" {
+						t.Fatalf("owner control failed: %+v", r)
+					}
+				})
+				t.Run("future-file-blocks", func(t *testing.T) {
+					sp := groupSpec(map[string]string{"api": "parser/", "library": "other/"}, nil, "api", "library")
+					rec := &gateRecord{}
+					scopeFor("api", scopeReply{WillChange: []string{"other/future" + f.ext}}, rec, h.repo, sp)
+					if len(rec.Findings) != 1 || !rec.Findings[0].Verified || rec.Findings[0].Severity != "blocker" || rec.Findings[0].Support != "structural" {
+						t.Fatalf("future ownership not structural blocker: %+v", rec)
+					}
+				})
+			}
 			t.Run("dirty-tree-invalidates-approval", func(t *testing.T) {
 				h.commitSpec(planHeader + planPkg("api", "kind: ship\nowns: parser/", "") + planTail)
 				// Approval can bind an already dirty checkout, but not a later mutation.

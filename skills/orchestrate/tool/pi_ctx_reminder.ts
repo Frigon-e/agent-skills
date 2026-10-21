@@ -12,14 +12,14 @@
 // refuse them the same way while orch answers; ls only lists a directory and
 // stays, and with no usable orch the built-in searches are the fallback, so
 // nothing is blocked and nothing is appended. orch ctx is pinned to a git
-// repository root, so a built-in search that names an absolute path outside the
+// repository root, so a built-in search that names a path outside the
 // session's repository has no replacement and is allowed. A grep filtering
 // another command's output and plain fd are not blocked; the note is appended
 // to their result instead, and to a built-in search that does run.
 import type { ExtensionAPI, ToolCallEvent, ToolResultEvent } from "@earendil-works/pi-coding-agent";
 import { spawnSync } from "node:child_process";
-import { accessSync, appendFileSync, constants, statSync } from "node:fs";
-import { delimiter, dirname, isAbsolute, join, resolve } from "node:path";
+import { accessSync, appendFileSync, constants, realpathSync, statSync } from "node:fs";
+import { delimiter, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 const marker = "orch ctx reminder";
 const guardMarker = "orch tool guard";
@@ -566,8 +566,9 @@ function patternHint(segment: segment): string {
 	const dir = searchDir(name === "git" ? args.slice(1) : args);
 	const words = conceptWords(pattern);
 	if (kind === "concept" && words) {
+		const phrase = `Code that ${words}`.replaceAll(/([\\$`"])/g, "\\$1");
 		return (
-			`Use orch ctx find "Code that ${words.replaceAll('"', "'")}" (a broader search; use it when no name or string is known).`
+			`Use orch ctx find "${phrase}" (a broader search; use it when no name or string is known).`
 		);
 	}
 	return textHint(pattern, dir);
@@ -582,8 +583,8 @@ function textHint(pattern: string, dir: string): string {
 		return `Use orch ctx batch -q "text:'${escaped}'${dir ? ` glob=${dir}/**` : ""}".`;
 	}
 	return dir
-		? `Use orch ctx text ${shellQuoted(pattern)} --glob ${shellQuoted(`${dir}/**`)}.`
-		: `Use orch ctx text ${shellQuoted(pattern)}.`;
+		? `Use orch ctx text --glob ${shellQuoted(`${dir}/**`)} -- ${shellQuoted(pattern)}.`
+		: `Use orch ctx text -- ${shellQuoted(pattern)}.`;
 }
 
 // The root of the git repository the session runs in, found by walking up from
@@ -598,7 +599,7 @@ function repositoryRoot(): string {
 	for (;;) {
 		try {
 			statSync(join(dir, ".git"));
-			repoRoot = dir;
+			repoRoot = realpathSync(dir);
 			break;
 		} catch {
 			// No repository here; keep walking up.
@@ -610,20 +611,19 @@ function repositoryRoot(): string {
 	return repoRoot;
 }
 
-// True when the path a built-in search names is inside the session's
-// repository. orch ctx is pinned to a git repository root, so a path outside it
-// has no ctx answer and the built-in tool is the only way in. A relative or
-// missing path counts as inside; with no repository at all nothing is inside, so
-// only the relative form is blocked and a block never names a tool that cannot
-// answer there.
+// Resolve relative and missing paths from the session directory. orch ctx is
+// pinned to a git repository root, so searches outside it have no ctx answer.
 function insideRepository(path: string): boolean {
-	const target = path.trim();
-	if (!target || !isAbsolute(target)) return true;
 	const root = repositoryRoot();
 	if (!root) return false;
-	const resolved = resolve(target);
-	const base = root.endsWith("/") ? root : `${root}/`;
-	return resolved === root || resolved.startsWith(base);
+	let resolved = resolve(path.trim() || ".");
+	try {
+		resolved = realpathSync(resolved);
+	} catch {
+		// Missing targets keep their lexical scope.
+	}
+	const rel = relative(root, resolved);
+	return rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel);
 }
 
 // The directory a built-in search starts from, scoped the way the shell hint
@@ -655,11 +655,10 @@ function builtinHint(kind: searchKind, pattern: string, dir: string): string {
 	if (kind === "symbol") return `Use orch ctx batch -q "symbol:${pattern} refs=3".`;
 	const words = conceptWords(pattern);
 	if (kind === "concept" && words) {
-		return `Use orch ctx batch -q "find:Code that ${words.replaceAll('"', "'")}".`;
+		const query = `find:Code that ${words}`.replaceAll(/([\\$`"])/g, "\\$1");
+		return `Use orch ctx batch -q "${query}".`;
 	}
-	return dir
-		? `Use orch ctx batch -q "text:${shellQuoted(pattern)} glob=${dir}/**".`
-		: `Use orch ctx batch -q "text:${shellQuoted(pattern)}".`;
+	return textHint(pattern, dir);
 }
 
 // The built-in grep's pattern picks one of the same three kinds as the shell

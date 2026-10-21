@@ -646,7 +646,11 @@ func TestCtxErrorsAreStructuredOnStdoutWithExitCode2(t *testing.T) {
 func TestCtxHomeShowsLiveStateAndHelpAndVersionAreCheap(t *testing.T) {
 	c := newCtxHarness(t)
 	home := c.must("ctx")
-	wantContains(t, home, "repo: ", "head: "+sha7(c.head), "index: fresh ("+sha7(c.head)+")", "tools: ", "help[5]:", "orch ctx text <pattern>")
+	info := ctxTestObject(t, home)
+	if info["repo"] != evalOr(c.repo) || info["head"] != sha7(c.head) || info["index"] != "fresh ("+sha7(c.head)+")" || info["tools"] == "" || len(info["help"].([]any)) != 5 {
+		t.Fatalf("home state: %#v", info)
+	}
+	wantContains(t, ctxTestStrings(t, home), "orch ctx text <pattern>")
 	if c.log(c.jbCalls) != "" && strings.Contains(c.log(c.jbCalls), "index") {
 		t.Errorf("the home view refreshed the index: %s", c.log(c.jbCalls))
 	}

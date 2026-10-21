@@ -14,8 +14,28 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
+
+// Cancel the whole runner/check process group, including children that keep
+// output pipes open after their parent exits.
+func processCommandContext(ctx context.Context, name string, args ...string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		if cmd.Process == nil {
+			return os.ErrProcessDone
+		}
+		err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		if errors.Is(err, syscall.ESRCH) {
+			return os.ErrProcessDone
+		}
+		return err
+	}
+	cmd.WaitDelay = time.Second
+	return cmd
+}
 
 var modelRoles = []string{"gate", "spec_queries", "shadow_flash", "decider", "gate_adjudicator", "question_classifier"}
 
@@ -436,7 +456,8 @@ func runClaude(repo string, p profile, pass gatePass, session string) (string, e
 	ctx, cancel := context.WithTimeout(passContext(pass), gateTimeout)
 	defer cancel()
 	args := append([]string{"-p", "--output-format", "stream-json", "--verbose"}, claudePassArgs(p, pass)...)
-	cmd := exec.CommandContext(ctx, runnerBinary("claude"), append(args, pass.prompt)...)
+	cmd := processCommandContext(ctx, runnerBinary("claude"), append(args, pass.prompt)...)
+	defer cmd.Cancel()
 	cmd.Dir = repo
 	cmd.Env = agentEnv(nil, pass.cli.Env)
 	// Saving output as it arrives also makes the existing stall detector usable.

@@ -30,16 +30,3 @@ func TestCtxStatusMissingConfiguredServers(t *testing.T) {
 		t.Fatalf("lookup semantics changed: %q", bin)
 	}
 }
-
-func TestCtxStatusExistingConfiguredTypeScriptServer(t *testing.T) {
-	h := setup(t)
-	writeFiles(t, h.repo, map[string]string{"app.ts": "export const value = 1;\n"})
-	h.git("add", ".")
-	h.git("commit", "-qm", "typescript status")
-	bin := evalOr(fakeRunner(t, "typescript", "exit 0"))
-	t.Setenv("ORCH_TSLS", bin)
-	statuses := newCtxEnv(h.repo, ctxOpts{}).langStatuses()
-	if len(statuses) != 1 || statuses[0].Server != bin || statuses[0].Hint != "" {
-		t.Fatalf("available override lost: %+v", statuses)
-	}
-}

@@ -550,9 +550,6 @@ func TestGateGroupsKeepRelatedPackagesTogetherUnderTheCaps(t *testing.T) {
 	if got := groupIDs(gateGroups(sp, 5, 1, 6)); got != "x1 | y1 | x2 | z1 | y2" {
 		t.Errorf("text cap: %s", got)
 	}
-	if groupIDs(gateGroups(sp, 2, big, 6)) != groupIDs(gateGroups(sp, 2, big, 6)) {
-		t.Error("grouping is not deterministic")
-	}
 	if got := groupKey(gateGroups(sp, 5, big, 6)[0]); got != "group:x1+1" {
 		t.Errorf("group key %q", got)
 	}

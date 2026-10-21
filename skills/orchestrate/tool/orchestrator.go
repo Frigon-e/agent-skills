@@ -599,27 +599,31 @@ func cmdSend(a *app, args []string) error {
 	if err := os.MkdirAll(filepath.Join(inbox, "handled"), 0o755); err != nil {
 		return err
 	}
-	seq := 0
-	for _, pattern := range []string{"*.msg", "handled/*.msg"} {
-		found, _ := filepath.Glob(filepath.Join(inbox, pattern))
-		for _, p := range found {
-			if n, err := strconv.Atoi(strings.TrimSuffix(filepath.Base(p), ".msg")); err == nil && n > seq {
-				seq = n
+	var name string
+	if err := withFlock(filepath.Join(inbox, ".guard"), func() error {
+		seq := 0
+		for _, pattern := range []string{"*.msg", "handled/*.msg"} {
+			found, _ := filepath.Glob(filepath.Join(inbox, pattern))
+			for _, p := range found {
+				if n, err := strconv.Atoi(strings.TrimSuffix(filepath.Base(p), ".msg")); err == nil && n > seq {
+					seq = n
+				}
 			}
 		}
-	}
-	name := fmt.Sprintf("%03d", seq+1)
-	header := "from: orchestrator\nat: " + a.now().Format(time.RFC3339) + "\n"
-	if *resolve != "" {
-		header += "re: " + *resolve + "\n"
-	}
-	if err := writeAtomic(filepath.Join(inbox, name+".msg"), []byte(header+"\n"+strings.TrimRight(body, "\n")+"\n")); err != nil {
-		return err
-	}
-	if *resolve != "" {
-		if err := a.appendStatus(dir, "resolved", "answered in message "+name, *resolve, "orch"); err != nil {
+		name = fmt.Sprintf("%03d", seq+1)
+		header := "from: orchestrator\nat: " + a.now().Format(time.RFC3339) + "\n"
+		if *resolve != "" {
+			header += "re: " + *resolve + "\n"
+		}
+		if err := writeAtomic(filepath.Join(inbox, name+".msg"), []byte(header+"\n"+strings.TrimRight(body, "\n")+"\n")); err != nil {
 			return err
 		}
+		if *resolve != "" {
+			return a.appendStatus(dir, "resolved", "answered in message "+name, *resolve, "orch")
+		}
+		return nil
+	}); err != nil {
+		return err
 	}
 	status := ""
 	if l.ClosedAt == 0 {

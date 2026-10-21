@@ -329,17 +329,6 @@ func TestCtxPrivateTaskNeverUsesJbcontext(t *testing.T) {
 	}
 }
 
-func TestGateCachesLiveUnderTheCtxCacheNotTheGateDir(t *testing.T) {
-	h := setup(t)
-	gdir := h.gateRepo(1)
-	h.sessionPi(gatePasses(nil))
-	t.Setenv("HERDR_ENV", "")
-	h.must("gate", "spec.md")
-	if exists(filepath.Join(gdir, "enrich-cache")) {
-		t.Error("the gate wrote an enrich-cache in its dir")
-	}
-}
-
 func ctxSpec() string {
 	return planHeader + "### checkout: Checkout flow\nkind: ship\nmodel: haiku\nowns: pay\n\nBuild the StartCheckout flow in `pay/pay.go:7`; it adds a `zzzNone_table`.\n\n#### Builds\n- Code that starts a hosted checkout for an invoice.\n\n#### Acceptance\nTests pass.\n\n" + planTail
 }

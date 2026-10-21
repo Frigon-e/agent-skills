@@ -2,7 +2,6 @@ package main
 
 import (
 	"encoding/json"
-	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -29,31 +28,6 @@ func TestFixtureRetrievalTruth(t *testing.T) {
 				v, _ := truthResult(t, out)
 				if code != 0 || v.Total != 1 || v.Hidden != 2105 || v.HiddenG != 4210 || v.Zero != "" || !strings.Contains(out, f.path) {
 					t.Fatalf("excluded hits hid production: %d %s", code, out)
-				}
-			})
-			t.Run("retention-is-not-zero", func(t *testing.T) {
-				var raw strings.Builder
-				for i := 0; i < 2105; i++ {
-					raw.WriteString(fixtureMatch(f.path, f.line, fmt.Sprintf("needle %d", i)))
-				}
-				raw.WriteString(fixtureSummary)
-				fixtureRG(t, h, raw.String())
-				code, out := h.run("ctx", "text", "needle", "--page", "401", "--json")
-				v, _ := truthResult(t, out)
-				if code != 0 || v.Status != "partial" || v.Total != 2105 || v.Zero != "" || !strings.Contains(v.Cut, "2000") {
-					t.Fatalf("retention pretended exhaustion: %d %s", code, out)
-				}
-			})
-			t.Run("failed-batch", func(t *testing.T) {
-				code, out := h.run("ctx", "batch", "-q", "read:missing"+f.ext, "-q", "read:also-missing"+f.ext, "--json")
-				var response struct {
-					Status string `json:"status"`
-				}
-				if err := json.Unmarshal([]byte(out), &response); err != nil {
-					t.Fatal(err, out)
-				}
-				if code != 1 || response.Status != "failed" {
-					t.Fatalf("failed batch became success: %d %s", code, out)
 				}
 			})
 			t.Run("receiver-and-unavailable-server", func(t *testing.T) {

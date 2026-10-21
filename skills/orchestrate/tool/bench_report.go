@@ -1114,7 +1114,10 @@ func cmdBenchReport(a *app, command string, args []string) error {
 	}
 	key, e := benchKeyLoad(suite, *keyN)
 	if e != nil {
-		keys, _ := benchKeys(suite)
+		keys, keyErr := benchKeys(suite)
+		if keyErr != nil {
+			return keyErr
+		}
 		if *keyN != "" || len(keys) > 0 {
 			return e
 		}

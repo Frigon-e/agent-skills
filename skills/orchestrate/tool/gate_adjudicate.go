@@ -622,6 +622,13 @@ func adjudicationSource(repo string, e evidenceRecord) (string, error) {
 	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 		return "", fmt.Errorf("evidence escapes repository")
 	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return "", err
+	}
+	if !info.Mode().IsRegular() {
+		return "", fmt.Errorf("evidence %s is not a regular file", e.Path)
+	}
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		return "", err

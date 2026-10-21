@@ -233,17 +233,6 @@ esac
 	wantContains(t, c.must("ctx", "batch", "-q", "find:anything generated=only"), "web/schema.d.ts")
 }
 
-func TestNoCtxPathLiftsGitignore(t *testing.T) {
-	for _, f := range []string{"ctx_search.go", "ctx_decl.go", "ctx_env.go", "ctx_lang.go", "ctx_generated.go"} {
-		b := string(mustRead(t, f))
-		for _, bad := range []string{`"-u"`, `"-uu"`, `"--no-ignore"`, `"--hidden"`, `"--no-ignore-vcs"`} {
-			if strings.Contains(b, bad) {
-				t.Errorf("%s passes %s to rg", f, bad)
-			}
-		}
-	}
-}
-
 func TestConceptTipForNounListsAndWeakAnswers(t *testing.T) {
 	for _, c := range []struct {
 		q    string

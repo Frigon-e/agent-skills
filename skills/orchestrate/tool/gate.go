@@ -764,7 +764,8 @@ func runPi(repo, model string, p gatePass, sessionDir, cache string) (string, er
 	if p.effort != "" {
 		args = append(args, "--thinking", p.effort)
 	}
-	cmd := exec.CommandContext(ctx, envOr("ORCH_PI", "pi"), append(args, "--model", model, p.prompt)...)
+	cmd := processCommandContext(ctx, envOr("ORCH_PI", "pi"), append(args, "--model", model, p.prompt)...)
+	defer cmd.Cancel()
 	cmd.Dir = repo
 	cmd.Env = agentEnv(piEnv(cache), p.cli.Env)
 	var stderr bytes.Buffer
@@ -1367,7 +1368,13 @@ func cmdGate(a *app, args []string) (retErr error) {
 				rec.Notes = append(rec.Notes, r.unavailable().Error())
 			}
 		}
-		_, rec.Shadow = sr.run()
+		_, summary, shadowErr := sr.run()
+		rec.Shadow = summary
+		if shadowErr != nil {
+			diagnostic := "shadow persistence: " + shadowErr.Error()
+			rec.Shadow += "; " + diagnostic
+			rec.Notes = append(rec.Notes, diagnostic)
+		}
 		if shadowPool != nil {
 			shadowPool.close()
 		}

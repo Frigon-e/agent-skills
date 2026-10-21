@@ -567,8 +567,8 @@ def text_hint(pattern, where):
         glob = f" glob={where}/**" if where else ""
         return f'Use orch ctx batch -q "text:\'{escaped}\'{glob}".'
     if where:
-        return f"Use orch ctx text {shell_quoted(pattern)} --glob {shell_quoted(where + '/**')}."
-    return f"Use orch ctx text {shell_quoted(pattern)}."
+        return f"Use orch ctx text --glob {shell_quoted(where + '/**')} -- {shell_quoted(pattern)}."
+    return f"Use orch ctx text -- {shell_quoted(pattern)}."
 
 
 def concept_words(pattern):
@@ -593,9 +593,9 @@ def pattern_hint(segment):
         return f"Use orch ctx sym {pattern} --refs 3."
     words = concept_words(pattern)
     if kind == "concept" and words:
-        phrase = words.replace('"', "'")
+        phrase = re.sub(r'([\\$`"])', r"\\\1", "Code that " + words)
         return (
-            f'Use orch ctx find "Code that {phrase}" '
+            f'Use orch ctx find "{phrase}" '
             "(a broader search; use it when no name or string is known)."
         )
     return text_hint(pattern, search_dir(args))
@@ -606,12 +606,12 @@ def repository_root(start=None):
 
     orch ctx is pinned to a git repository root, so a path outside it has no ctx
     answer. A worktree root has a .git file rather than a directory, so any entry
-    counts. A lexical path keeps the decision the same as the pi guard's.
+    counts. Resolve links so aliases share the same repository boundary.
     """
     directory = os.path.abspath(start or os.getcwd())
     while True:
         if os.path.exists(os.path.join(directory, ".git")):
-            return directory
+            return os.path.realpath(directory)
         parent = os.path.dirname(directory)
         if parent == directory:
             return ""
@@ -621,17 +621,13 @@ def repository_root(start=None):
 def inside_repository(path):
     """True when a built-in search's target path is inside the repository.
 
-    A relative or missing path counts as inside; with no repository at all only
-    the relative form is blocked, so a block never names a tool that cannot
-    answer there.
+    Resolve relative and missing paths from the session directory. Searches
+    outside its git repository have no orch ctx replacement.
     """
-    target = (path or "").strip()
-    if not target or not os.path.isabs(target):
-        return True
     root = repository_root()
     if not root:
         return False
-    resolved = os.path.abspath(target)
+    resolved = os.path.realpath((path or "").strip() or ".")
     return resolved == root or resolved.startswith(root.rstrip(os.sep) + os.sep)
 
 
@@ -655,12 +651,9 @@ def builtin_hint(kind, pattern, path):
         return f'Use orch ctx batch -q "symbol:{pattern} refs=3".'
     words = concept_words(pattern)
     if kind == "concept" and words:
-        phrase = words.replace('"', "'")
-        return f'Use orch ctx batch -q "find:Code that {phrase}".'
-    where = builtin_dir(path)
-    if where:
-        return f'Use orch ctx batch -q "text:{shell_quoted(pattern)} glob={where}/**".'
-    return f'Use orch ctx batch -q "text:{shell_quoted(pattern)}".'
+        query = re.sub(r'([\\$`"])', r"\\\1", "find:Code that " + words)
+        return f'Use orch ctx batch -q "{query}".'
+    return text_hint(pattern, builtin_dir(path))
 
 
 def builtin_grep_hint(pattern, tool_input):

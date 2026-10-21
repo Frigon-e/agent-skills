@@ -169,7 +169,7 @@ TAILORED = [
         "Use orch ctx batch -q \"text:'cannot find user' glob=internal/**\".",
     ),
     ("grep -rn 'a$b' .", "Use orch ctx batch -q \"text:'a\\$b'\"."),
-    ("grep -rn \"it's here\" lib", "Use orch ctx text 'it'\\''s here' --glob 'lib/**'."),
+    ("grep -rn \"it's here\" lib", "Use orch ctx text --glob 'lib/**' -- 'it'\\''s here'."),
 ]
 
 
@@ -191,7 +191,7 @@ def repository_root(start):
 REPO_ROOT = repository_root(ROOT)
 
 
-def builtin_hook(checker, tool, pattern, path, situation, extra=None):
+def builtin_hook(checker, tool, pattern, path, situation, extra=None, cwd=None):
     """One deny-builtin-search hook run, the way Claude Code drives it."""
     tool_input = {"pattern": pattern}
     if path:
@@ -205,7 +205,7 @@ def builtin_hook(checker, tool, pattern, path, situation, extra=None):
         text=True,
         capture_output=True,
         env=checker.env(situation, extra),
-        cwd=REPO_ROOT or ROOT,
+        cwd=cwd or REPO_ROOT or ROOT,
     )
 
 
@@ -434,6 +434,54 @@ def check_builtin_search(checker, workdir, cases):
             done = builtin_hook(checker, tool, sample, outside, "orch")
             if done.returncode != 0 or done.stderr.strip():
                 failures.append(f"{tool} {outside}: outside the repository but blocked: {done.stderr.strip()}")
+
+    # Relative paths use the session directory, including a session outside git.
+    repo = os.path.join(workdir, "boundary-repo")
+    nested = os.path.join(repo, "nested")
+    os.makedirs(nested)
+    subprocess.run(["git", "init", "-q", repo], check=True, capture_output=True)
+    os.symlink(workdir, os.path.join(repo, "outside-link"))
+    inside_alias = os.path.join(workdir, "inside-link")
+    os.symlink(repo, inside_alias)
+    for cwd, target, want in (
+        (nested, "", 2),
+        (nested, "../inside", 2),
+        (nested, "../../outside", 0),
+        (nested, "../outside-link", 0),
+        (nested, inside_alias, 2),
+        (workdir, "", 0),
+        (workdir, ".", 0),
+        (workdir, "relative", 0),
+    ):
+        for tool, sample in (("Grep", "Gateway"), ("Glob", "*.go")):
+            done = builtin_hook(checker, tool, sample, target, "orch", cwd=cwd)
+            if done.returncode != want or (want == 0 and done.stderr.strip()):
+                failures.append(f"{tool} {target!r} from {cwd}: exit {done.returncode}, want {want}: {done.stderr.strip()}")
+
+    # Execute the generated hint to check shell arguments, not just its wording.
+    for sample, target, argv in (
+        ("$(printf EXPANDED)", "", ["ctx", "batch", "-q", "text:'$(printf EXPANDED)'"]),
+        ("`printf EXPANDED`", "", ["ctx", "batch", "-q", "text:'`printf EXPANDED`'"]),
+        ("it's $HOME", "", ["ctx", "text", "--", "it's $HOME"]),
+        ('a"b\\c', "", ["ctx", "batch", "-q", 'text:\'a"b\\c\'']),
+        ("/api/users", "dir space'\"\\$HOME`printf EXPANDED`", ["ctx", "text", "--glob", "dir space'\"\\$HOME`printf EXPANDED`/**", "--", "/api/users"]),
+        ("refund.*`printf EXPANDED`", "", ["ctx", "batch", "-q", "find:Code that refund `printf EXPANDED`"]),
+        ("--bad'query", "", ["ctx", "text", "--", "--bad'query"]),
+        ("--scoped'query", "dir space", ["ctx", "text", "--glob", "dir space/**", "--", "--scoped'query"]),
+    ):
+        done = builtin_hook(checker, "Grep", sample, target, "orch", pattern)
+        hints = [line[4:-1] for line in done.stderr.splitlines() if line.startswith("Use ") and line.endswith(".")]
+        if done.returncode != 2 or len(hints) != 1:
+            failures.append(f"no generated hint for {sample!r}: {done.stderr.strip()}")
+            continue
+        captured = subprocess.run(
+            ["/bin/sh", "-c", "orch() { printf '%s\\000' \"$@\"; }; " + hints[0]],
+            text=True,
+            capture_output=True,
+        )
+        want = "\0".join(argv) + "\0"
+        if captured.returncode != 0 or captured.stdout != want:
+            failures.append(f"hint for {sample!r} at {target!r}: argv {captured.stdout!r}, want {want!r}: {captured.stderr}")
 
     # Fail open on anything but a Grep or Glob call that carries a pattern.
     payloads = [

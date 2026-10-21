@@ -213,7 +213,8 @@ func ownedPath(owns []string, file string) bool {
 func runCheck(dir, command string) (int, string) {
 	ctx, cancel := context.WithTimeout(context.Background(), verifyTimeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "sh", "-c", command)
+	cmd := processCommandContext(ctx, "sh", "-c", command)
+	defer cmd.Cancel()
 	cmd.Dir = dir
 	var buf bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &buf, &buf

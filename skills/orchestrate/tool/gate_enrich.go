@@ -644,13 +644,17 @@ func enrichGate(dir, code, src, rel string, sp *spec) (*enrichResult, error) {
 	if err := preserveRecordedAnswers(qdir, res.Answered); err != nil {
 		return nil, err
 	}
-	// Only replace root cards. In particular, never delete answered/ and its
-	// original cards, answers or attachments when enrichment is rerun.
+	// Only replace generated root cards and their index. Keep review notes,
+	// archived answers and attachments when enrichment is rerun.
 	paths, err := filepath.Glob(filepath.Join(qdir, "*.md"))
 	if err != nil {
 		return nil, err
 	}
 	for _, path := range paths {
+		name := filepath.Base(path)
+		if name != "INDEX.md" && !gateCardNumber.MatchString(name) {
+			continue
+		}
 		if err := os.Remove(path); err != nil {
 			return nil, err
 		}

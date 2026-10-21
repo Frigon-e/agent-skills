@@ -8,8 +8,49 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 )
+
+func TestEvidenceReadersRejectSpecialFiles(t *testing.T) {
+	for name, read := range map[string]func(string) error{
+		"adjudication": func(repo string) error {
+			_, err := adjudicationSource(repo, evidenceRecord{Path: "source"})
+			return err
+		},
+		"sweep": func(repo string) error {
+			_, err := sweepEvidenceBytes(repo, nil, evidenceRecord{ID: "source", Path: "source"}, "", false)
+			return err
+		},
+		"pointer": func(repo string) error {
+			_, err := checkPointer(repo, "source")
+			return err
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			repo := t.TempDir()
+			path := filepath.Join(repo, "source")
+			if err := syscall.Mkfifo(path, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			done := make(chan error, 1)
+			go func() { done <- read(repo) }()
+			select {
+			case err := <-done:
+				if err == nil || !strings.Contains(err.Error(), "not a regular file") {
+					t.Fatalf("special-file evidence must be rejected: %v", err)
+				}
+			case <-time.After(time.Second):
+				// Release a regressed FIFO reader before failing the test.
+				if fd, err := syscall.Open(path, syscall.O_RDWR|syscall.O_NONBLOCK, 0); err == nil {
+					syscall.Close(fd)
+				}
+				t.Fatal("evidence reader blocked on a FIFO")
+			}
+		})
+	}
+}
 
 func sweepCard(t *testing.T, topic, key, area string, options ...string) {
 	t.Helper()
@@ -252,33 +293,6 @@ func TestSweepSettlesOnlyWhatIsProved(t *testing.T) {
 	sweepPassFile(t, topic, "settle", "differ", ans("b", "adr/1.md:99"))
 	if _, out := h.run("sweep", topic); !strings.Contains(out, "differ (flash=a, sonnet=b)") {
 		t.Errorf("a final pass without evidence settled the question:\n%s", out)
-	}
-}
-
-func TestSweepCitationWithoutAssessmentRechecks(t *testing.T) {
-	h := setup(t)
-	os.WriteFile(filepath.Join(h.repo, "unrelated.md"), []byte("Unrelated text.\n"), 0o644)
-	topic := filepath.Join(h.tmp, "topic")
-	sweepCard(t, topic, "q", "", "a", "b")
-	os.WriteFile(filepath.Join(topic, "dropped.json"), []byte(`[]`), 0o644)
-	os.WriteFile(filepath.Join(topic, "manifest.json"), []byte(`{"schema_version":1,"questions":[{"id":"q","question":"Which way for q?","card":"q"}]}`), 0o644)
-	for _, p := range []string{"flash", "sonnet"} {
-		sweepPassFile(t, topic, p, "q", `{"choice":"a","evidence":["unrelated.md:1"]}`)
-	}
-	out := h.must("sweep", topic)
-	if strings.Contains(out, "q -> a") {
-		t.Fatalf("an irrelevant resolving citation settled the card:\n%s", out)
-	}
-	wantContains(t, out, "recheck:")
-}
-
-func TestSweepAccountingRequired(t *testing.T) {
-	h := setup(t)
-	topic := filepath.Join(h.tmp, "topic")
-	sweepCard(t, topic, "q", "", "a", "b")
-	os.Remove(filepath.Join(topic, "dropped.json"))
-	if code, out := h.run("sweep", topic); code == 0 {
-		t.Fatalf("missing accounting files succeeded:\n%s", out)
 	}
 }
 

@@ -368,8 +368,9 @@ func (s *shadowRun) purpose(id string) string {
 }
 
 // run executes the judges and writes items.jsonl; it returns the rows and a
-// one-line summary. Failures are rows with an error, never a failed gate.
-func (s *shadowRun) run() ([]shadowRow, string) {
+// one-line summary. Judge failures are rows; persistence failures are returned
+// separately. Neither changes the gate decision.
+func (s *shadowRun) run() ([]shadowRow, string, error) {
 	var rows []shadowRow
 	var mu sync.Mutex
 	add := func(r shadowRow) { mu.Lock(); rows = append(rows, r); mu.Unlock() }
@@ -414,14 +415,19 @@ func (s *shadowRun) run() ([]shadowRow, string) {
 		return rows[i].Item < rows[j].Item
 	})
 	dir := shadowDir(s.dir, s.name)
-	_ = os.MkdirAll(dir, 0o755)
+	summary := shadowSummary(s.mode, rows)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return rows, summary, err
+	}
 	var b bytes.Buffer
 	for _, r := range rows {
 		j, _ := json.Marshal(r)
 		b.Write(append(j, '\n'))
 	}
-	_ = os.WriteFile(filepath.Join(dir, "items.jsonl"), b.Bytes(), 0o644)
-	return rows, shadowSummary(s.mode, rows)
+	if err := writeAtomic(filepath.Join(dir, "items.jsonl"), b.Bytes()); err != nil {
+		return rows, summary, err
+	}
+	return rows, summary, nil
 }
 
 func shadowSummary(mode string, rows []shadowRow) string {

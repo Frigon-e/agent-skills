@@ -552,7 +552,25 @@ func TestGateEnrichesItsCardsAndAskStillParsesThem(t *testing.T) {
 	}
 
 	// `orch gate enrich` redoes it from gate.json; a spec never gated is an error.
+	qdir := filepath.Join(gdir, "questions")
+	if err := os.MkdirAll(filepath.Join(qdir, "attachments"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	preserved := map[string]string{
+		"notes.md":               "Keep these review notes.\n",
+		"attachments/context.md": "Keep this question attachment.\n",
+	}
+	writeFiles(t, qdir, preserved)
+	writeFiles(t, qdir, map[string]string{"q99-api.md": "obsolete generated card"})
 	wantContains(t, h.must("gate", "enrich", "spec.md"), "question cards: 1 -> 1 after merging", "INDEX.md")
+	for path, want := range preserved {
+		if got := string(mustRead(t, filepath.Join(qdir, path))); got != want {
+			t.Errorf("enrichment changed %s: %q", path, got)
+		}
+	}
+	if exists(filepath.Join(qdir, "q99-api.md")) {
+		t.Error("enrichment retained an obsolete generated card")
+	}
 	h.commitSpec(strings.Replace(threePkgSpec(), "Users queue transfers.", "Users queue transfers fast.", 1))
 	if code, out := h.run("gate", "enrich", "spec.md"); code != 1 || !strings.Contains(out, "run `orch gate` first") {
 		t.Errorf("enrich without a gate run = %d %s", code, out)

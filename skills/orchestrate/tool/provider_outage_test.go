@@ -61,7 +61,9 @@ func TestOutageGateConnectionRefusedUsesFallback(t *testing.T) {
 }
 
 func TestOutageTriageSpawnAndQuick(t *testing.T) {
-	for _, mode := range outageModes {
+	// Transport/parser variants are covered by auto triage and API role tests.
+	// This boundary checks each command's shadow/enforce policy and cleanup.
+	for _, mode := range []string{"refused"} {
 		for _, enforce := range []bool{false, true} {
 			for _, command := range []string{"spawn", "quick"} {
 				t.Run(fmt.Sprintf("%s/%v/%s", mode, enforce, command), func(t *testing.T) {
@@ -464,7 +466,10 @@ func TestOutageShadowFlashRecordOnly(t *testing.T) {
 			before := map[string]string{"gate.json": `{"status":"pass"}`, "report.md": "unchanged gate report\n"}
 			writeFiles(t, dir, before)
 			sh := shadowRun{dir: dir, root: t.TempDir(), code: h.repo, mode: "flash", sp: &spec{packages: []*specPackage{{id: "api"}}}, dos: &dossierSet{cands: map[string][]itemCands{"api": {{Item: gateItem{ID: "api#1"}, Cands: []reuseCand{{Path: "app.py", Start: 1}}}}}}, runPass: func(p gatePass, _ string) (string, error) { return s.runModel("shadow_flash", p.prompt) }}
-			rows, note := sh.run()
+			rows, note, err := sh.run()
+			if err != nil {
+				t.Fatal(err)
+			}
 			if len(rows) != 1 || rows[0].Error == "" || rows[0].Verdict != "" || !strings.Contains(note, "record only") {
 				t.Fatalf("shadow outage was hidden or authoritative: %+v %s", rows, note)
 			}
@@ -530,12 +535,15 @@ func TestOutageGateStallAndWallDeadline(t *testing.T) {
 			dir := h.gateRepo(1)
 			t.Setenv("HERDR_ENV", "")
 			gateTimeout = 2 * time.Second
-			gateStall = 30 * time.Millisecond
+			gateStall = 200 * time.Millisecond
 			gatePoll = 5 * time.Millisecond
-			t.Setenv("ORCH_PI", fakeRunner(t, "pi", `exec sleep 10`))
+			// A real runner can leave children holding its output pipes open.
+			marker := filepath.Join(h.tmp, "escaped-child")
+			hang := fmt.Sprintf("(sleep 1; printf leaked > %q) & wait", marker)
+			t.Setenv("ORCH_PI", fakeRunner(t, "pi", hang))
 			script := `printf '%s\n' '{"type":"result","result":"{\"packages\":[{\"id\":\"api\",\"claims\":[],\"questions\":[],\"will_change\":[],\"reuse\":[]}],\"findings\":[]}"}'`
 			if kind != "stall-fallback" {
-				script = "exec sleep 10"
+				script = hang
 			}
 			if kind == "wall-cap" {
 				gateTimeout = 250 * time.Millisecond
@@ -579,7 +587,35 @@ func TestOutageGateStallAndWallDeadline(t *testing.T) {
 			if rec.Budget.Requests > 6 {
 				t.Fatalf("outage retry loop: %+v", rec.Budget)
 			}
+			if kind == "all-stalled" || kind == "wall-cap" {
+				// Wait beyond the child's marker write to catch a killed shell
+				// whose descendants survived cancellation.
+				if left := time.Until(started.Add(1200 * time.Millisecond)); left > 0 {
+					time.Sleep(left)
+				}
+				if exists(marker) {
+					t.Fatal("a canceled runner's child kept running")
+				}
+			}
 		})
+	}
+}
+
+func TestOutageExitedCheckStopsChildren(t *testing.T) {
+	dir := t.TempDir()
+	marker := filepath.Join(dir, "escaped-child")
+	started := time.Now()
+	code, _ := runCheck(dir, fmt.Sprintf("(sleep 2; printf leaked > %q) &", marker))
+	if code == 0 || time.Since(started) > 3*time.Second {
+		t.Fatalf("check with orphaned output pipes: exit %d after %s", code, time.Since(started))
+	}
+	// The parent already exited, so context cancellation does not run Cancel.
+	// Wait beyond the child's write to ensure return also cleaned up its group.
+	if left := time.Until(started.Add(2200 * time.Millisecond)); left > 0 {
+		time.Sleep(left)
+	}
+	if exists(marker) {
+		t.Fatal("the exited check's child survived output-pipe cleanup")
 	}
 }
 
@@ -589,7 +625,16 @@ func TestOutageGateStallAndWallDeadline(t *testing.T) {
 // down just because one of its upstream model families is down.
 func TestOutageGateProviderMatrix(t *testing.T) {
 	for mask := 1; mask < 8; mask++ {
-		for _, mode := range []string{"refused", "429", "503", "401", "timeout", "malformed", "empty"} {
+		// Exercise every lane subset once; error classification is shared by
+		// those routes. Keep the full mode table for one failed provider and
+		// the distinct invalid-reply diagnostics when every provider is down.
+		modes := []string{"refused"}
+		if mask == 1 {
+			modes = outageModes
+		} else if mask == 2 || mask == 7 {
+			modes = append(modes, "malformed", "empty")
+		}
+		for _, mode := range modes {
 			t.Run(fmt.Sprintf("providers-%d/%s", mask, mode), func(t *testing.T) {
 				h := setup(t)
 				// This fixture has no Go production source or Go manifest.

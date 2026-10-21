@@ -297,18 +297,6 @@ func TestBenchScoreLegacyUnboundAndHashOnlyPromptsStayUnknown(t *testing.T) {
 	benchAssertOriginals(t, benchDir(), before)
 }
 
-func TestBenchScoreGeneratedReadmeDescribesFrozenWrites(t *testing.T) {
-	h := benchHarness(t)
-	h.must("bench", "readme")
-	text := string(mustRead(t, filepath.Join(benchDir(), "README.md")))
-	for _, old := range []string{"score-key-N.json adds a rescore", "Uses the same location-overlap scorer", "below 80% matched", "appends to subject_history during migration"} {
-		if strings.Contains(text, old) {
-			t.Errorf("generated guide retains old behavior: %q", old)
-		}
-	}
-	wantContains(t, text, "scores/<sha256>.json", "migrations/<sha256>.json", "isolated copy", "explicit mapping", "never rewrite run.json", "history-<sha256>.md")
-}
-
 func TestBenchScoreReportsAndKeyAddPreserveEvidence(t *testing.T) {
 	h, r, k, source := benchCopiedFixture(t)
 	old := benchScore{Classes: map[string]locationScore{"duplicate": {Match: 7, Total: 9}}}

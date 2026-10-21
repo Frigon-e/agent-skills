@@ -562,14 +562,3 @@ func TestBeforeAfterAbsence(t *testing.T) {
 		}
 	}
 }
-
-func TestBeforeAfterTimeout(t *testing.T) {
-	t.Run("BEFORE", func(t *testing.T) {
-		beforeAfterEmit(t, "gate-timeout-message", "BEFORE", "not measured on baseline: fixed 45-minute wall cap, no override; running it would take 45 minutes and a patched baseline would not be the original (approved omission)")
-		t.Skip("orchestrator-approved: original fixed 45-minute cap cannot fit the 90-second budget; do not patch baseline")
-	})
-	t.Run("AFTER", func(t *testing.T) {
-		TestGateTimedOutPassGetsCtrlCAndDoesNotStallTheOthers(t)
-		beforeAfterEmit(t, "gate-timeout-message", "AFTER", "pass_errors.adversary-a = timed out after 3s; incomplete")
-	})
-}

@@ -193,6 +193,25 @@ func TestCtxIndexPolicyDenyListAndPrivateWork(t *testing.T) {
 	}
 }
 
+func TestCtxDenyPreventsIndexingAndSearchInLinkedWorktrees(t *testing.T) {
+	c := newCtxHarness(t)
+	work := filepath.Join(t.TempDir(), "worktree")
+	c.git("worktree", "add", "--detach", work, "HEAD")
+	if err := os.WriteFile(os.Getenv("ORCH_CONFIG"), []byte(fmt.Sprintf("ctx_deny = [%q]\n", c.repo)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, root := range []string{c.repo, work} {
+		c.a.cwd = root
+		code, out := c.run("ctx", "find", "Code that starts a checkout", "--json")
+		if calls := c.log(c.jbCalls); calls != "" {
+			t.Fatalf("denied repository %s reached jbcontext: %s", root, calls)
+		}
+		if code != 1 || !strings.Contains(out, "ctx_deny") {
+			t.Fatalf("denied repository %s: exit %d, output %s", root, code, out)
+		}
+	}
+}
+
 func TestCtxCacheIsKeyedByHeadAndTheDirtyDiff(t *testing.T) {
 	_, code, _, _ := jbFixture(t, "HEAD")
 	root := os.Getenv("ORCH_CACHE_DIR")

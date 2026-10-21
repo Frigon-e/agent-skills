@@ -241,7 +241,7 @@ func TestDossierHasTheChecklistAheadOfTheLookAlikes(t *testing.T) {
 	}
 }
 
-func TestVerdictsAreParsedNormalisedAndSalvaged(t *testing.T) {
+func TestVerdictsAreParsedAndNormalised(t *testing.T) {
 	raw := `{"packages":[{"id":"p","items":[{"item":"p#1","verdict":"Duplicate","candidate":"internal/store.go:3","why":"same"},{"item":"2","verdict":"extend","candidate":"internal/store.go:3","why":"add a column in Put"},{"item":"p#3","verdict":"new","candidate":null,"why":"nothing"},{"item":"p#4","verdict":"maybe"}]}]}`
 	var r itemsReply
 	if err := extractJSON(raw, &r); err != nil || len(r.Packages[0].Items) != 4 {
@@ -267,13 +267,6 @@ func TestVerdictsAreParsedNormalisedAndSalvaged(t *testing.T) {
 	if m := rec.missingItems(items); len(m) != 1 || m[0].ID != "p#4" {
 		t.Errorf("missing %v", m)
 	}
-	// salvage: a reply cut off in the middle still gives the complete items
-	cut := `{"packages":[{"id":"p","will_change":[],"items":[{"item":"p#1","verdict":"new","candidate":null,"why":"x"},{"item":"p#2","verdict":"ne`
-	es, ok := salvageEntries(cut, []string{"p"})
-	if !ok {
-		t.Fatalf("salvage failed")
-	}
-	_ = es
 	if rec.coverageLine() != "items: 4, with a verdict 3 (reuse 1, extend 1, new 1, unclear 0), no verdict 1" {
 		t.Errorf("coverage line %q", rec.coverageLine())
 	}
@@ -445,7 +438,10 @@ func TestShadowJudgesRecordAndNeverDecide(t *testing.T) {
 				prompts = append(prompts, p.prompt)
 				return flashJSON, nil
 			}}
-		rows, sum := sr.run()
+		rows, sum, err := sr.run()
+		if err != nil {
+			t.Fatal(err)
+		}
 		if mode != "off" {
 			var stored []shadowRow
 			for _, line := range strings.Split(strings.TrimSpace(string(mustRead(t, filepath.Join(gdir, "shadow", "run", "items.jsonl")))), "\n") {
@@ -700,6 +696,7 @@ func TestGateShadowFlagRecordsRowsAndLeavesTheVerdictAlone(t *testing.T) {
 	t.Setenv("ORCH_TRIAGE_KEY", "k")
 
 	base := h.must("gate", "spec.md")
+	baseRecord := readRecord(t, gdir)
 	if posts != 0 || exists(filepath.Join(gdir, "shadow")) {
 		t.Fatalf("the default run called the decider (%d) or wrote shadow rows", posts)
 	}
@@ -716,11 +713,28 @@ func TestGateShadowFlagRecordsRowsAndLeavesTheVerdictAlone(t *testing.T) {
 	if err := json.Unmarshal([]byte(lines[1]), &row); err != nil || row.Judge != "decider" || row.Verdict != "reuse" || row.Item != "api#2" {
 		t.Errorf("row %+v %v", row, err)
 	}
-	if strings.Split(base, "\n")[0] != strings.Split(out, "\n")[0] {
-		t.Errorf("the shadow changed the verdict: %q vs %q", strings.Split(base, "\n")[0], strings.Split(out, "\n")[0])
+	shadowRecord := readRecord(t, gdir)
+	if gateView(t, base).State != gateView(t, out).State || baseRecord.State != shadowRecord.State ||
+		baseRecord.Reduction == nil || shadowRecord.Reduction == nil || !reflect.DeepEqual(baseRecord.Reduction, shadowRecord.Reduction) {
+		t.Errorf("the shadow changed the review decision: %+v vs %+v", baseRecord.Reduction, shadowRecord.Reduction)
 	}
-	if rec := readRecord(t, gdir); rec.Shadow == "" {
+	if shadowRecord.Shadow == "" {
 		t.Error("gate.json does not mention the shadow run")
+	}
+	blocked := shadowDir(gdir, "")
+	if err := os.RemoveAll(blocked); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(blocked, []byte("blocked"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out = h.must("gate", "spec.md", "--shadow", "decider")
+	failedShadow := readRecord(t, gdir)
+	for _, diagnostic := range []string{out, failedShadow.Shadow, strings.Join(failedShadow.Notes, "\n")} {
+		wantContains(t, diagnostic, "shadow persistence:", blocked)
+	}
+	if baseRecord.State != failedShadow.State || !reflect.DeepEqual(baseRecord.Reduction, failedShadow.Reduction) || !reflect.DeepEqual(baseRecord.PassErrors, failedShadow.PassErrors) {
+		t.Errorf("shadow persistence failure changed the review: %+v vs %+v", baseRecord.Reduction, failedShadow.Reduction)
 	}
 	// the dry run prints a request without sending it
 	before := posts

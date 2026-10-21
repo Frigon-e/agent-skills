@@ -134,6 +134,7 @@ func openDecisions(entries []entry) []entry {
 				keyless = nil
 			} else {
 				delete(keyed, e.Key)
+				keys = slices.DeleteFunc(keys, func(k string) bool { return k == e.Key })
 			}
 		case e.By != "orch" && (e.State == "working" || e.State == "done" || e.State == "failed"):
 			keyless = nil

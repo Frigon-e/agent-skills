@@ -2279,6 +2279,26 @@ func TestOpenDecisions(t *testing.T) {
 	}
 }
 
+func TestStatusReopenedDecisionAppearsOnce(t *testing.T) {
+	h := setup(t)
+	h.task("t1")
+	if err := saveLead(h.dir("t1"), &lead{ID: "t1"}); err != nil {
+		t.Fatal(err)
+	}
+	h.must("report", "--dir", h.dir("t1"), "--key", "context", "needs-decision", "First question")
+	h.must("send", "t1", "--resolve", "context", "First answer")
+	h.must("report", "--dir", h.dir("t1"), "--key", "context", "needs-decision", "Reopened question")
+	var status struct {
+		Leads []row `json:"leads"`
+	}
+	if err := json.Unmarshal([]byte(h.must("status", "--json")), &status); err != nil {
+		t.Fatal(err)
+	}
+	if len(status.Leads) != 1 || len(status.Leads[0].Decisions) != 1 || status.Leads[0].Decisions[0].Text != "Reopened question" {
+		t.Fatalf("reopened decision must appear once with its latest text: %+v", status.Leads)
+	}
+}
+
 const askCard = `---
 question: Does a script make the page?
 recommend: orch
@@ -2350,7 +2370,7 @@ func TestAsk(t *testing.T) {
 	}
 	page := h.askPage()
 	wantContains(t, page, "Does a script make the page?", "Question for other?", "Recommended", "Change later: hard",
-		"<strong>bold</strong>", `src="files/t1-page-diagram.svg"`, `alt="A diagram"`, `src="files/t1-page-shot.png"`, `alt="A screenshot"`,
+		"<strong>bold</strong>", `-diagram.svg"`, `alt="A diagram"`, `-shot.png"`, `alt="A screenshot"`,
 		`data-lavish-question="t1/page"`, `data-lavish-question="t1/other"`, "Then we go on.", "Some ")
 	if strings.Contains(page, "<b>context") {
 		t.Error("raw markdown HTML was emitted")
@@ -2358,7 +2378,12 @@ func TestAsk(t *testing.T) {
 	if strings.Index(page, "The orchestrator writes it") > strings.Index(page, "A script makes the page") {
 		t.Error("recommended option is not first")
 	}
-	if b, err := os.ReadFile(filepath.Join(h.tmp, "state", "repo", "ask", "files", "t1-page-shot.png")); err != nil || string(b) != "PNGDATA" {
+	shot := regexp.MustCompile(`src="(files/[^"]+-shot\.png)" alt="A screenshot"`).FindStringSubmatch(page)
+	if len(shot) != 2 {
+		t.Fatal("screenshot has no image source")
+	}
+	shotPath := filepath.Join(h.tmp, "state", "repo", "ask", shot[1])
+	if b, err := os.ReadFile(shotPath); err != nil || string(b) != "PNGDATA" {
 		t.Errorf("png not copied: %v", err)
 	}
 	h.must("send", "t1", "--resolve", "page", "go")
@@ -2367,7 +2392,7 @@ func TestAsk(t *testing.T) {
 	if strings.Contains(page, "Does a script make the page?") || !strings.Contains(page, "Question for other?") {
 		t.Errorf("resolved question should leave the page:\n%s", page)
 	}
-	if _, err := os.Stat(filepath.Join(h.tmp, "state", "repo", "ask", "files", "t1-page-shot.png")); err == nil {
+	if _, err := os.Stat(shotPath); err == nil {
 		t.Error("files/ should be rebuilt without the resolved png")
 	}
 }
@@ -2486,7 +2511,10 @@ func TestAskIncludeSafety(t *testing.T) {
 	})
 	h.must("ask")
 	page := h.askPage()
-	wantContains(t, page, `class="card"`, `style="padding: 8px"`, "<td>Cell</td>", `src="files/t1-k-d.svg"`)
+	wantContains(t, page, `class="card"`, `style="padding: 8px"`, "<td>Cell</td>")
+	if !regexp.MustCompile(`<img src="files/[^"]+-d\.svg" alt="A diagram">`).MatchString(page) {
+		t.Error("SVG include was not emitted as an image")
+	}
 	for _, bad := range []string{`id="lavish"`, "onclick", `queuePrompt("evil")`, "javascript:", "<button>Go", `<input name="note"`, "alert(1)"} {
 		if strings.Contains(page, bad) {
 			t.Errorf("page contains %q", bad)

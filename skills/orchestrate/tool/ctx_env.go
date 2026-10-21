@@ -101,13 +101,7 @@ func newCtxEnv(code string, o ctxOpts) *ctxEnv {
 
 // ctxDenied reports whether the checkout is one of the denied repositories.
 func ctxDenied(code string, deny []string) bool {
-	for _, d := range deny {
-		d = expandHome(d)
-		if d == code || evalOr(d) == evalOr(code) {
-			return true
-		}
-	}
-	return false
+	return len(deny) > 0 && ctxRepoListed(code, ctxRepoIdentity(code), deny)
 }
 
 // jbOK reports whether jbcontext may be called and exists.

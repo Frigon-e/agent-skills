@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -50,6 +51,43 @@ func (h *harness) runConcurrently(cmds ...[]string) ([]int, []string) {
 	close(start)
 	wg.Wait()
 	return codes, outs
+}
+
+func TestConcurrentSendsKeepEveryMessage(t *testing.T) {
+	h := setup(t)
+	h.task("t1")
+	if err := saveLead(h.dir("t1"), &lead{ID: "t1", ClosedAt: 1}); err != nil {
+		t.Fatal(err)
+	}
+	const count = 32
+	cmds := make([][]string, count)
+	for i := range cmds {
+		cmds[i] = []string{"send", "t1", fmt.Sprintf("unique-message-%02d", i)}
+	}
+	codes, outs := h.runConcurrently(cmds...)
+	for i, code := range codes {
+		if code != 0 {
+			t.Fatalf("send %d failed: %s", i, outs[i])
+		}
+	}
+	msgs := pendingMessages(h.dir("t1"))
+	if len(msgs) != count {
+		t.Fatalf("retained %d of %d messages", len(msgs), count)
+	}
+	seen := map[string]int{}
+	for _, path := range msgs {
+		body := string(mustRead(t, path))
+		_, payload, ok := strings.Cut(body, "\n\n")
+		if !ok {
+			t.Fatalf("message has no body: %q", body)
+		}
+		seen[strings.TrimSpace(payload)]++
+	}
+	for _, cmd := range cmds {
+		if n := seen[cmd[2]]; n != 1 {
+			t.Errorf("payload %q appeared %d times", cmd[2], n)
+		}
+	}
 }
 
 func TestConcurrentSpawnsRespectMaxLeads(t *testing.T) {

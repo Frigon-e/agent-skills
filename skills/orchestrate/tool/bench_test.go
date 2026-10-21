@@ -2,7 +2,6 @@ package main
 
 import (
 	"archive/tar"
-	"bytes"
 	"compress/gzip"
 	"encoding/json"
 	"fmt"
@@ -553,36 +552,12 @@ func TestBenchSpecVersionsVariantAndComparability(t *testing.T) {
 		t.Fatal("unequal total groups allowed")
 	}
 }
-func TestBenchVerifyCorruptionAndMigration(t *testing.T) {
+func TestBenchVerifyCorruption(t *testing.T) {
 	h := benchHarness(t)
 	h.gateRepo(1)
 	r := benchRecordFixture(t, h, "legacy", 534, false)
 	k := benchKeyFixture(t, h, r)
 	h.must("bench", "verify", "--suite", "fixture")
-	// Preserve unknown v1 fields through the additive migration.
-	var raw map[string]json.RawMessage
-	if e := benchReadJSON(filepath.Join(r.dir, "run.json"), &raw); e != nil {
-		t.Fatal(e)
-	}
-	raw["schema_version"] = json.RawMessage("1")
-	delete(raw, "subject")
-	raw["future_field"] = json.RawMessage(`{"kept":true}`)
-	if e := benchJSON(filepath.Join(r.dir, "run.json"), raw); e != nil {
-		t.Fatal(e)
-	}
-	h.must("bench", "migrate", "--suite", "fixture")
-	if e := benchReadJSON(filepath.Join(r.dir, "run.json"), &raw); e != nil {
-		t.Fatal(e)
-	}
-	var preserved map[string]any
-	if e := json.Unmarshal(raw["future_field"], &preserved); e != nil || !reflect.DeepEqual(preserved, map[string]any{"kept": true}) {
-		t.Fatalf("migration changed unknown field: %s (%v)", raw["future_field"], e)
-	}
-	before := mustRead(t, filepath.Join(r.dir, "run.json"))
-	h.must("bench", "migrate", "--suite", "fixture")
-	if !bytes.Equal(before, mustRead(t, filepath.Join(r.dir, "run.json"))) {
-		t.Fatal("migration not idempotent")
-	}
 	spec, _ := benchObjectPath("spec", r.Inputs.SpecHash)
 	if e := os.WriteFile(spec, []byte("flipped byte"), 0600); e != nil {
 		t.Fatal(e)

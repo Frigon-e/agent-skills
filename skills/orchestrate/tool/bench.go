@@ -801,7 +801,7 @@ func benchKeys(suite string) ([]*benchKey, error) {
 		}
 		k := &benchKey{}
 		if e := benchReadJSON(f, k); e != nil {
-			return nil, e
+			return nil, fmt.Errorf("answer key %s: %w", f, e)
 		}
 		if e := benchKeyName(k.ID); e != nil {
 			return nil, e

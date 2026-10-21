@@ -11,6 +11,26 @@ import (
 	"testing"
 )
 
+func TestBenchReportRejectsCorruptKeysButAllowsNoKey(t *testing.T) {
+	h := benchHarness(t)
+	h.gateRepo(1)
+	benchRecordFixture(t, h, "run", 10, false)
+	for _, args := range [][]string{{"bench", "report", "fixture"}, {"bench", "report", "fixture", "--json"}} {
+		h.must(args...)
+	}
+	keys := filepath.Join(benchDir(), "fixture", "keys")
+	if err := os.MkdirAll(keys, 0700); err != nil {
+		t.Fatal(err)
+	}
+	writeFiles(t, keys, map[string]string{"key-1.json": "corrupt"})
+	for _, args := range [][]string{{"bench", "report", "fixture"}, {"bench", "report", "fixture", "--json"}} {
+		code, out := h.run(args...)
+		if code == 0 || !strings.Contains(out, "key-1.json") || !strings.Contains(out, "invalid character") {
+			t.Errorf("%v hid corrupt key: exit %d\n%s", args, code, out)
+		}
+	}
+}
+
 // Reproduce through the snapshot scorer used by bench compare, without a model
 // or a live store. Two independent behaviors deliberately share a target.
 func TestBenchCompareKeeps29BehaviorsWithSharedRanges(t *testing.T) {
@@ -348,6 +368,7 @@ func TestBenchCompareIncompatibleSubjectsNeverRankWinner(t *testing.T) {
 	if why := benchRankingCompatibility(a, b); why != "different subjects" {
 		t.Fatalf("different subjects can rank: %s", why)
 	}
+	b.Subject = a.Subject
 	b.Groups = map[string]benchGroup{}
 	for i := 0; i < 10; i++ {
 		b.Groups[fmt.Sprintf("group:%d", i)] = benchGroup{Packages: []string{"api"}, Cost: benchCost{USD: evidenceTestPtr(float64(i + 1))}}
@@ -356,8 +377,8 @@ func TestBenchCompareIncompatibleSubjectsNeverRankWinner(t *testing.T) {
 	scoped.Seconds = evidenceTestPtr(100)
 	scoped.Cost.USD = evidenceTestPtr(1.0)
 	b.Groups["group:api"] = scoped
-	if why := benchRankingCompatibility(a, b); why == "" {
-		t.Fatal("different pass coverage can rank")
+	if why := benchRankingCompatibility(a, b); why != "different pass coverage" {
+		t.Fatalf("different pass coverage can rank: %s", why)
 	}
 	key := benchKeyFixture(t, h, a)
 	history, err := benchHistoryBuild("fixture", benchSuite{crossSubject: true}, []*benchRun{a, b}, a, key)

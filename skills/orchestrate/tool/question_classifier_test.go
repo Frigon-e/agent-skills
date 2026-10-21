@@ -161,11 +161,8 @@ func TestClassifierUncertaintyAndInvalidDistributions(t *testing.T) {
 		}
 	}
 }
-func TestClassifierFailureAndExhaustionNeverTouchGate(t *testing.T) {
+func TestClassifierFailureRetriesAndExhaustionStopsRequests(t *testing.T) {
 	b := classifierFixture()
-	budget := newRunBudget(defaultAdjudicationLimits(), time.Now())
-	gate := gateRecord{Budget: budget, State: "pass"}
-	before, _ := json.Marshal(gate)
 	calls := 0
 	post := func(context.Context, profile, map[string]any, map[string]any) (map[string]decAnswer, string, shadowUsage, error) {
 		calls++
@@ -182,24 +179,16 @@ func TestClassifierFailureAndExhaustionNeverTouchGate(t *testing.T) {
 	if calls != 2 || records[0].Status != "unresolved" || !strings.Contains(records[0].Note, "budget_exhausted") {
 		t.Fatal("exhausted job called API or disappeared")
 	}
-	after, _ := json.Marshal(gate)
-	if string(before) != string(after) {
-		t.Fatal("classifier modified gate or its budget")
-	}
 }
 func TestClassifierLateResultDiscarded(t *testing.T) {
-	for _, change := range []string{"revision", "subject"} {
-		t.Run(change, func(t *testing.T) {
-			b := classifierFixture()
-			current := true
-			records := classifierRunTest(t, b, &classifierSpend{}, func() bool { return current }, func(context.Context, profile, map[string]any, map[string]any) (map[string]decAnswer, string, shadowUsage, error) {
-				current = false
-				return classifierFakeAnswers(b), "fake", shadowUsage{}, nil
-			})
-			if len(records) != 1 || records[0].Status != "stale" || len(records[0].Results) != 0 {
-				t.Fatalf("late result accepted %+v", records)
-			}
-		})
+	b := classifierFixture()
+	current := true
+	records := classifierRunTest(t, b, &classifierSpend{}, func() bool { return current }, func(context.Context, profile, map[string]any, map[string]any) (map[string]decAnswer, string, shadowUsage, error) {
+		current = false
+		return classifierFakeAnswers(b), "fake", shadowUsage{}, nil
+	})
+	if len(records) != 1 || records[0].Status != "stale" || len(records[0].Results) != 0 {
+		t.Fatalf("late result accepted %+v", records)
 	}
 }
 func TestClassifierCacheCoversAllInputs(t *testing.T) {

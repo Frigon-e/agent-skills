@@ -483,6 +483,13 @@ func sweepEvidenceBytes(repo string, roots map[string]string, e evidenceRecord, 
 	if err != nil || filepath.IsAbs(rel) || inside == ".." || strings.HasPrefix(inside, ".."+string(filepath.Separator)) {
 		return nil, fmt.Errorf("evidence %s is outside its root", e.ID)
 	}
+	info, err := os.Stat(full)
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("evidence %s is not a regular file", e.ID)
+	}
 	b, err := os.ReadFile(full)
 	if err != nil {
 		return nil, err

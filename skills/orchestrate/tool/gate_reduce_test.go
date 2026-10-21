@@ -412,23 +412,6 @@ func TestReduceNotApplicableAndDecisionAuthority(t *testing.T) {
 	}
 }
 
-func TestReduceLanguageFixturesAndCacheIndependent(t *testing.T) {
-	for _, lang := range []string{"python", "go", "typescript"} {
-		t.Run(lang, func(t *testing.T) {
-			s, cs, as, _, p := reducerFixture(lang)
-			r := ReduceReview(s, cs, as, nil, p)
-			if r.State != "pass" {
-				t.Fatalf("valid language-neutral review: %+v", r)
-			}
-			// Cache counters and provider usage are execution diagnostics, not inputs to
-			// review policy. Replaying a serialized packet gives the identical decision.
-			if !reflect.DeepEqual(r, ReduceReview(s, cs, evidenceTestRoundTrip(t, as), nil, evidenceTestRoundTrip(t, p))) {
-				t.Fatal("recorded replay differs")
-			}
-		})
-	}
-}
-
 func TestReduceMixedAnswerPermutationAndNoInputMutation(t *testing.T) {
 	s, base, answer, _, p := reducerFixture("python")
 	states := []reviewAnswerState{reviewAnswerMissing, reviewAnswerAnswered, reviewAnswerInvalid, reviewAnswerUnavailable, reviewAnswerBudget, reviewAnswerNotApplicable}

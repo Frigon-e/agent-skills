@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -92,11 +93,11 @@ func truthClient(t *testing.T, answer func(string) any) *lspClient {
 			if json.Unmarshal(b, &m) != nil {
 				return
 			}
+			v := answer(m.Method)
 			if m.ID == 0 {
 				continue
 			}
 			reply := map[string]any{"jsonrpc": "2.0", "id": m.ID}
-			v := answer(m.Method)
 			if e, ok := v.(error); ok {
 				reply["error"] = map[string]any{"code": -32603, "message": e.Error()}
 			} else {
@@ -334,15 +335,26 @@ func TestTSFactsConcurrentOpenAndTimeoutCleanup(t *testing.T) {
 	code := t.TempDir()
 	path := filepath.Join(code, "app.ts")
 	os.WriteFile(path, []byte("export {}"), 0644)
-	c := truthClient(t, func(string) any { return nil })
+	var opens atomic.Int32
+	c := truthClient(t, func(method string) any {
+		if method == "textDocument/didOpen" {
+			opens.Add(1)
+		}
+		return nil
+	})
 	var wg sync.WaitGroup
 	for i := 0; i < 24; i++ {
 		wg.Add(1)
 		go func() { defer wg.Done(); c.open(path) }()
 	}
 	wg.Wait()
-	if len(c.opened) != 1 {
-		t.Fatal(c.opened)
+	// A response after the concurrent opens ensures every earlier notification
+	// has reached the server before checking the actual protocol transcript.
+	if _, err := c.call("barrier", nil, time.Second); err != nil {
+		t.Fatal(err)
+	}
+	if got := opens.Load(); got != 1 {
+		t.Fatalf("sent %d didOpen notifications for one file", got)
 	}
 	// A zero budget may race a valid response but must always remove the waiter.
 	for i := 0; i < 10; i++ {

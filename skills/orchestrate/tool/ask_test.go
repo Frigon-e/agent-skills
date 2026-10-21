@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -45,6 +46,34 @@ Cost: Each new event kind needs a union member and a handler.
 Gain: New payload fields fit the same object type.
 Cost: TypeScript cannot narrow payload fields by event kind.
 `
+
+func TestAskKeepsImagesWithTheSameBasename(t *testing.T) {
+	h := setup(t)
+	qd := filepath.Join(h.tmp, "topic", "questions")
+	for _, dir := range []string{qd, filepath.Join(qd, "a"), filepath.Join(qd, "b")} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	card := strings.Replace(readyAskCard, "## Context\n", "## Context\ninclude: a/chart.png First chart\n\ninclude: b/chart.png Second chart\n\n", 1)
+	writeFiles(t, qd, map[string]string{
+		"charts.md":   card,
+		"a/chart.png": "first image bytes",
+		"b/chart.png": "second image bytes",
+	})
+	h.must("ask", "--cards", qd)
+	out := filepath.Join(filepath.Dir(qd), "ask")
+	page := string(mustRead(t, filepath.Join(out, "index.html")))
+	images := regexp.MustCompile(`<img src="([^"]+)" alt="(?:First|Second) chart">`).FindAllStringSubmatch(page, -1)
+	if len(images) != 2 || images[0][1] == images[1][1] {
+		t.Fatalf("distinct image includes need distinct targets: %v", images)
+	}
+	for i, want := range []string{"first image bytes", "second image bytes"} {
+		if got := string(mustRead(t, filepath.Join(out, images[i][1]))); got != want {
+			t.Errorf("image %d = %q, want %q", i, got, want)
+		}
+	}
+}
 
 func TestAskCardsReadinessRouting(t *testing.T) {
 	h := setup(t)

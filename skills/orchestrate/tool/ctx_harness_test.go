@@ -44,7 +44,7 @@ func TestCtxInstalledHarnesses(t *testing.T) {
 				command string
 				allow   bool
 				want    string
-			}{{"orch ctx find x", true, "find:"}}
+			}{{"orch ctx find x", true, "path: pay/pay.go"}}
 			if h == "claude" {
 				tests = append(tests, []struct {
 					command string

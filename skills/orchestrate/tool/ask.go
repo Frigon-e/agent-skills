@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"crypto/sha256"
 	_ "embed"
 	"encoding/json"
 	"errors"
@@ -299,7 +300,8 @@ func (r *renderer) include(rel, alt string) (string, error) {
 		if alt == "" {
 			return "", fmt.Errorf("%s: include %s needs alt text: include: %s <alt text>", r.cardPath, rel, rel)
 		}
-		name := r.lead + "-" + r.key + "-" + filepath.Base(rel)
+		sum := sha256.Sum256([]byte(real))
+		name := fmt.Sprintf("%s-%s-%x-%s", r.lead, r.key, sum[:8], filepath.Base(rel))
 		if err := copyFile(real, filepath.Join(r.filesDir, name)); err != nil {
 			return "", fmt.Errorf("%s: include %s: %v", r.cardPath, rel, err)
 		}
