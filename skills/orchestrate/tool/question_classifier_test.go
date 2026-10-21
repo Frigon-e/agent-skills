@@ -164,7 +164,7 @@ func TestClassifierUncertaintyAndInvalidDistributions(t *testing.T) {
 func TestClassifierFailureAndExhaustionNeverTouchGate(t *testing.T) {
 	b := classifierFixture()
 	budget := newRunBudget(defaultAdjudicationLimits(), time.Now())
-	gate := gateRecord{Budget: budget, Status: "pass"}
+	gate := gateRecord{Budget: budget, State: "pass"}
 	before, _ := json.Marshal(gate)
 	calls := 0
 	post := func(context.Context, profile, map[string]any, map[string]any) (map[string]decAnswer, string, shadowUsage, error) {
