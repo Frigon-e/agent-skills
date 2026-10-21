@@ -359,7 +359,7 @@ func TestGroupVerdictsAreOffByDefaultAndTheRetryAsksOnlyForMissingItems(t *testi
 	}
 	view := wantGateState(t, out, "incomplete")
 	wantContains(t, view.Coverage, "no verdict 1")
-	wantContains(t, strings.Join(view.Notes, "\n"), "1 items had no verdict", "api#2")
+	wantContains(t, view.PassErrors["group:api"], "1 items had no verdict", "api#2")
 	if rec := readRecord(t, gdir); len(rec.Reasons) == 0 {
 		t.Fatal("missing verdict has no reason")
 	}
