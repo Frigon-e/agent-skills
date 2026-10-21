@@ -1,97 +1,128 @@
 # Paid ctx-gate experiments
 
-## Status
+## Executive result
 
-The orchestrator approved both experiments in inbox message001 and the full-output account guard in message002. Amended pre-registration and frozen input hashes were committed at `27f1411864d975fc6f422099f06ebe562e893d09` before the first paid call. One fixed-packet request has run. Its charge is now reconciled at **$0.00273309**. The guard stopped on billing-settlement uncertainty and remains stopped under message003 pending an explicit `resume` decision. No second paid request has started.
+**Paid execution is complete: $0.353890410 USD**, including the failed pilot, failures, native tool loops and repairs. All 28 amended planned runs completed, plus the separately disclosed earlier pilot: **29 paid exposures and 230 underlying provider requests**. There will be no additional model calls. Deterministic comparisons, private verification, archival and live-store protection are complete, subject to the reporting and data-quality limitations below.
 
 - Branch: `orch/paid-experiments`.
-- Code baseline: `8a062d2c2f8d15c0916e9bd87ba6cc58378e7c1b`.
-- Manifest: [`checks/manifest.json`](checks/manifest.json).
-- Paid ledger: [`checks/ledger.jsonl`](checks/ledger.jsonl), with the original pending-cost event and a linked measured reconciliation event.
-- Verified experiment spend so far: **$0.00273309**, one fixed-packet Flash request. No paid gate, shadow, adjudicator, classifier, decision API, model scout or model-based web-search call was made.
-- Estimated planned spend: **$1.04**. This is a planning estimate, not measured cost.
-- Sum of per-run anomaly thresholds: **$3.36** across 28 planned runs. Under approved message002, this is not a hard total spend bound.
-- Absolute user cap: **$5.00**, including failed calls and repairs. Admission cutoff: $4.50. Stop starting experiments at $4.00.
+- Production baseline: `8a062d2c2f8d15c0916e9bd87ba6cc58378e7c1b`.
+- Pre-registration/amendment history is retained in Git and [`checks/manifest.json`](checks/manifest.json).
+- Actual charges and zero-dispatch setup failures are retained in [`checks/ledger.jsonl`](checks/ledger.jsonl).
+- **No production code, default, allowlist, live benchmark data, adjudicator or classifier setting was changed.** No task spawning, integration or product acceptance was authorized.
+- Live benchmark protection: **PASS**, exact before/after listing equality, including modes, sizes, nanosecond mtimes and all 466 regular-file hashes.
 
-This report is not a completion claim. Paid execution, results, final live-store verification and final acceptance remain pending.
+**Recommendation: retain current defaults.** E2 does not establish a universal format winner. E6 establishes real execution compatibility and exposes variability, not validated workflow accuracy or model independence. GLM's six fixture gates passed, but more passes are not automatically better judgments: these fixtures contain weak acceptance checks and no independently adjudicated whole-workflow answer key.
 
-## Why these experiments
+## Design and authority
 
-The manifest selects experiments 2 and 6 from the implementation plan, in that order:
-
-| Experiment | Design | Planned runs | Estimate | Sum of anomaly thresholds |
+| Experiment | Controlled design | Planned runs | Planning estimate | Actual cost |
 |---|---|---:|---:|---:|
-| E2: equivalent representation | Fixed evidence as hybrid text, TOON and compact JSON; fixture packet and real CRM rendering-seam packet; two trials per cell | 12 | $0.24 | $0.96 |
-| E6: current gate route smoke | Default Flash and configured GLM; CRM, Go, Python and TypeScript; two trials per cell | 16 | $0.80 | $2.40 |
-| Total | No extra trials or paid fallback routes | 28 | $1.04 | $3.36 |
+| E2 | Equivalent hybrid, TOON and compact JSON; eight-case fixture packet and two-case real CRM packet; two trials per cell | 12 | $0.24 | $0.029949469 |
+| E2 earlier pilot | Original 4,096-token exposure, separately retained after truncation | 1 | Separately disclosed | $0.002733090 |
+| E6 | Current gate through Flash and configured GLM; Go, Python, TypeScript and one real CRM group; two trials per cell | 16 | $0.80 | $0.321207851 |
+| **Total** | No extra paid trials or fallback routes | **29 including pilot** | $1.04273309 including pilot | **$0.353890410** |
 
-Message002 changes only the money guard. The $0.08 packet and $0.15 gate thresholds stop further work after a measured anomaly. Hard admission instead reserves the full advertised input/output cost before **each underlying HTTP model request**, including every tool-loop request in a gate command. Full observed bounds are $0.54525932 for Flash and $1.404042704 for GLM. Requests are strictly serialized. The implementation retains the task's stricter $4.50 admission cutoff and the $4.00 stop.
+The original manifest was approved before spending. Message004 approved the disclosed 16,384-token exploratory follow-up, not an untouched held-out confirmation. Messages005-011 superseded the earlier startup guard and execution policy. The final approved hard cap was $5.75, with no new dispatch at $5.00 measured and measured plus conservative full in-flight bounds at most $5.50. Actual spending is below even the original $5.00 cap.
 
-E2 is an isolated reply test. It cannot establish a complete-workflow format win. Its constructed hybrid retains identical fields but is not described as an exact historical gate prompt.
+Runs used named no-focus panes in an owned `paid-runs` tab. Known-cost gate rejections were results, not reasons to replace a paid trial. Zero-dispatch CLI, readiness and session-write failures were retained and corrected inline. No paid run was silently repeated. E2 had no schema repair; the native gate's declared repair/tool-loop allowance remained inside each E6 run's measured cost.
 
-E6 runs real gate commands with `--ctx-shell` at its current `open` default. Fixture runs include both adversaries. CRM uses one explicitly recorded experiment group against the full exact real spec, so its group result cannot authorize planning or stand for a complete CRM review. Both routes use OpenRouter; this is not a provider-independence test. The output ceiling is an experiment safety constraint, not a changed default.
+E2 is an isolated reply experiment, not a complete workflow. The constructed hybrid preserves the same fields but is not a byte-exact historical prompt. Native E6 kept `--ctx-shell=open`, code dossiers, current profiles and both adversaries for full fixture gates. CRM used **only `group:crm1-ui-shell+3`**, covering shell, commerce, money and people. CRM experiment state is not a pass or planning authorization for the full real spec. The output cap and temporary network/session isolation are experimental constraints, not changed defaults.
 
-Experiments 3, 4 and 5 are deferred, not negative results. A default-versus-lean profile test would confound excerpts and formatting. A universal-prefix comparison needs dedicated cache/workflow controls. The production legacy question adapter does not delegate technical decisions to the optional adjudicator, so merely enabling that role would not test an authorized adjudication workflow.
+Both routes use OpenRouter. Native response receipts identify `deepseek/deepseek-v4.1-flash-1017` for all 116 Flash requests and `z-ai/glm-5.3` for all 101 GLM requests. Moving aliases and variable provider tariffs prevent claims of independent models/providers or universally reproducible pricing. Shared prefixes and recorded cache counters do not establish a controlled cold-versus-warm comparison.
 
-## Evidence checked before approval
+## Subjects and evidence
 
-1. Read the implementation plan's ordered experiments, benchmark/experiment documentation, deterministic before/after proof, and the C1, C2, C3, B5b and F2 delivery reports.
-2. The requested `c3-hardening/report.md` is absent. Its task directory contains task/status/inbox metadata, not a delivered report. This is an evidence gap, not a reason to invent conclusions.
-3. `orch doctor` reports OpenRouter, OpenAI and Anthropic credential readiness. The default gate route is `pi openrouter/~deepseek/deepseek-flash-latest`. Claude Haiku is currently disallowed, so it is not a fallback in this plan.
-4. `orch models` confirms that Flash and `openrouter/~z-ai/glm-latest` are allowed configured routes. No allowlist, role or default was changed.
-5. `pi --list-models deepseek` advertises a 943,718-token maximum output for default Flash. A turn budget and an after-the-fact dollar total alone are not a sufficient protection for a $5 experiment.
-6. An unpaid fetch of `https://openrouter.ai/api/v1/models` reports Flash input/output prices of $0.07/$0.50 per million tokens, and GLM $0.079/$1.40. Both advertise a 1,048,576-token context. These are proposed bounds/estimates, not actual usage measurements. Revalidate them before dispatch.
-7. The current integrated code already has a shared gate RunBudget. Its documentation explicitly labels token enforcement `reported_usage_and_reserved_allowance`; opaque tool-loop usage is reconciled after an invocation. Do not mistake that for a provider-level prepaid dollar cap.
-8. The real CRM spec is the copied, byte-exact `b5811b75d2b7e626023014fdcb13eb02e65377e359019cff150a7aec927158f4` object. The proposed current source is committed CRM HEAD `a87b826d30db1c1d07a5adaab02f53a39475dec9`, not the user's five uncommitted working-tree changes. Rendering evidence uses committed blob `3531e14ca4d92c220b99ca0330a3116ffb13ddfb`. No current correctness is inferred from old keys.
-9. The Go/Python/TypeScript fixture bodies all trim without case conversion. These give unambiguous complete-reuse and partial-extension controls. Contradiction, insufficient evidence, authority, same-name and failed-provider cases are declared in the manifest before paid output.
+- Code fixtures come from the integrated baseline and use current bodies that trim without case conversion. These are behavior controls, not a claim that every whole fixture workflow has perfect acceptance tests.
+- The real CRM spec is byte-exact SHA256 `b5811b75d2b7e626023014fdcb13eb02e65377e359019cff150a7aec927158f4`.
+- CRM code is committed HEAD `a87b826d30db1c1d07a5adaab02f53a39475dec9`, excluding the user's five uncommitted working-tree changes. The rendering-seam source blob is `3531e14ca4d92c220b99ca0330a3116ffb13ddfb`.
+- Six packet representations, frozen keys, gate inputs and private configurations have pre-execution SHA256 identities in the manifest. Canonical values and array order round-tripped equally across representations.
+- The requested `c3-hardening/report.md` was absent. No delivery evidence was invented.
+- Startup readiness reported no semantic index in the experiment worktree and no TypeScript language server. No backend was installed. Partial or unknown retrieval instrumentation is not evidence of absence.
+- Source/spec/key contents, raw responses, role sessions and private benchmark snapshots are excluded from Git. Their private work directory is recorded in the task's `checks/work-dir.txt`.
 
-`orch doctor` also reports no semantic index in the experiment worktree and no TypeScript language server. This is known degraded retrieval readiness, not a silent clean result. No backend was installed or default changed. The run report must retain partial/unknown instrumentation instead of treating it as an absence finding.
+## E2: equivalent representation
 
-## Required spending guard
+The amended population is **60 planned case-observations**: `(8 fixture + 2 CRM) x 2 trials x 3 formats`. All twelve calls completed. One TOON fixture reply was invalid JSON; the other eleven parsed. Missing and invalid cases remain in the denominator.
 
-Manifest approval and the revised account-usage contract are recorded. No-spend transport/output-cap checks now pass; frozen packet and serialization checks still precede paid execution.
+| Format | Present / planned | Native-valid / planned | Native-complete decisions | Supported-correct under frozen key | Matrix cost | Cost / supported-correct |
+|---|---:|---:|---:|---:|---:|---:|
+| Hybrid | 20/20 | 18/20 | 10 | 7 | $0.010970141 | $0.001567163 |
+| TOON | 12/20 | 11/20 | 6 | 5 | $0.010370614 | $0.002074123 |
+| Compact JSON | 20/20 | 18/20 | 9 | 7 | $0.008608714 | $0.001229816 |
 
-Use temporary configuration and test-only execution tooling, not production edits. Keep Pi, the configured provider/model IDs, and the gate's open-shell setting. A temporary model override caps output at 4,096. A local accounting proxy must verify that cap on actual serialized requests against a fake upstream before any real request. It must serialize upstream calls, pin allowed models, reject unbounded billable options, sync admission records, and reserve the whole conservative next-request ceiling before dispatch.
+Native-complete means the production reducer could accept a supported decision. It does not mean every correct deferral should pass. Owner and contradictory-evidence deferrals intentionally remain incomplete. Across formats, there were **52 present, 47 valid, 25 native-complete and 19 supported-correct decisions**. Including the failed pilot, E2 cost per supported-correct decision is **$0.001720135**.
 
-The original cap assumption was not sufficient: OpenRouter documents combined reasoning and visible output under `max_tokens` on most providers, not all. Both moving aliases return an empty endpoint list. Message002 therefore requires full advertised context **and full advertised output**, not a 4,096-token money assumption. Reserve $0.54525932 for Flash or $1.404042704 for GLM before every underlying paid request. Refuse when cumulative plus that reservation exceeds $4.50, or cumulative reaches $4.00. Revalidate catalog prices/limits and provider price restrictions. The old $0.08/$0.15 per-run limits now detect anomalies; any measured breach is recorded and stops further calls.
+| Format | Raw unsafe proposals / keyed native false approvals | Accepted actions disagreeing with key | Incorrect absence | Missed reuse/extension | Supported false blockers |
+|---|---:|---:|---:|---:|---:|
+| Hybrid | 2 / 2 | 3 | 3 | 1 | 0 |
+| TOON | 1 / 1 | 1 | 1 | 0 | 0 |
+| Compact JSON | 2 / 2 | 2 | 2 | 0 | 0 |
 
-Provider-reported charges and request IDs must reconcile with actual generation usage where available. Preserve Pi session/catalog totals and `gate.json` pass totals separately; do not relabel a catalog estimate as a verified provider charge. An unreconciled timeout, crash, missing cost, unexpected fee or bypass-capable model workflow stops further spending and requires a new decision. No paid fallback, retries outside a declared run allowance, background classifier, default change or additional experiment is approved by unused budget.
+These are **mechanical fixed-key counts, not adjudicated production defect rates**:
 
-Temporary tooling now implements durable Decimal admission, one-request serialization, synced reservations, authoritative OpenRouter key-usage reconciliation, anomaly stops and crash/unknown-cost refusal. Eleven offline tests passed. The output-cap probe passed for both exact Pi routes: one localhost-only request each, `max_tokens=4096`, dummy auth and no paid provider requests. The probe used an OS network restriction and a pinned installed Node runtime. Its initial failures were a rejected numeric sandbox host and a runtime downloader blocked by the sandbox; both dispatched zero requests. These failures are preserved, not counted as successful probes.
+1. The frozen trusted `go-provider` packet itself is malformed: `count_kind: unknown` with a total is a native system-data error. The original boolean may-pass smoke check mistook that error for an intended non-pass. Inputs and gold were not repaired after observing replies. This is an input/validation failure, not a model failure or proof that the negative control passed.
+2. Accepted `go-wrong-name` new-code decisions disagree with the key. Independent packet/key adjudication is required before calling them production false approvals.
+3. Hybrid CRM trial1 selected a new seam instead of the keyed extension. The scorer's false-approval flag uses expected may-pass state and misses this wrong action in an otherwise positive case. The separate accepted-wrong-action column retains it.
+4. JSON CRM trial2 selected the expected action but lacked sufficient support and stayed incomplete. Missing support is not a successful positive or a supported blocker.
+5. Zero supported false blockers does not mean every positive was accepted. No source/key ambiguity or incomplete case was removed to improve a rate.
 
-Evidence: background `bf28da276`; private result SHA256 `e98bd477e2d9785ac63e0b4dfdd3a7ae2f40ce2f13cdbfde134cad6258165111`. Guard source SHA256 `c680c1bc5653dc9eb063db2b11f4bed589aa5034263a5868518de8bfb8a29922`; 11-test source SHA256 `f52f82e59a4c5d5c0fc09535e750dcf447422dbbf9e7ca1f629a6dc1b90b1872`. These are separate fake-transport and guard-unit checks, not evidence of real-provider billing semantics.
+TOON used about **5% more input tokens** than compact JSON on the heterogeneous fixture packet, but about **15% fewer** on the regular two-case CRM packet. Sampled output/reasoning length and discounted versus full provider tariffs also affected dollars. Compact JSON was cheapest in this matrix, but that is not a causal, provider-invariant codec result.
 
-The configured OpenRouter credential is OAuth. The API-key export command correctly refuses it; the bearer-token command resolves an OpenRouter-format credential in memory. The free authoritative key-usage endpoint works. No credential was printed or stored. A fresh usage baseline is required immediately before the first paid request; account history is not experiment spend.
+### Failed pilot and billing
 
-## Scoring and interpretation
+The earlier pilot `E2-fixture-hybrid-t1` hit `finish_reason: length`, produced invalid JSON and had **0/8 valid/supported case coverage**. It is not a supported blocker or a silently replaced success. Complete-command latency was 35.230 seconds; provider generation time was separately 29.576 seconds, with 0.373 seconds reported latency. Its reasoning/completion split is inconsistent and was not repaired by inference.
 
-Use the existing deterministic reducer/evidence validation, `orch gate compare`, and isolated-store `orch bench record/compare/report/verify`. Do not generate a supporting rationale, lookup proof or authority on behalf of a model that omitted it. An adapter may carry trusted envelope identity, not invent model support. Historical answer keys do not map automatically onto current CRM code.
+Generation `gen-1792561488-D1OVkrrTAgUi7MvlBq2j` eventually reconciled exactly: raw `usage.cost`, generation `total_cost`, and settled key delta were all **$0.002733090**. The ledger preserves its original `cost:null` event and linked reconciliation, counted once. Early settlement-poll values were not journaled, so exact lag is unknown. Historical guard proofs do not certify the later simplified runner.
 
-For every experiment, report false approvals, false blockers, incorrect absence, missed reuse/extension, support quality, present/valid/supported coverage, all-in cost per supported correct decision, isolated and complete-command latency, and downstream acceptance or an explicit `unknown/not measured`. The manifest defines denominators. Missing and unsupported replies stay in the full population. A cap-exhausted incomplete review is not silently scored as a supported blocker.
+## E6: real native route smoke
 
-Predeclared trial screens are zero deterministic false passes, zero model false approvals, at most 10% false blockers, at least 90% coverage, at least 95% support quality, at most $0.10 per correct decision and at most 600 seconds per complete measured command. Trust failures veto aggregate improvements. Two trials per cell are too small to establish safety or route independence, even if all are clean. Numeric screens do not authorize a default change.
+All sixteen runs used actual native gate commands. Raw directories were snapshotted before same-spec full-gate outputs could be overwritten, and all runs were recorded in the private `paid-exploratory` suite.
 
-## Live bench store protection
+| Project | Route | Trial | Native state | Complete required checks | Actual provider USD | API requests | Command seconds |
+|---|---|---:|---|---:|---:|---:|---:|
+| Go | Flash | 1 | incomplete | 5/6 | .006375578 | 12 | 137.416 |
+| Go | Flash | 2 | pass | 6/6 | .005328204 | 10 | 60.293 |
+| Go | GLM | 1 | pass | 6/6 | .005708218 | 10 | 36.206 |
+| Go | GLM | 2 | pass | 6/6 | .006842689 | 12 | 32.699 |
+| Python | Flash | 1 | fail | 6/6 | .006426450 | 16 | 102.873 |
+| Python | Flash | 2 | pass | 6/6 | .004694242 | 14 | 64.971 |
+| Python | GLM | 1 | pass | 6/6 | .007849330 | 11 | 30.984 |
+| Python | GLM | 2 | pass | 6/6 | .006320078 | 11 | 25.433 |
+| TypeScript | Flash | 1 | pass | 6/6 | .007661072 | 11 | 91.151 |
+| TypeScript | Flash | 2 | fail | 5/6 | .009646018 | 12 | 112.938 |
+| TypeScript | GLM | 1 | pass | 6/6 | .008818870 | 14 | 38.947 |
+| TypeScript | GLM | 2 | pass | 6/6 | .012027842 | 17 | 73.453 |
+| CRM subset | Flash | 1 | experiment | 9/13 | .032482826 | 19 | 369.144 |
+| CRM subset | Flash | 2 | experiment | 10/13 | .029835396 | 22 | 238.732 |
+| CRM subset | GLM | 1 | experiment | 12/13 | .026498878 | 4 | 94.581 |
+| CRM subset | GLM | 2 | experiment | 11/13 | .144692160 | 22 | 272.321 |
 
-The live store was opened only for read-only discovery and a copy. Every benchmark command after discovery points `ORCH_BENCH_DIR` at the private copy; paid recordings will use temporary storage as well.
+Native required-check completion is **not supported-correct behavior coverage**. A completed review can accept a blocker, while an experiment can exit zero with unresolved owner questions. CRM's four trial results retain unresolved owner-routed entries. Question IDs and discovery vary per run, so fewer questions or higher completion do not prove correct closure or better authority handling.
 
-- Live store: `~/.local/share/orchestrate/bench`.
-- Initial listing: 568 entries, including 466 regular files, 23 runs and 2 keys.
-- Initial listing SHA256: `e2f6647ced1ea8ac251436b083d8374ef620580a608070b3f90a87a026c29f1c`.
-- Listing fields: relative path, type, mode, size, nanosecond mtime and regular-file SHA256.
-- Private listing/copy location: recorded in the task directory at `checks/work-dir.txt`. Store contents, private source/spec/keys and raw model transcripts will not be committed.
-- Phase-1 after-listing comparison: PASS, byte-identical to the initial listing, including all 466 file hashes, sizes, modes and mtimes.
-- Final listing and byte-for-byte comparison: pending after execution or cancellation. Never modify the source to make a comparison pass.
+### Findings and variation
 
-## Verification
+- All three Flash fixture outcomes changed between repetitions: incomplete/pass, fail/pass and pass/fail. GLM's six fixture runs passed. This is observed variation, not an accuracy ranking.
+- Python Flash trial1 accepted a blocker treating same-named identity functions in other/vendor/generated modules as parser's public contract. Namespace/decoy conflation is a concrete follow-up concern; the cited bodies exist, but source-location verification alone does not establish contract equivalence. Independent adjudication is still needed before publishing a false-blocker rate.
+- TypeScript Flash trial2 accepted a missing-behavioral-acceptance blocker. The fixture's diff-only acceptance command and non-asserting test file are genuinely weak controls. Do not label every rejection a model false blocker or every pass a correct approval.
+- Go Flash trial1 kept an unsupported adversary claim incomplete. TypeScript Flash trial2 also retained an unsupported adversary claim alongside its accepted blocker. Fail and incomplete are distinct states, not launcher failures.
+- GLM CRM cost changed **5.46x** between trials, with 4 versus 22 underlying requests. More/fewer requests are not inherently better quality. GLM cost **$0.218758065** across eight runs versus Flash **$0.102449786**. GLM used 101 API requests versus Flash's 116, demonstrating that request count alone does not predict dollars.
+- GLM was faster in all six matched fixture command measurements, but its second CRM trial was slower than Flash's second. Two trials and shared provider infrastructure do not support a general latency, price or reliability guarantee.
 
-Fixed packet preparation passed before any paid call:
+Whole-workflow false approval, false blocker, incorrect absence, missed reuse, supported-answer accuracy and cost per supported-correct behavior are **unavailable for E6**. There is no independently mapped current whole-group key, and package-check reviews are not interchangeable with per-behavior supported verdicts. Historical CRM keys were not joined to current code. No key, support rationale, lookup proof or authority was manufactured to produce a score.
 
-- Native reducer controls: **8 fixture and 2 real-CRM cases**, PASS, 0.734 seconds (`be7df1e20`).
-- Serialization equality: exact canonical JSON values and array order match after decoding hybrid, TOON and compact JSON for both packs, PASS, 0.015 seconds (`be97c7639`).
-- The manifest records SHA256 identities for all six input representations, both frozen key/policy files, the three-project gate input manifest and private experiment configuration. No private source, spec, key or prompt contents are committed.
+## Accounting and measurement limits
 
-A CPU-locked background preflight ran the required repository checks and deterministic fixture/manifest selection:
+The ledger sums to **$0.353890410**, below both the latest $5.75 cap and original $5.00. An independent deterministic reparse of all **217 native raw SSE receipts** matches every E6 run's request count, generation-ID set and exact Decimal cost, totaling **$0.321207851**. All costs are known; the pilot's null is resolved by its linked event. Zero-dispatch setup events cost zero and are excluded from model-quality counts, but remain visible.
+
+Provider response charges are authoritative under messages008-011. The final one-per-wave account snapshot showed $0.348126415 above the original baseline, **$0.005763995 less** than the complete own-response ledger. This is an aggregate settlement discrepancy consistent with earlier lag, not a claim of exact final account reconciliation. No further billing polling was performed and missing aggregate settlement was not recorded as free usage.
+
+A row's `cumulative` is the request-level measured snapshot at that command's finish, including known charges in other still-running commands. It can exceed the prefix sum of completed-run rows; the final settled command-row sum is the reported total. Do not add cumulative snapshots together.
+
+The capped custom Pi metadata omitted pricing tables, so native SDK/benchmark cost fields show zero. **Those zeros are not verified free runs.** Use the outer ledger and upstream receipts for money; retain immutable native records unchanged. Per-pass times, token/cache counters and exploration traces are retained privately. Do not sum parallel pass seconds and call it command wall time. Command latency excludes study preparation and operator waiting; it is not total elapsed time to conduct this study. Separate provider-only latency was not measured for every amended call.
+
+## Deterministic verification and private evidence
+
+Before paid execution, repository build, vet and focused fixture/manifest tests passed:
 
 ```sh
 cd skills/orchestrate/tool
@@ -100,50 +131,33 @@ go vet ./...
 go test -p 2 -count=1 -run 'Fixture|Manifest' .
 ```
 
-Outcome: **PASS**, exit 0. Build and vet emitted no failures. The focused fixture/manifest suite passed in **17.960 seconds**. The task acquired and released the CPU lock successfully. This command made no model calls and did not run the full test suite.
+The CPU-locked task `b9b8d4023` exited zero; the focused suite took 17.960 seconds. No production source changed afterward. No new full suite or guard/probe project was added during the final execution phase.
 
-Evidence: background task `b9b8d4023`, output `.pi/tasks/cfaff92d-0a36-4cc7-9074-22d8e4108bf0-58502/b9b8d4023.output`.
+Actual E2 replies were graded with production `answer.Validate` and `ReduceReview`, with missing output and system-data errors retained. This is deterministic evaluation of observed replies, not a model-generated truth key. Initial serialization equivalence passed, but the malformed trusted fixture means the earlier blanket packet-validation interpretation was wrong.
 
-Independent no-spend manifest checks passed:
+Existing native `gate compare` and private `bench record/compare/report/verify` are used for E6. Four corrected invocation/configuration/scope refusals are preserved: gate compare needs spec plus two named experiments; the suite's original CRM-only scope excludes fixture groups by default; an obsolete configuration places the repo-only `check` setting in user scope; and a mixed-repository report requires an explicit cross-subject override. A fifth failure exposed an installed CLI mismatch: `bench report --help` advertises `--total`, but its argument validator rejects that flag. No production fix or suite-metadata rewrite was authorized. The final analysis uses the successful paid-run configuration, all four within-project comparison outputs and a CRM-scoped report, without relaxing cross-repository compatibility. Fixture-specific saved reports remain limited by the suite scope and report flag mismatch; their native records and successful comparisons are retained. Same-project full-pass comparisons explicitly use `--total=all`, retain warnings and do not rank across projects. No immutable record was rewritten to bypass a check. All four within-project, four-run benchmark comparisons and all three native CRM comparisons succeeded. Private `bench verify --suite paid-exploratory` passed with **0 errors and 2 informational historical-provenance notes** about copied subjects with note/unknown commit bases. Those notes are not current correctness evidence. The CRM-scoped JSON/saved report and native export completed successfully. The export contains all **16 native run records**. Fixture-specific report limitations did not discard verified records or prevent archival.
 
-- The integrated `experimentManifest.ValidateRunnable` accepted the manifest when run from a temporary stdlib-only harness.
-- Exact decimal arithmetic verified all 28 runs, the $1.04 estimate, and the $3.36 sum of run ceilings below the $4.00/$4.50/$5.00 stop/admission/hard limits.
+Three private archives are retained in the orchestrator task's `checks/` directory, outside the Git worktree, with owner-only mode `0600`:
 
-Successful manifest validation grants neither spending authority nor a default change.
-
-## First paid run and billing reconciliation
-
-`E2-fixture-hybrid-t1` made one request to the approved Flash alias. Generation ID: `gen-1792561488-D1OVkrrTAgUi7MvlBq2j`. The provider was Relace; the generation endpoint identifies the served model as `deepseek/deepseek-v4.1-flash-20261017`. The response's alias is `deepseek/deepseek-v4.1-flash-1017`.
-
-The guard did not reconcile account and response costs during its short post-response wait. It retained the full **$0.54525932** reservation and stopped all further dispatch. The ledger recorded `cost: null`, not zero. Message003 authorized free billing reconciliation only and forbids any resume without another instruction.
-
-At 2026-10-21T05:51:34.547613Z, the free billing evidence agreed exactly:
-
-| Evidence | USD |
-|---|---:|
-| Key usage after | 20.566618352 |
-| Key usage before | 20.563885262 |
-| Measured experiment delta | **0.002733090** |
-| Recorded generation `total_cost` | **0.00273309** |
-| Raw response `usage.cost` | **0.00273309** |
-
-The initial cost field was present, and the final values agree without a rounding difference. This supports **account-settlement lag** as the cause. The initial per-poll values were not journaled, so the exact lag and whether an early poll showed zero or a partial delta remain unknown. That is an accounting-instrumentation gap, not permission to label the run free.
-
-Recommended temporary guard change before resume: persist each free billing poll and timestamp, fetch the recorded generation's cost and allow up to 60 seconds for reconciliation. Require exact raw-response/generation-cost agreement. If aggregate key usage is stale, label that lag and use the verified per-generation charge as the explicit fallback, never a fabricated key delta. Retain the full reservation until the generation/response pair reconciles. Preserve cumulative measured charges across calls, still read key usage before every request, and stop on an unexplained excess over the verified generation sum. Check the final overall key delta once it settles. Any unresolved cost disagreement retains the full bound and stops again. The verified first-run reconciliation is appended to the ledger; the durable dispatch guard remains stopped pending the orchestrator's explicit instruction.
-
-The upstream reply also hit **`finish_reason: length`**. It contains 1,266 visible characters and is not valid JSON. No full structured case reply can be accepted: valid and supported case coverage are **0/8**. This is an incomplete experimental result, not a supported blocker or a format winner. No model repair or replacement trial was run.
-
-Measured complete-command latency was **35.230 seconds**. The provider reports 29.576 seconds generation time and 0.373 seconds latency; those are separate provider measurements, not substitutes for complete workflow latency. The response reports 9,787 prompt tokens, 4,096 completion tokens and 4,536 reasoning tokens. The reasoning count exceeds the completion count, so the split is inconsistent and must not be summed or repaired by inference. The verified dollar charge remains known.
-
-One truncated reply cannot establish false-approval, false-blocker, absence, reuse or support-quality rates. There were no accepted complete decisions; conditional accuracy and cost per supported correct decision are undefined. The 4,096-token response constraint failed to produce a usable eight-case reply in this trial. Keeping or amending that constraint requires an explicit `resume` decision, not silent tuning of the held-out matrix. Current defaults remain unchanged.
-
-## Results and recommendations
-
-| Experiment | Result | Current recommendation |
+| Private archive | Contents | SHA256 |
 |---|---|---|
-| E2 format packets | One truncated/invalid first reply, 0/8 valid case coverage; $0.00273309; study stopped pending resume | Keep current TOON direction; no representation winner claimed |
-| E6 route smoke | No paid run; temporary fixture dry-run format correction is under verification | Keep current default Flash route; no independence claim |
-| E3 excerpts, E4 prefixes, E5 adjudication | Deferred | Keep current excerpt/prefix behavior and adjudication disabled |
-| Question classifier | Outside the selected experiments | Keep current classifier defaults; no promotion |
+| `paid-exploratory.tar.gz` | Native benchmark suite, 16 runs, snapshots, role sessions and saved CRM report; 1,487,597 bytes | `55e9a127e80079a5124abdee849198a3d723f1eae0367bc78be5b8d700288bcc` |
+| `paid-supplement.tar.gz` | Frozen packets, response receipts, command/score outputs, driver/config, before/after inventory and native receipt audit; 424 files | `703b7de6c0723ba609ab1b7453c2f4cac6ef5855241fcf91ca47dd241880bf0d` |
+| `paid-evaluation.tar.gz` | Three actual temporary production-scorer/serialization test adapters, not shipping code | `3bafaa4b6602d899ed745826ba5508383c06f2868eb7c6b30c08c32fe6bbeb72` |
 
-Verified ledger total: **$0.00273309**. The original unknown-cost event is resolved by its linked reconciliation event, not counted twice. The full-bound guard remains stopped pending the `resume` decision. No additional budget is requested.
+These archives contain private material and have no redaction. They are not committed or published. The owned `paid-runs` tab was closed after all model panes finished; no unrelated tab was closed.
+
+Live store final protection is **PASS**: 568 entries, 466 files and 102 directories. Before and after listing SHA256 are both **`e2f6647ced1ea8ac251436b083d8374ef620580a608070b3f90a87a026c29f1c`**. Fields are relative path, type, mode, size, nanosecond mtime and file SHA256. The final listing is private `bench-after-final.json`. The live 23 runs and two keys remain unchanged; historical keys were not used as current truth.
+
+## Recommendations
+
+| Area | Decision and rationale |
+|---|---|
+| E2 format | Keep current direction/defaults. TOON's input benefit depends on shape; the cheapest observed JSON arm is not a workflow or safety win. Repair/adjudicate the packet/key defects in a separately scoped follow-up before using these screens for promotion. |
+| E6 gate route | Keep current Flash default. GLM is execution-compatible and promising on measured fixture latency, but more passes are not a correctness key, overall cost was higher, CRM variance was large and n=2 is too small. |
+| Gate trust/review | Investigate namespace/contract conflation and weak acceptance fixtures separately. Do not change production during this paid experiment or present location verification as semantic truth. |
+| E3 excerpts / E4 prefixes | Deferred. Keep current behavior; no controlled causal result was collected. |
+| E5 adjudication / question classifier | Keep disabled/current defaults. No authorized delegation or classifier promotion was tested. |
+| Budget | No further money or model calls requested. Unused budget is not permission for extra trials. |
+
+No safety, independent held-out confirmation, provider independence, full-CRM approval or product acceptance claim is made.
