@@ -70,9 +70,23 @@ func gateAgentPass(repo, harness string, p gatePass) (gatePass, error) {
 	}
 	cli, err := CtxCLIFor(harness, repo)
 	if err != nil {
+		if p.ctxOnly && harness == "pi" {
+			return p, fmt.Errorf("ctx-only extension setup failed; refusing an open shell: %w", err)
+		}
 		return p, err
 	}
-	if p.ctxOnly && harness == "pi" {
+	if p.ctxOnly && harness == "pi" && !p.noTools {
+		if cli.Extension == "" {
+			return p, fmt.Errorf("ctx-only extension unavailable; refusing an open shell")
+		}
+		ready, err := os.CreateTemp(filepath.Dir(cli.Extension), "ready-*")
+		if err != nil {
+			return p, fmt.Errorf("ctx-only readiness: %w", err)
+		}
+		cli.Ready = ready.Name()
+		_ = ready.Close()
+		_ = os.Remove(cli.Ready)
+		cli.Env = append(cli.Env, "ORCH_CTX_ONLY_READY="+cli.Ready)
 		cli.Notice += "\n" + ctxOnlyNotice
 	}
 	if p.ctxProfile != "" {
@@ -122,12 +136,29 @@ func piPassTools(p gatePass) []string {
 	if p.noTools {
 		return []string{"--no-tools"}
 	}
-	if p.ctxOnly && p.cli.Extension != "" {
-		// Only the read tool and a shell that the extension limits to orch ctx.
-		return []string{"--tools", strings.Join(append([]string{"read"}, p.cli.Tools...), ","), "-e", p.cli.Extension}
+	if p.ctxOnly && p.ctxTool {
+		// No shell until the loaded extension installs its guard and enables bash.
+		// If loading fails, pi can continue, but never with an open shell.
+		// A modifier selects the initial loadout without excluding bash from
+		// pi's registry. A hard --tools read allowlist cannot later enable it.
+		args := []string{"--no-builtin-tools", "--tools", "+read"}
+		if p.cli.Extension != "" {
+			args = append(args, "-e", p.cli.Extension)
+		}
+		return args
 	}
 	tools := append([]string{"read", "grep", "find", "ls"}, p.cli.Tools...)
 	return []string{"--tools", strings.Join(tools, ",")}
+}
+
+func ctxOnlyReady(p gatePass) error {
+	if !p.ctxOnly || !p.ctxTool || p.noTools {
+		return nil
+	}
+	if b, err := os.ReadFile(p.cli.Ready); err != nil || string(b) != "ctx-only\n" {
+		return fmt.Errorf("ctx-only extension did not load or activate; refusing pass results (shell was disabled at startup)")
+	}
+	return nil
 }
 
 func claudePassArgs(choice profile, p gatePass) []string {

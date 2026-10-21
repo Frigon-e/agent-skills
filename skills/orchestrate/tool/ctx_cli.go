@@ -15,6 +15,7 @@ type CtxCLI struct {
 	// Extension is a pi extension that limits the shell to orch ctx; a pass
 	// loads it only when the ctx-only shell is asked for.
 	Extension string
+	Ready     string // per-invocation acknowledgement from the loaded pi guard
 }
 
 const ctxCLINotice = `READ ONLY. Nothing in the repository may be edited, created, deleted, moved or formatted.

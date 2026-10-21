@@ -1,6 +1,7 @@
 // Read-only gate passes: the shell runs `orch ctx <find|sym|text|batch|refs> ...` and
 // nothing else. No pipes, redirects, command substitution, globs or other commands.
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { writeFileSync } from "node:fs";
 
 const allowed = /^orch ctx (find|sym|text|batch|refs)(\s|$)/;
 
@@ -39,5 +40,16 @@ export default function (pi: ExtensionAPI) {
 				`Put several lookups in ONE call: orch ctx batch -q "find:Code that ..." -q "symbol:Name refs=3" -q "text:pattern glob=dir/**". ` +
 				`Shorten output with --compact or --limit N. Read files with the read tool (offset and limit); there is no cd, ls, grep, head, tail, sed or cat.`,
 		};
+	});
+	pi.on("session_start", () => {
+		const ready = process.env.ORCH_CTX_ONLY_READY;
+		if (!ready) return;
+		// The guard above is installed before bash becomes available. A failed
+		// import leaves only read active; orch rejects an absent acknowledgement.
+		pi.setActiveTools(["read", "bash"]);
+		if (pi.getActiveTools().sort().join(",") !== "bash,read") {
+			throw new Error("ctx-only tools could not be activated");
+		}
+		writeFileSync(ready, "ctx-only\n", { mode: 0o600 });
 	});
 }
