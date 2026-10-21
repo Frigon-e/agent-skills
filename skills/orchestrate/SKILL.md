@@ -99,7 +99,8 @@ fine spec, so the call is yours and the user's. Inside herdr the model passes al
 `gate-<hash>` tab (at most six, closed when the gate ends; if it cannot be opened no pass runs, the report says so and the state is `incomplete`; headless passes are only for runs outside herdr, `--headless` or `ORCH_HEADLESS=1`); each pass is a
 real pi or Claude agent in a pane named after it, which you can watch and attach to; a pass that
 failed keeps its session and output under `gate/<hash>/` for 7 days and
-for the newest 5 gate runs. After a run, with no model call, `orch gate`
+for the newest 5 gate runs; a run without `gate.json` is still running and is
+never pruned until its directory is 7 days old. After a run, with no model call, `orch gate`
 enriches its question cards (also on demand: `orch gate enrich <spec>`): only
 exact duplicates after whitespace normalization share a card; related questions
 keep their IDs, routes and answer states. Original duplicate identities and text
