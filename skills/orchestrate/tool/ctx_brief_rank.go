@@ -662,7 +662,11 @@ func (pl *briefPlan) makeQueries() {
 	}
 	if len(pl.builds) == 0 {
 		if push(sentenceQuery(pl.in.Title)); len(qs) == 0 {
-			push(sentenceQuery(pl.in.Body))
+			body := pl.in.Body
+			if body == "" {
+				body = pl.in.Text
+			}
+			push(sentenceQuery(body))
 		}
 	}
 	pl.concepts = qs
