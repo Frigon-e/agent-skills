@@ -6,14 +6,18 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"math/rand"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
+	"syscall"
 	"time"
 )
 
@@ -41,7 +45,9 @@ func jbcontextBin() string {
 
 // searchCode runs one jbcontext search in dir and returns its hits, from the
 // cache under cacheDir when the same search was run before. rev pins it to an
-// indexed revision when not empty.
+// indexed revision when not empty. Identical searches running at once in this
+// process share one jbcontext call, and a rate limited search is retried, then
+// skipped for a short cooldown (see jbRun).
 func searchCode(bin, dir, cacheDir, rev, pathFilter string, limit int, query string) ([]codeHit, error) {
 	sum := sha256.Sum256([]byte(fmt.Sprintf("%s\x00%s\x00%s\x00%d", query, rev, pathFilter, limit)))
 	cache := filepath.Join(cacheDir, fmt.Sprintf("jb3-%x.json", sum[:8]))
@@ -51,8 +57,16 @@ func searchCode(bin, dir, cacheDir, rev, pathFilter string, limit int, query str
 			return hits, nil
 		}
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), ctxCallLimit)
-	defer cancel()
+	hits, err := jbFlight.do(bin+"\x00"+dir+"\x00"+cache, func() ([]codeHit, error) {
+		return jbSearchOnce(bin, dir, cache, rev, pathFilter, limit, query)
+	})
+	if hits != nil {
+		hits = append([]codeHit{}, hits...) // a copy: callers merge into it
+	}
+	return hits, err
+}
+
+func jbSearchOnce(bin, dir, cache, rev, pathFilter string, limit int, query string) ([]codeHit, error) {
 	args := []string{"search", "--limit", fmt.Sprint(limit), "--json-output"}
 	if rev != "" {
 		args = append(args, "--revision", rev)
@@ -60,24 +74,24 @@ func searchCode(bin, dir, cacheDir, rev, pathFilter string, limit int, query str
 	if pathFilter != "" {
 		args = append(args, "--path-filter", pathFilter)
 	}
-	cmd := exec.CommandContext(ctx, bin, append(args, query)...)
-	cmd.Dir = dir
-	stdout := ctxBoundedBuffer{limit: 16 * 1024 * 1024}
-	stderr := ctxBoundedBuffer{limit: 64 * 1024}
-	cmd.Stdout, cmd.Stderr = &stdout, &stderr
-	runErr := cmd.Run()
-	hits, err := parseJbcontext(stdout.Bytes())
-	if ctx.Err() != nil {
+	args = append(args, query)
+	r, err := jbRun(bin, dir, args, query)
+	if err != nil {
+		return nil, err
+	}
+	stdout, runErr, stderr := r.out, r.runErr, r.stderr
+	hits, perr := parseJbcontext(stdout.Bytes())
+	if r.timedOut {
 		return hits, fmt.Errorf("jbcontext timed out after %s", ctxCallLimit)
 	}
 	if runErr != nil {
-		return hits, fmt.Errorf("jbcontext failed: %v: %s", runErr, short(strings.TrimSpace(stderr.String()), 200))
+		return hits, fmt.Errorf("jbcontext failed: %v: %s", runErr, short(strings.TrimSpace(stderr), 200))
 	}
 	if stdout.cut {
 		return hits, fmt.Errorf("jbcontext output reached the 16 MiB cap; narrow with -p/path= and retry")
 	}
-	if err != nil {
-		return hits, err
+	if perr != nil {
+		return hits, perr
 	}
 	// A full ranked page is truncated, not a completed search.
 	if len(hits) < limit {
@@ -87,6 +101,169 @@ func searchCode(bin, dir, cacheDir, rev, pathFilter string, limit int, query str
 		ctxCacheWrite(cache, hits)
 	}
 	return hits, nil
+}
+
+// ---- rate limit ----
+
+const (
+	jbSlots         = 2                // jbcontext searches running at once, machine-wide
+	jbRetries       = 3                // retries after a rate limited answer
+	jbBackoff       = 2 * time.Second  // first wait; doubles, plus up to 50% jitter
+	jbCooldown      = 20 * time.Second // after retries ran out, skip jbcontext this long
+	jbSlotWaitLimit = 3 * time.Minute  // longest wait for a free slot
+)
+
+// errJBRateLimited marks a search the JetBrains service refused with HTTP 429.
+// Its text is one line and names the query, not the license.
+var errJBRateLimited = errors.New("jbcontext rate limited (429)")
+
+func jbRateErr(query string, skipped bool) error {
+	how := "retries ran out"
+	if skipped {
+		how = "skipped during the cooldown"
+	}
+	return fmt.Errorf("%w: %s, query skipped: %q", errJBRateLimited, how, short(flat(query), 80))
+}
+
+func jbRateLimitedOutput(out string) bool {
+	return strings.Contains(out, "429") || strings.Contains(strings.ToLower(out), "limit reached")
+}
+
+func jbBackoffBase() time.Duration {
+	if ms, err := strconv.Atoi(os.Getenv("ORCH_JB_BACKOFF_MS")); err == nil && ms > 0 {
+		return time.Duration(ms) * time.Millisecond
+	}
+	return jbBackoff
+}
+
+var (
+	jbCoolMu    sync.Mutex
+	jbCoolUntil = map[string]time.Time{} // jbcontext binary -> no calls before
+)
+
+func jbCooling(bin string) bool {
+	jbCoolMu.Lock()
+	defer jbCoolMu.Unlock()
+	return time.Now().Before(jbCoolUntil[bin])
+}
+
+type jbResult struct {
+	out      *ctxBoundedBuffer
+	runErr   error
+	timedOut bool
+	stderr   string
+}
+
+// jbRun runs jbcontext with args under a machine-wide slot, retrying a rate
+// limited answer with exponential backoff. The slot is free while it waits. err
+// is set only when no process result exists (rate limited, no slot).
+func jbRun(bin, dir string, args []string, query string) (jbResult, error) {
+	if jbCooling(bin) {
+		return jbResult{}, jbRateErr(query, true)
+	}
+	wait := jbBackoffBase()
+	for attempt := 0; ; attempt++ {
+		release, serr := jbAcquireSlot()
+		if serr != nil {
+			return jbResult{}, serr
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), ctxCallLimit)
+		cmd := exec.CommandContext(ctx, bin, args...)
+		cmd.Dir = dir
+		out := &ctxBoundedBuffer{limit: 16 * 1024 * 1024}
+		errBuf := &ctxBoundedBuffer{limit: 64 * 1024}
+		cmd.Stdout, cmd.Stderr = out, errBuf
+		runErr := cmd.Run()
+		timedOut := ctx.Err() != nil
+		cancel()
+		release()
+		if runErr == nil || timedOut || !jbRateLimitedOutput(out.String()+errBuf.String()) {
+			return jbResult{out, runErr, timedOut, errBuf.String()}, nil
+		}
+		if attempt == jbRetries {
+			jbCoolMu.Lock()
+			jbCoolUntil[bin] = time.Now().Add(jbCooldown)
+			jbCoolMu.Unlock()
+			return jbResult{}, jbRateErr(query, false)
+		}
+		time.Sleep(wait + time.Duration(rand.Int63n(int64(wait/2)+1)))
+		wait *= 2
+	}
+}
+
+// jbSlotDir is shared by every orch process of the user. It sits beside the
+// per-checkout cache (see ctxCacheDir) so one ORCH_CACHE_DIR moves both.
+func jbSlotDir() string {
+	root := os.Getenv("ORCH_CACHE_DIR")
+	if root == "" {
+		home, _ := os.UserHomeDir()
+		root = filepath.Join(home, ".cache", "orchestrate")
+	}
+	return filepath.Join(root, "jb-slots")
+}
+
+// jbAcquireSlot takes one of jbSlots flock files. The kernel drops a flock when
+// its process dies, so a crashed holder never leaves a stale slot.
+func jbAcquireSlot() (release func(), err error) {
+	dir := jbSlotDir()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return nil, fmt.Errorf("jbcontext slots: %w", err)
+	}
+	deadline := time.Now().Add(jbSlotWaitLimit)
+	for {
+		for i := 0; i < jbSlots; i++ {
+			f, err := os.OpenFile(filepath.Join(dir, fmt.Sprintf("slot-%d.lock", i)), os.O_CREATE|os.O_RDWR, 0o644)
+			if err != nil {
+				return nil, fmt.Errorf("jbcontext slots: %w", err)
+			}
+			if syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB) == nil {
+				return func() { _ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN); f.Close() }, nil
+			}
+			f.Close()
+		}
+		if time.Now().After(deadline) {
+			return nil, fmt.Errorf("jbcontext: no free search slot after %s", jbSlotWaitLimit)
+		}
+		time.Sleep(25*time.Millisecond + time.Duration(rand.Int63n(int64(50*time.Millisecond))))
+	}
+}
+
+// ---- single flight ----
+
+type jbCall struct {
+	done chan struct{}
+	hits []codeHit
+	err  error
+}
+
+type jbGroup struct {
+	mu    sync.Mutex
+	calls map[string]*jbCall
+}
+
+var jbFlight jbGroup
+
+// do runs fn once per key at a time; callers that arrive meanwhile wait for it
+// and share its result.
+func (g *jbGroup) do(key string, fn func() ([]codeHit, error)) ([]codeHit, error) {
+	g.mu.Lock()
+	if c, ok := g.calls[key]; ok {
+		g.mu.Unlock()
+		<-c.done
+		return c.hits, c.err
+	}
+	if g.calls == nil {
+		g.calls = map[string]*jbCall{}
+	}
+	c := &jbCall{done: make(chan struct{})}
+	g.calls[key] = c
+	g.mu.Unlock()
+	c.hits, c.err = fn()
+	g.mu.Lock()
+	delete(g.calls, key)
+	g.mu.Unlock()
+	close(c.done)
+	return c.hits, c.err
 }
 
 // parseJbcontext reads `jbcontext search --json-output`: JSON objects of type
