@@ -1,5 +1,6 @@
 {
   "schema_version": 1,
+  "amendment_message004": {"authority":"orchestrator-message004-amend", "approved_at":"2026-10-20T23:01:15-07:00", "classification":"exploratory follow-up, not untouched held-out confirmation", "experimental_output_cap_tokens":16384, "pilot":{"run":"E2-fixture-hybrid-t1", "cost_usd":"0.00273309", "outcome":"failed truncated structured reply; preserved and not silently replaced"}, "new_e2_runs":12, "remaining_e6_runs":16, "total_paid_run_population_including_pilot":29, "unchanged":"canonical cases, evidence, source/spec contents, keys, instructions, two follow-up trials/cell, approved routes, monetary limits, no production/default changes", "prerequisites":"journaled 60-second billing reconciliation and durable cumulative charges, no-spend actual Pi 16384-token serialization/write-isolation probe, amended manifest committed before next paid call"},
   "baseline": "orchestrate 8a062d2c2f8d15c0916e9bd87ba6cc58378e7c1b; current production code, not the old broken branch; pi OpenRouter ~deepseek/deepseek-flash-latest; dossier=code, ctx-tool=on, context-files=off, ctx-shell=open, ctx-profile=default, shadow=off; optional adjudicator and question classifier explicitly disabled in private experiment config",
   "held_out_cases": [
     {"id":"go-conflict", "subject":"8a062d2:skills/orchestrate/tool/testdata/fixtures/go/parser/parser.go; key: reuse Normalize for trim without case conversion; contradictory supported reuse/new claims must remain unresolved", "category":"contradictory_judgments"},
@@ -22,8 +23,12 @@
     "fixture-hybrid.txt":"e95c6c82bf17b616dd9a2b7c30727dcec87c84b6739333abbf88d4177271b20e",
     "fixture-json.txt":"63ac94d2a0eb1f5645c0a0d6d3e5031421267c551ebb6433303083a5d921a384",
     "fixture-toon.txt":"6ed40a40f49240b32b886875891464615366310fc40459a747b280bdde0d7448",
-    "gate-inputs.json":"d7a171fe710d4e50f2fb21ae723047b6d31a4f9ba3b8b1b1bbd9f1dde87c263e",
+    "gate-inputs-first-attempt.json":"d7a171fe710d4e50f2fb21ae723047b6d31a4f9ba3b8b1b1bbd9f1dde87c263e",
+    "gate-inputs.json":"8fffa65cbdf32184a44a2c79ff4111737d4949f576a924c5b3fbdf53ff676304",
     "experiment-config.toml":"17c6a75067c9b1753b287f6f360c35365c6289f8588c08005ded4d996a7c20e8",
+    "experiment-config-v2.toml":"8062215bf5c729074570f1683a97ce974abaa66dc4abae0207bb962a03e399d9",
+    "crm_group_discovery":"group:crm1-ui-shell+3 = crm1-ui-shell,crm1-ui-commerce,crm1-ui-money,crm1-ui-people; no-spend dossier-off discovery sha256 198eac864b2ec6030d1b91cfd25f62974897ec8cde5bdcd6983080273f5546be; paid CRM controls retain dossier=code",
+    "fixture_metadata_corrections":"Original invalid Open questions prose and descriptor preserved. Corrected frozen fixture specs use literal None; source bodies are byte-identical. Private v2 config supplies check=git diff --check and output_reserve=16384; no production config changed.",
     "native_controls":"be7df1e20 PASS; 8 fixture and 2 CRM cases; 0.734s",
     "format_equality":"be97c7639 PASS; canonical values and array order preserved across all three formats; 0.015s",
     "storage":"private temporary work directory only; source/spec/key contents are not committed"
@@ -46,8 +51,8 @@
   "cache_settings": {"mode":"both", "settings":"Fresh sessions for every trial. Trial 1 and 2 use the same prefix to observe possible cache reuse; request short retention, record actual cache counters. No claim of cold/warm separation without provider evidence. No cache-warming calls."},
   "mode":"shadow",
   "paid":true,
-  "execution_state": {"state":"stopped_pending_resume", "paid_provider_requests":1, "measured_total_usd":"0.00273309", "charge_reconciled":true, "dispatch_guard_still_stopped":true, "run":"E2-fixture-hybrid-t1", "generation_id":"gen-1792561488-D1OVkrrTAgUi7MvlBq2j", "cost_evidence":"key usage delta, generation.total_cost and raw response usage.cost agree exactly", "outcome":"finish_reason length; invalid structured JSON; 0/8 valid case coverage", "authority":"orchestrator message003 permits free reconciliation only and forbids further paid calls until explicit resume"},
-  "approval": {"state":"approved_subject_to_transport_preflight", "decision_key":"manifest", "required_before_any_paid_request":true, "evidence":"orchestrator inbox message001, re manifest, 2026-10-20T21:30:25-07:00, approves both experiments with fake-transport cap preflight, no production changes, ledger and stop rules", "approved_preregistration_commit":"ad87a52d569d4baf7eaa848fcaa55a64da37b050"},
+  "execution_state": {"state":"amendment_preflight_pending", "paid_provider_requests":1, "measured_total_usd":"0.00273309", "charge_reconciled":true, "dispatch_guard_still_stopped":true, "run":"E2-fixture-hybrid-t1", "generation_id":"gen-1792561488-D1OVkrrTAgUi7MvlBq2j", "cost_evidence":"key usage delta, generation.total_cost and raw response usage.cost agree exactly", "outcome":"finish_reason length; invalid structured JSON; 0/8 valid case coverage", "authority":"message004 explicitly approves the amended exploratory matrix after guard changes, fake cap proof and manifest commit; no new paid call has started"},
+  "approval": {"state":"approved_amendment_subject_to_preflight", "amendment_message":"orchestrator-message004-amend", "decision_key":"manifest", "required_before_any_paid_request":true, "evidence":"orchestrator inbox message001, re manifest, 2026-10-20T21:30:25-07:00, approves both experiments with fake-transport cap preflight, no production changes, ledger and stop rules", "approved_preregistration_commit":"ad87a52d569d4baf7eaa848fcaa55a64da37b050"},
   "experiments": [
     {
       "id":"E2-format-packets",
@@ -58,7 +63,9 @@
       "projects":["non-CRM Go/Python/TypeScript fixture packet", "real CRM spec rendering-seam packet"],
       "trials_per_cell":2,
       "paid_runs":12,
-      "run_id_pattern":"E2-{fixture|crm}-{hybrid|toon|json}-t{1|2}",
+      "run_id_pattern":"E2-v2-{fixture|crm}-{hybrid|toon|json}-t{1|2}",
+      "classification":"exploratory after the separately costed failed 4096-token pilot; frozen cases are not independent held-out confirmation",
+      "output_cap_tokens":16384,
       "route":"pi openrouter/~deepseek/deepseek-flash-latest",
       "expected_cost_per_run_usd":0.02,
       "anomaly_threshold_per_run_usd":0.08,
@@ -78,6 +85,8 @@
       "trials_per_cell":2,
       "paid_runs":16,
       "run_id_pattern":"E6-{crm|go|py|ts}-{flash|glm}-t{1|2}",
+      "output_cap_tokens":16384,
+      "crm_group_key":"group:crm1-ui-shell+3",
       "expected_cost_per_run_usd":{"flash":0.04,"glm":0.06},
       "anomaly_threshold_per_run_usd":0.15,
       "expected_total_usd":0.80,
@@ -94,9 +103,9 @@
   ],
   "budget_plan": {
     "currency":"USD",
-    "expected_total":1.04,
-    "sum_run_anomaly_thresholds":3.36,
-    "amendment_authority":"orchestrator inbox message002, re cost-bound, 2026-10-20T21:35:28-07:00; account-level full-output reservation replaces small per-run hard ceilings without changing cases, trial counts, expected spend or the $5 user cap",
+    "expected_total":1.04273309,
+    "sum_run_anomaly_thresholds":3.36273309,
+    "amendment_authority":"orchestrator message002 full-output monetary bounds, then message004 re resume 2026-10-20T23:01:15-07:00 approves billing changes, 16384 output cap, 12 new exploratory E2 calls plus original16 E6 runs, preserving separately costed failed pilot; no extra money, production/default change or silent replacement", 
     "hard_user_cap":5.00,
     "admission_limit":4.50,
     "stop_starting_experiments_at":4.00,
@@ -105,21 +114,24 @@
     "fallbacks":0,
     "concurrency":1,
     "unallocated_budget_is_not_permission_to_add_runs":true,
-    "rule":"Every repair and failed attempt counts toward the same study. No replacement experiment, route or extra trial without another decision. Under message002, serialize every underlying paid HTTP request, including all tool-loop and gate-worker requests. Before each, read authoritative OpenRouter key usage and refuse if known cumulative plus its full advertised input/output bound would exceed $4.50; this is stricter than the message002 $5 admission limit. Reserve $0.54525932 for Flash or $1.404042704 for GLM at observed prices, and revalidate metadata before dispatch. Stop all further dispatch at cumulative $4.00, on any per-run anomaly, or on unknown/inconsistent/lagging cost. Keep the whole full-output reservation until actual cost reconciles. The $3.36 threshold sum is not a hard spend bound."
+    "rule":"Every repair and failed attempt counts toward the same study. No replacement experiment, route or extra trial without another decision. Under message002, serialize every underlying paid HTTP request, including all tool-loop and gate-worker requests. Before each, read authoritative OpenRouter key usage and refuse if known cumulative plus its full advertised input/output bound would exceed $4.50; this is stricter than the message002 $5 admission limit. Reserve $0.54525932 for Flash or $1.404042704 for GLM at observed prices, and revalidate metadata before dispatch. Stop all further dispatch at cumulative $4.00, on any per-run anomaly, or on unknown or inconsistent cost. Message004 permits a precisely labeled verified per-generation fallback when aggregate key usage lags: raw-response and generation costs must agree, each free billing poll is timestamped, settlement is bounded at60s, and durable measured cumulative charges survive restarts. Retain the full reservation until that reconciliation succeeds; stop on unexplained aggregate usage excess. Verify the final settled overall key delta. The $3.36273309 threshold/pilot sum is not a hard spend bound."
   },
   "transport_safety_preflight": {
-    "status":"passed_no_spend under message002: both actual Pi routes dispatched exactly one localhost fake request with max_tokens=4096 and dummy auth; 11 durable account-guard tests passed. Initial sandbox-host and runtime-bootstrap failures dispatched zero requests and are retained. Real output billing is protected by full advertised bounds, not assumed max_tokens semantics.",
+    "status":"message004 amendment pending actual Pi localhost 16384-token cap/write-isolation result; 27 deterministic guard/meter tests PASS in0.034s and py_compile PASS. Original message002 localhost4096 proof is preserved. Real billing remains protected by full advertised monetary reservations, not assumed max_tokens semantics.",
+    "amended_output_cap_evidence":"background b568eed64 pending terminal result; no paid request before positive proof and this amended manifest is committed",
+    "amended_accounting":"27 tests: verified generation fallback and exact costs, journaled free polls/errors, 60s deadline, persistent cumulative, full reservation on unknown/mismatch, excess-account stop, negative/nonfinite rejection, explicit reconcile/resume only, no anomaly-stop bypass, no extra E2 dispatch, 16384 cap, streamed usage and restricted reasoning modes",
+    "original_guard_evidence_note":"The following11-test source hashes describe the preserved original pre-registration; amended source/proof hashes are recorded separately before dispatch.",
     "output_cap_evidence":"background bf28da276; private transport-preflight/result.json sha256 e98bd477e2d9785ac63e0b4dfdd3a7ae2f40ce2f13cdbfde134cad6258165111",
     "account_guard_evidence":"11 tests in temporary test_account_guard.py; guard source sha256 c680c1bc5653dc9eb063db2b11f4bed589aa5034263a5868518de8bfb8a29922; tests sha256 f52f82e59a4c5d5c0fc09535e750dcf447422dbbf9e7ca1f629a6dc1b90b1872",
     "location":"temporary directory only; no production or default configuration changes",
-    "method":"Keep actual pi/provider/model selection. An isolated model override serializes max_tokens=4096 through a local accounting proxy. The fake probe verified both exact routes. A network sandbox permits child Pi/tool traffic only to the local proxy, with dummy child credentials. The parent alone resolves the configured OpenRouter OAuth credential and reads authoritative free key usage. Proxy pins allowed model IDs, rejects extra billable options, reserves the full advertised input/output cost before every individual HTTP request, serializes upstream calls and reconciles account/provider costs. Retain ctx-shell=open in real gate controls. Isolate extensions, MCP, sessions and config; never print or store the real credential.",
+    "method":"Keep actual pi/provider/model selection. An isolated model override serializes max_tokens=16384 through a local accounting proxy for the amended exploratory follow-up. The fake probe verified both exact routes. A network sandbox permits child Pi/tool traffic only to the local proxy, with dummy child credentials. The parent alone resolves the configured OpenRouter OAuth credential and reads authoritative free key usage. Proxy pins allowed model IDs, rejects extra billable options, reserves the full advertised input/output cost before every individual HTTP request, serializes upstream calls and reconciles account/provider costs. Retain ctx-shell=open in real gate controls. Isolate extensions, MCP, sessions and config; never print or store the real credential.",
     "price_snapshot_source":"https://openrouter.ai/api/v1/models (unpaid metadata fetch)",
     "observed_flash_usd_per_million":{"input":0.07,"output":0.50,"cached_input":0.008},
     "observed_glm_usd_per_million":{"input":0.079,"output":1.40,"cached_input":0.078},
     "observed_context_tokens":1048576,
     "conservative_flash_request_ceiling_usd":0.54525932,
     "conservative_glm_request_ceiling_usd":1.404042704,
-    "bound_reason":"OpenRouter documents the combined reasoning/visible max_tokens bound for most, not all, providers. Both moving aliases expose no endpoint list. Message002 therefore reserves full advertised context 1048576 plus full advertised maximum output 943718: Flash $0.54525932, GLM $1.404042704 at the observed prices. Never rely on max_tokens=4096 for money safety. Revalidate advertised limits/prices and restrict provider maximum prices and extra fees before every dispatch. A multi-turn gate command receives a new reservation for every underlying HTTP request, never only one reservation for the command.",
+    "bound_reason":"OpenRouter documents the combined reasoning/visible max_tokens bound for most, not all, providers. Both moving aliases expose no endpoint list. Message002 therefore reserves full advertised context 1048576 plus full advertised maximum output 943718: Flash $0.54525932, GLM $1.404042704 at the observed prices. Never rely on a serialized max_tokens value for money safety. Revalidate advertised limits/prices and restrict provider maximum prices and extra fees before every dispatch. A multi-turn gate command receives a new reservation for every underlying HTTP request, never only one reservation for the command.",
     "accounting":"Use provider-reported usage/cost and request identifiers, reconcile with provider generation usage where available, and retain Pi session totals and gate.json pass_tokens separately. Catalog-based estimates are not verified provider charges. Flush and sync request admission before upstream dispatch. A crash, network error or missing/inconsistent cost that cannot be reconciled stops every subsequent paid request and produces needs-decision; never record missing cost as zero."
   },
   "measurement_protocol": {
@@ -134,7 +146,7 @@
     "variation":"Report both individual trials and ranges/count disagreements for each cell, no significance or safety claims from n=2. Unknown metrics remain unknown.",
     "downstream_acceptance":"Only deterministic reducer/reply validation and bench verification are measured. No task spawn, integration, production mutation or product E2E acceptance is authorized."
   },
-  "promotion_policy":"These numeric thresholds are necessary trial screens, not authority to promote. Zero deterministic false passes is mandatory. Any trust failure vetoes a positive aggregate result. A small clean sample does not prove safety. No default change is authorized even if screens pass; retain TOON direction, open ctx shell, existing prefixes and disabled adjudication/classifier unless a later decision explicitly changes them.",
+  "promotion_policy":"The amended follow-up is exploratory, not independent held-out confirmation. These numeric thresholds are necessary trial screens, not authority to promote. Zero deterministic false passes is mandatory. Any trust failure vetoes a positive aggregate result. A small clean sample does not prove safety. No default change is authorized even if screens pass; retain TOON direction, open ctx shell, existing prefixes and disabled adjudication/classifier unless a later decision explicitly changes them.",
   "live_store_protection": {
     "source":"~/.local/share/orchestrate/bench",
     "source_policy":"read-only; all commands use an isolated copy or a new temporary store",
