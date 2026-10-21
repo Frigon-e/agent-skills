@@ -43,8 +43,8 @@ func TestGateDossierCodeGoesAfterThePackageBlocksAndOffIsToday(t *testing.T) {
 	if group == "" || i < 0 || j < i || k < j {
 		t.Fatalf("order must be package blocks, dossier, tag (%d %d %d):\n%s", i, j, k, calls)
 	}
-	wantContains(t, calls, "## Package api", "### 1. Ranked files", "Use the evidence dossier", "Budget: about 20 turns.", "Budget: about 40 turns.")
-	if b := mustRead(t, filepath.Join(gdir, "dossier", "api.md")); !strings.Contains(string(b), "### 4. Names not found in completed bounded lookups (not proof of absence)") {
+	wantContains(t, calls, "## Package api", "Absence of a hit is not proof of absence.", "### 3a. Reuse checklist", "Use the evidence dossier", "Budget: about 20 turns.", "Budget: about 40 turns.")
+	if b := mustRead(t, filepath.Join(gdir, "dossier", "api.md")); !strings.Contains(string(b), "### Search notes\nLookups: ") || strings.Contains(string(b), "### 1. Ranked files") {
 		t.Errorf("dossier file:\n%s", b)
 	}
 	rec := readRecord(t, gdir)

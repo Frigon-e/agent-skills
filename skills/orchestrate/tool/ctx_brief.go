@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 )
@@ -434,150 +435,301 @@ func quoteList(ss []string) string {
 	return strings.Join(out, ", ")
 }
 
+// itemRef is the short name of a checklist item: "#2" for "crm1-ui-shell#2".
+func itemRef(id string) string {
+	if i := strings.LastIndex(id, "#"); i >= 0 {
+		return id[i:]
+	}
+	return id
+}
+
+// candID is the evidence id of a candidate, computed when it carries none.
+func candID(c reuseCand) string {
+	if c.EvidenceID != "" {
+		return c.EvidenceID
+	}
+	return dossierSourceID(c.Path, c.Start, c.End, strings.Join(c.Lines, "\n"))
+}
+
+// itemHead is a checklist item as the prompt shows it: its text, the author's
+// pointers and, when nothing was found, one short status line. The lookups that
+// ran for it are not listed; they are in the manifest.
+func itemHead(ic itemCands) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "- `%s` %s\n", ic.Item.ID, ic.Item.Text)
+	for _, p := range ic.Item.Reuse {
+		fmt.Fprintf(&b, "  author's pointer: `%s`\n", p)
+	}
+	switch {
+	case len(ic.Queries) == 0:
+		b.WriteString("  search: not_requested (no explicit queries; unresolved work)\n")
+	case len(ic.Cands) > 0:
+	case ic.QueriesRun == len(ic.Queries):
+		b.WriteString("  no eligible candidates in the searched scope\n")
+	default:
+		b.WriteString("  search did not complete; no negative conclusion\n")
+	}
+	return b.String()
+}
+
+const (
+	dossierIntro       = "Absence of a hit is not proof of absence. Complete lookup records (ids, status, counts, scopes) and the omission list are in dossier-manifest.json."
+	searchNotesMaxWays = 4 // failure reasons listed in the search notes
+	searchNotesNames   = 12
+)
+
+var (
+	noteJSONMessage = regexp.MustCompile(`\{[^{}]*"message":\s*"((?:[^"\\]|\\.)*)"[^{}]*\}?`)
+	noteLeadIn      = regexp.MustCompile(`^(?:working-tree semantic search failed: )?(?:jbcontext failed: (?:exit status \d+: )?)?`)
+	noteEmail       = regexp.MustCompile(`\s*\([^()]*@[^()]*\)`)
+	noteLicense     = regexp.MustCompile(`(license) [A-Z0-9]{6,}`)
+)
+
+// noteReason is a failure reason for the search notes: the message inside a
+// JSON error body, without license ids, e-mail addresses or machine paths, cut
+// at its first sentence. Two failures with the same cause give the same text.
+func noteReason(msg, root string) string {
+	s := shortPathText(failureMissing.ReplaceAllString(strings.TrimSpace(msg), "$1 not found"), root)
+	s = noteJSONMessage.ReplaceAllString(s, "$1")
+	if i := strings.Index(s, `{"`); i >= 0 {
+		s = strings.TrimRight(s[:i], ": ")
+	}
+	for _, rw := range failureKnown {
+		s = rw.re.ReplaceAllString(s, rw.to)
+	}
+	s = noteLeadIn.ReplaceAllString(s, "")
+	s = noteEmail.ReplaceAllString(s, "")
+	s = noteLicense.ReplaceAllString(s, "$1")
+	if i := strings.Index(s, ". "); i >= 0 {
+		s = s[:i]
+	}
+	return short(strings.Join(strings.Fields(s), " "), 110)
+}
+
+// searchNotes is the closing block of the dossier: how the lookups ended, one
+// line per distinct failure reason, and the names that exist nowhere. At most
+// 8 lines, "" when there is nothing to say.
+func searchNotes(lks []evidenceLookup, missing []string, root string) string {
+	var run, ok, partial, failed, unavailable int
+	type group struct {
+		status, reason string
+		n              int
+	}
+	var groups []*group
+	byKey := map[string]*group{}
+	for _, l := range lks {
+		switch l.ExecutionStatus {
+		case lookupNotRequested:
+			continue
+		case lookupFailed:
+			failed++
+		case lookupUnavailable:
+			unavailable++
+		default:
+			if l.Status == "partial" {
+				partial++
+			} else {
+				ok++
+			}
+		}
+		run++
+		if len(l.Errors) == 0 {
+			continue
+		}
+		reason := noteReason(strings.Join(l.Errors, "; "), root)
+		key := string(l.ExecutionStatus) + "\x00" + reason
+		g := byKey[key]
+		if g == nil {
+			g = &group{status: string(l.ExecutionStatus), reason: reason}
+			byKey[key] = g
+			groups = append(groups, g)
+		}
+		g.n++
+	}
+	var names []string
+	for _, m := range missing {
+		if m = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(m), "- ")); m != "" {
+			names = append(names, m)
+		}
+	}
+	if run == 0 && len(names) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("### Search notes\n")
+	if run > 0 {
+		fmt.Fprintf(&b, "Lookups: %d run, %d ok, %d partial, %d failed, %d unavailable.\n", run, ok, partial, failed, unavailable)
+	}
+	sort.SliceStable(groups, func(i, j int) bool {
+		if groups[i].n != groups[j].n {
+			return groups[i].n > groups[j].n
+		}
+		return groups[i].reason < groups[j].reason
+	})
+	for i, g := range groups {
+		if i == searchNotesMaxWays-1 && len(groups) > searchNotesMaxWays {
+			fmt.Fprintf(&b, "%d more failure reasons; see the manifest.\n", len(groups)-i)
+			break
+		}
+		noun := "lookups"
+		if g.n == 1 {
+			noun = "lookup"
+		}
+		fmt.Fprintf(&b, "%d %s %s: %s\n", g.n, noun, g.status, g.reason)
+	}
+	if len(names) > 0 {
+		more := ""
+		if len(names) > searchNotesNames {
+			more, names = fmt.Sprintf(" (+%d more)", len(names)-searchNotesNames), names[:searchNotesNames]
+		}
+		fmt.Fprintf(&b, "Names looked up that were not found: %s%s.\n", strings.Join(names, ", "), more)
+	}
+	return b.String()
+}
+
 // Render has one byte budget for ALL sections, including headings, source,
 // docs, checklist and expansion instructions. No section receives a second cap.
-// The complete omission list is also persisted in dossier-manifest.json.
+//
+// The dossier leads with what the scoring established (ranked files, interface
+// sheet, the checklist with its candidates) and ends with a short note on the
+// searches. Selection runs in that order of value, so a tight budget cuts the
+// search notes, then the lowest-scored candidates, then the source previews; the
+// lookup records are not part of the markdown at all. The complete omission
+// list is persisted in dossier-manifest.json.
 func (d *ctxBrief) Render(heading, noun string, total int) string {
+	// Selection tiers, first to last: the scored picture and its structure, the
+	// candidate lines (best score first), the search notes, then look-alikes and
+	// planner results, and last the source previews.
+	const (
+		tierCore = iota
+		tierCand
+		tierNotes
+		tierExtra
+		tierBody
+	)
 	type entry struct {
 		text, id, expansion string
 		body                bool
+		tier, score         int
+		sec                 string // the section whose heading this entry needs
+		head                bool   // this entry is the heading of sec
+		dep                 int    // 1 + the index of the entry this one needs, 0 for none
+		kind                string // what a cut of this entry is called in the cut line
 	}
 	var entries []entry
+	headOf := map[string]int{}
 	add := func(text string) { entries = append(entries, entry{text: text + "\n"}) }
+	section := func(sec, text string) {
+		headOf[sec] = len(entries)
+		entries = append(entries, entry{text: text + "\n", sec: sec, head: true})
+	}
+	in := func(sec, text string) { entries = append(entries, entry{text: text + "\n", sec: sec}) }
+
 	add(heading)
-	add("### Observations (bounded tool results, not semantic proof)")
-	// Failures are grouped once per reason, and the exclusions sentence is
-	// printed once, so a missing backend costs one line per distinct failure
-	// instead of one long line per query.
-	exclusionsShown, absenceShown := false, false
-	lookupNotes := func(lks []evidenceLookup) {
-		if len(lks) == 0 {
-			return
+	add(dossierIntro)
+	if len(d.Files) > 0 {
+		section("files", "### 1. Ranked files")
+		for _, text := range d.Files {
+			in("files", text)
 		}
-		if !exclusionsShown {
-			if line := lookupExclusionsLine(lks); line != "" {
-				add(line)
-				exclusionsShown = true
+	}
+	if len(d.Docs) > 0 {
+		section("docs", "### 1b. Docs that mention it")
+		for _, text := range d.Docs {
+			in("docs", text)
+		}
+	}
+	sheet := d.Sheet
+	if d.interfaceSummary != nil {
+		sheet = d.interfaceSummary
+	}
+	if len(sheet) > 0 {
+		section("sheet", "### 2. Interface sheet")
+		for i, text := range sheet {
+			path, start := "", 1
+			if i < len(d.Facts) && len(d.Facts[i].Defs) > 0 {
+				path, start = splitWhere(d.Facts[i].Defs[0].Where)
+			}
+			entries = append(entries, entry{text: text + "\n", id: fmt.Sprintf("signature-summary:%d", i), expansion: dossierRead(path, start, start+ctxSnippet-1), sec: "sheet"})
+		}
+	}
+	if len(d.ReuseItems) > 0 || d.Reuse != "" {
+		add("### Candidates (unverified)")
+		add("### 3a. Reuse checklist (each requirement remains a separate decision)")
+	}
+	// A candidate is shown once, under the first item that has it, with the
+	// other items it also serves; those items point back to it.
+	firstItem := map[string]int{}
+	alsoFor := map[string][]string{}
+	for ri, ic := range d.ReuseItems {
+		for _, c := range ic.Cands {
+			id := candID(c)
+			if _, ok := firstItem[id]; !ok {
+				firstItem[id] = ri
+			} else if firstItem[id] != ri {
+				alsoFor[id] = append(alsoFor[id], itemRef(ic.Item.ID))
 			}
 		}
-		if !absenceShown && lookupUncertainAny(lks) {
-			add(lookupAbsenceLine)
-			absenceShown = true
-		}
 	}
-	lookupNotes(d.Lookups)
-	if reasons := lookupReasonGroups(d.Lookups, d.root); reasons != "" {
-		add(reasons)
-	}
-	for _, lk := range d.Lookups {
-		add(lookupLine(lk, d.root))
-	}
-	add("### Candidates (unverified)")
-	add("### 3a. Reuse checklist (each requirement remains a separate decision)")
-	var reuseLookups []evidenceLookup
-	for _, ic := range d.ReuseItems {
-		reuseLookups = append(reuseLookups, ic.Lookups...)
-	}
-	lookupNotes(reuseLookups)
 	seen := map[string]bool{}
+	headerAt := map[string]int{}
 	for ri, ic := range d.ReuseItems {
 		if ri == itemPageMain {
 			add(reuseMoreNotice)
 		}
-		cs := ic.Cands
-		ic.Cands = nil
-		meta := itemText(ic, false, d.root)
-		if len(cs) > 0 {
-			meta = strings.ReplaceAll(meta, "  (unresolved: requested search did not complete; no negative conclusion)\n", "")
-			meta = strings.ReplaceAll(meta, "  (completed search: no eligible candidates in the searched scope; not proof of absence)\n", "")
-		}
-		add(meta)
-		for i, c := range cs {
-			if c.EvidenceID == "" {
-				c.EvidenceID = dossierSourceID(c.Path, c.Start, c.End, strings.Join(c.Lines, "\n"))
-			}
+		add(strings.TrimRight(itemHead(ic), "\n"))
+		for i, c := range ic.Cands {
+			c.EvidenceID = candID(c)
 			if c.Expansion == "" {
 				c.Expansion = dossierRead(c.Path, c.Start, max(c.Start, c.End))
 			}
 			if seen[c.EvidenceID] {
-				add(fmt.Sprintf("  candidate %s `%s` referenced above or in omissions, also supports requirement %s (decide independently); expand: %s", c.EvidenceID, c.at(), ic.Item.ID, c.Expansion))
+				if h, ok := headerAt[c.EvidenceID]; ok {
+					entries = append(entries, entry{text: fmt.Sprintf("  also: `%s` (listed under %s)\n", c.at(), itemRef(d.ReuseItems[firstItem[c.EvidenceID]].Item.ID)), tier: tierCand, score: c.Score, dep: h + 1, kind: "cand"})
+				}
 				continue
 			}
 			seen[c.EvidenceID] = true
-			header := candidateText(i+1, c, false)
-			if at := strings.Index(header, "     omitted "); at >= 0 {
-				header = header[:at]
+			plain := candidateText(i+1, c, false)
+			if at := strings.Index(plain, "     omitted "); at >= 0 {
+				plain = plain[:at]
 			}
-			add(header)
-			body := strings.TrimPrefix(candidateText(i+1, c, true), header)
-			entries = append(entries, entry{body, c.EvidenceID, c.Expansion, true})
+			header := plain
+			if also := alsoFor[c.EvidenceID]; len(also) > 0 {
+				header = strings.Replace(header, "\n", " also for "+strings.Join(also, ", ")+"\n", 1)
+			}
+			headerAt[c.EvidenceID] = len(entries)
+			entries = append(entries, entry{text: header, id: c.EvidenceID, expansion: c.Expansion, tier: tierCand, score: c.Score, kind: "cand"})
+			entries = append(entries, entry{text: strings.TrimPrefix(candidateText(i+1, c, true), plain) + "\n", id: c.EvidenceID, expansion: c.Expansion, body: true, tier: tierBody, score: c.Score, dep: headerAt[c.EvidenceID] + 1, kind: "body"})
 		}
 	}
 	if len(d.ReuseItems) == 0 && d.Reuse != "" {
 		add(d.Reuse)
 	}
-	add("### 2. Interface sheet")
-	sheet := d.Sheet
-	if d.interfaceSummary != nil {
-		sheet = d.interfaceSummary
-	}
-	for i, text := range sheet {
-		path, start := "", 1
-		if i < len(d.Facts) && len(d.Facts[i].Defs) > 0 {
-			path, start = splitWhere(d.Facts[i].Defs[0].Where)
+	if len(d.Like) > 0 {
+		section("like", "### 3. Existing things that look like what this "+noun+" builds (outside its owns)")
+		for _, text := range d.Like {
+			native, ok := d.nativeLike[text]
+			if !ok {
+				entries = append(entries, entry{text: text + "\n", sec: "like", tier: tierExtra, kind: "other"})
+				continue
+			} // notes/cut notices have no source body
+			er := native.source
+			expand := dossierRead(er.Path, er.Range.StartLine, er.Range.EndLine)
+			if seen[er.ID] {
+				in("like", "- source "+er.ID+" referenced above or in omissions; expand: "+expand)
+				continue
+			}
+			seen[er.ID] = true
+			entries = append(entries, entry{text: native.text + "\n", id: er.ID, expansion: expand, body: true, sec: "like", tier: tierExtra, kind: "other"})
 		}
-		id := fmt.Sprintf("signature-summary:%d", i)
-		entries = append(entries, entry{text + "\n", id, dossierRead(path, start, start+ctxSnippet-1), false})
 	}
-	add("### 1. Ranked files")
-	for _, text := range d.Files {
-		add(text)
-	}
-	add("### 1b. Docs that mention it")
-	for _, text := range d.Docs {
-		add(text)
-	}
-	add("### 3. Existing things that look like what this " + noun + " builds (outside its owns)")
-	for _, text := range d.Like {
-		native, ok := d.nativeLike[text]
-		if !ok {
-			add(text)
-			continue
-		} // notes/cut notices have no source body
-		er := native.source
-		expand := dossierRead(er.Path, er.Range.StartLine, er.Range.EndLine)
-		if seen[er.ID] {
-			add("- source " + er.ID + " referenced above or in omissions; expand: " + expand)
-			continue
-		}
-		seen[er.ID] = true
-		entries = append(entries, entry{native.text + "\n", er.ID, expand, true})
-	}
-	add("### 3b. Not in our workspace")
 	if d.Foreign != "" {
-		add(d.Foreign)
-	}
-	add("### Unresolved work")
-	add("### 4. Names not found in completed bounded lookups (not proof of absence)")
-	for _, text := range d.Missing {
-		add(text)
+		section("foreign", "### 3b. Not in our workspace")
+		in("foreign", strings.TrimRight(d.Foreign, "\n"))
 	}
 	if d.Planned != nil {
-		add("### 5. Lookups the planner asked for")
-		byID := map[string]evidenceLookup{}
-		for _, l := range d.Lookups {
-			byID[l.ID] = l
-		}
-		planned := make([]evidenceLookup, 0, len(d.PlannedIDs))
-		for _, id := range d.PlannedIDs {
-			if l, ok := byID[id]; ok {
-				planned = append(planned, l)
-			}
-		}
-		lookupNotes(planned)
-		if reasons := lookupReasonGroups(planned, d.root); reasons != "" {
-			add(reasons)
-		}
+		section("planned", "### 5. Lookups the planner asked for")
 		for i, text := range d.Planned {
 			id := "entry-" + subjectDigest([]byte(text))[:20]
 			if i < len(d.PlannedIDs) {
@@ -590,33 +742,90 @@ func (d *ctxBrief) Render(heading, noun string, total int) string {
 					break
 				}
 			}
-			entries = append(entries, entry{text + "\n", id, expand, true})
+			entries = append(entries, entry{text: text + "\n", id: id, expansion: expand, body: true, sec: "planned", tier: tierExtra, kind: "other"})
 		}
 	}
 	add("Coverage gaps: candidate relevance is unverified. Expand incoming/outgoing references, registrations/configuration and tests where material; record any uncompleted checks.")
-	d.Omissions = nil
-	d.Shown = map[string]bool{}
-	// Reserve a compact omission index before selecting source. Metadata that
-	// itself exceeds the budget remains in the persisted manifest, never cut mid-body.
-	reserve := min(total/3, 1024)
-	limit := max(0, total-reserve)
-	// Keep requirement relationships, signatures and execution states ahead of
-	// bodies. Select first, then emit in the original stable section order.
-	kept := make([]bool, len(entries))
-	used := 0
-	for pass := 0; pass < 2; pass++ {
-		for i, en := range entries {
-			if en.body != (pass == 1) {
-				continue
-			}
-			if used+len(en.text) <= limit {
-				kept[i] = true
-				used += len(en.text)
+	var all []evidenceLookup
+	seenLookup := map[string]bool{}
+	for _, lks := range append([][]evidenceLookup{d.Lookups}, func() [][]evidenceLookup {
+		var out [][]evidenceLookup
+		for _, ic := range d.ReuseItems {
+			out = append(out, ic.Lookups)
+		}
+		return out
+	}()...) {
+		for _, l := range lks {
+			if !seenLookup[l.ID] {
+				seenLookup[l.ID] = true
+				all = append(all, l)
 			}
 		}
 	}
+	if notes := searchNotes(all, d.Missing, d.root); notes != "" {
+		entries = append(entries, entry{text: notes, id: "search-notes", expansion: "Read path=\"dossier-manifest.json\"", tier: tierNotes, kind: "notes"})
+	}
+	d.Omissions = nil
+	d.Shown = map[string]bool{}
+	// Reserve room for the one-line cut notice before selecting. Metadata that
+	// itself exceeds the budget remains in the persisted manifest, never cut mid-body.
+	reserve := min(total/3, 400)
+	limit := max(0, total-reserve)
+	order := make([]int, len(entries))
+	for i := range order {
+		order[i] = i
+	}
+	sort.SliceStable(order, func(a, b int) bool {
+		ea, eb := entries[order[a]], entries[order[b]]
+		if ea.tier != eb.tier {
+			return ea.tier < eb.tier
+		}
+		return ea.score > eb.score
+	})
+	kept := make([]bool, len(entries))
+	headKept := map[string]bool{}
+	used := 0
+	// Candidates and previews are cut strictly by score: once one does not fit,
+	// no lower-scored one of its kind takes the room it left.
+	stopped := map[string]bool{}
+	for _, i := range order {
+		en := entries[i]
+		if en.head || (en.dep > 0 && !kept[en.dep-1]) || (en.kind != "" && stopped[en.kind]) {
+			continue
+		}
+		cost := len(en.text)
+		if en.sec != "" && !headKept[en.sec] {
+			cost += len(entries[headOf[en.sec]].text)
+		}
+		if used+cost > limit {
+			if en.kind == "cand" || en.kind == "body" {
+				stopped[en.kind] = true
+			}
+			continue
+		}
+		kept[i], used = true, used+cost
+		if en.sec != "" {
+			headKept[en.sec] = true
+		}
+	}
 	var b strings.Builder
+	cut := map[string]int{}
+	cutAny := 0
+	omit := func(om dossierOmission) {
+		for _, o := range d.Omissions {
+			if o.EvidenceID == om.EvidenceID && o.Reason == om.Reason {
+				return
+			}
+		}
+		d.Omissions = append(d.Omissions, om)
+	}
 	for i, en := range entries {
+		if en.head {
+			if headKept[en.sec] {
+				b.WriteString(en.text)
+			}
+			continue
+		}
 		if kept[i] {
 			b.WriteString(en.text)
 			if strings.HasPrefix(en.id, "signature-summary:") {
@@ -633,16 +842,23 @@ func (d *ctxBrief) Render(heading, noun string, total int) string {
 				}
 			}
 			if en.body && strings.Contains(en.text, "omitted ") {
-				d.Omissions = append(d.Omissions, dossierOmission{en.id, "partial body preview", en.expansion})
+				omit(dossierOmission{en.id, "partial body preview", en.expansion})
 			}
 			continue
+		}
+		if en.dep == 0 && en.id == "" && en.kind == "" && en.tier == tierCore && en.sec == "" {
+			continue // structure lines carry no evidence; the manifest keeps the data
+		}
+		cutAny++
+		if en.kind != "" {
+			cut[en.kind]++
 		}
 		found := false
 		for _, er := range d.Evidence {
 			for _, id := range d.plannedShown[en.id] {
 				if er.ID == id && er.Range != nil {
 					found = true
-					d.Omissions = append(d.Omissions, dossierOmission{er.ID, "overall dossier byte budget", dossierRead(er.Path, er.Range.StartLine, er.Range.EndLine)})
+					omit(dossierOmission{er.ID, "overall dossier byte budget", dossierRead(er.Path, er.Range.StartLine, er.Range.EndLine)})
 				}
 			}
 		}
@@ -657,17 +873,26 @@ func (d *ctxBrief) Render(heading, noun string, total int) string {
 		if expand == "" {
 			expand = "Read path=\"dossier-manifest.json\" (same package and lookup scope)"
 		}
-		d.Omissions = append(d.Omissions, dossierOmission{id, "overall dossier byte budget", expand})
+		omit(dossierOmission{id, "overall dossier byte budget", expand})
 	}
-	if len(d.Omissions) > 0 {
-		footer := fmt.Sprintf("### Recorded omissions (%d); overall budget=%d bytes\n", len(d.Omissions), total)
-		for _, om := range d.Omissions {
-			line := fmt.Sprintf("- %s: %s; expand: %s\n", om.EvidenceID, om.Reason, om.Expansion)
-			if len(footer)+len(line)+100 <= reserve {
-				footer += line
-			}
+	if cutAny > 0 {
+		var what []string
+		if cut["notes"] > 0 {
+			what = append(what, "the search notes")
 		}
-		footer += "Complete omission list and scope selectors: Read path=\"dossier-manifest.json\".\n"
+		if n := cut["cand"]; n > 0 {
+			what = append(what, fmt.Sprintf("%d lower-scored candidate line(s)", n))
+		}
+		if n := cut["body"]; n > 0 {
+			what = append(what, fmt.Sprintf("%d source preview(s)", n))
+		}
+		if n := cut["other"]; n > 0 {
+			what = append(what, fmt.Sprintf("%d look-alike or planner entr(ies)", n))
+		}
+		if len(what) == 0 {
+			what = []string{fmt.Sprintf("%d entries", cutAny)}
+		}
+		footer := fmt.Sprintf("Cut for the %d-byte budget: %s. Omission list and expansions: Read path=\"dossier-manifest.json\".\n", total, strings.Join(what, ", "))
 		if b.Len()+len(footer) <= total {
 			b.WriteString(footer)
 		}

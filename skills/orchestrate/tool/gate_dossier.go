@@ -319,7 +319,7 @@ func (s *dossierSet) runLookups(ids []string, lks []lookup) {
 				if lk.Kind == "read" {
 					what = fmt.Sprintf("%s:%d-%d", lk.Path, lk.From, lk.To)
 				}
-				d.Planned = append(d.Planned, plannedEntry(s.e.Code, lk.Kind, what, lk.Why, l, out.String()))
+				d.Planned = append(d.Planned, plannedEntry(lk.Kind, what, lk.Why, out.String()))
 			}
 		}
 		if len(d.Planned) == 0 {
@@ -328,10 +328,10 @@ func (s *dossierSet) runLookups(ids []string, lks []lookup) {
 	}
 }
 
-// plannedEntry is one section 5 entry: the planner's request, the compact
-// observation of its lookup, then the lookup output.
-func plannedEntry(root, kind, what, why string, l evidenceLookup, out string) string {
-	return fmt.Sprintf("- [%s] `%s` - %s\n%s\n%s", kind, what, why, lookupLine(l, root), out)
+// plannedEntry is one section 5 entry: the planner's request, then the lookup
+// output. The lookup record itself is in the manifest.
+func plannedEntry(kind, what, why, out string) string {
+	return fmt.Sprintf("- [%s] `%s` - %s\n%s", kind, what, why, out)
 }
 
 // ctxLookup contains only JSON value types. Keep the original selectors, not
@@ -603,29 +603,6 @@ func dossierTextLookup(query, scope string, r rgResult, err error) evidenceLooku
 	return l
 }
 
-// lookupExclusionsLine states once what the rendered lookups exclude. The
-// per-lookup lines no longer repeat it.
-func lookupExclusionsLine(lks []evidenceLookup) string {
-	var all []string
-	seen := map[string]bool{}
-	for _, l := range lks {
-		for _, e := range l.Exclusions {
-			if e != "" && !seen[e] {
-				seen[e] = true
-				all = append(all, e)
-			}
-		}
-	}
-	if len(all) == 0 {
-		return ""
-	}
-	return "exclusions: " + strings.Join(all, "; ")
-}
-
-// lookupAbsenceLine says what an incomplete lookup is not. A search that did
-// not run is not a finding about the code.
-const lookupAbsenceLine = "A failed, unavailable or empty lookup is not evidence of absence."
-
 var (
 	failureTemp    = regexp.MustCompile(`(^|[\s:(])(?:/private)?/(?:var/folders/[^/\s]+/[^/\s]+/T|tmp)`)
 	failureMissing = regexp.MustCompile(`\S*/([^\s/]+?)(?: was)? not found`)
@@ -705,20 +682,6 @@ func lookupReasonGroups(lks []evidenceLookup, root string) string {
 		lines = append(lines, line)
 	}
 	return strings.Join(lines, "\n")
-}
-
-// lookupUncertain reports whether a lookup's state leaves absence unproven.
-func lookupUncertain(l evidenceLookup) bool {
-	return l.ExecutionStatus != lookupSucceeded || l.Status == "empty" || l.Status == "partial" || len(l.Errors) > 0
-}
-
-func lookupUncertainAny(lks []evidenceLookup) bool {
-	for _, l := range lks {
-		if lookupUncertain(l) {
-			return true
-		}
-	}
-	return false
 }
 
 // shortScope renders a scope selector in short form: the path of a JSON

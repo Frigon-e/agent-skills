@@ -342,7 +342,7 @@ func TestPlanBriefsGetFactsGatheredByCodeAndNoCtxSkipsThem(t *testing.T) {
 	if !(i > 0 && j > i && k > j) {
 		t.Fatalf("the facts section is not between Spec and Acceptance (%d %d %d):\n%s", i, j, k, text)
 	}
-	wantContains(t, text, "### 1. Ranked files", "- `pay/pay.go` (score ", "- `zzzNone_table`", "Computed by code when this brief was written")
+	wantContains(t, text, "### 1. Ranked files", "- `pay/pay.go` (score ", "Names looked up that were not found: `zzzNone_table`", "Computed by code when this brief was written")
 	if n := len(text[j:k]); n > taskBriefChars+800 {
 		t.Errorf("the facts section is %d chars, want about %d at most", n, taskBriefChars)
 	}

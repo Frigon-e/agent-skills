@@ -213,7 +213,7 @@ func TestChecklistIsCappedPagedAndSaysWhatWasCut(t *testing.T) {
 		t.Errorf("long bodies show %d lines", strings.Count(small, "| \tline"))
 	}
 	big := renderChecklist(bigCands(20), nil, "")
-	wantContains(t, big, reuseMoreNotice, "- `p#13` item 13", "Recorded omissions")
+	wantContains(t, big, reuseMoreNotice, "- `p#13` item 13", "Cut for the ")
 	if i := strings.Index(big, reuseMoreNotice); i < 0 || strings.Index(big, "`p#12`") > i || strings.Index(big, "`p#13`") < i {
 		t.Error("items 13 and later must come after the notice")
 	}
