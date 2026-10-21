@@ -570,20 +570,27 @@ func tsServerChoice(code string) (string, string) {
 	// tsc is accepted only when it reports TypeScript 7 or newer.
 	for _, name := range []string{"tsgo", "tsc"} {
 		p, err := exec.LookPath(name)
-		if err != nil || (name == "tsc" && !tscIsNative(p)) {
+		if err != nil {
 			continue
 		}
-		if real, err := ctxServerBinary(code, p); err == nil {
-			if name == "tsc" {
-				// A shim such as vite-plus `vp` acts as tsc only under that
-				// name, so launch the PATH entry, not its resolved target.
-				return p, why
+		// Trust first: tscIsNative executes p, so a candidate that fails the
+		// trust check must never reach it.
+		real, err := ctxServerBinary(code, p)
+		if err != nil {
+			if ctxPathInRoot(code, p) {
+				why = ctxServerSkip("ts")
 			}
-			return real, why
+			continue
 		}
-		if ctxPathInRoot(code, p) {
-			why = ctxServerSkip("ts")
+		if name == "tsc" {
+			if !tscIsNative(p) {
+				continue
+			}
+			// A shim such as vite-plus `vp` acts as tsc only under that
+			// name, so launch the PATH entry, not its resolved target.
+			return p, why
 		}
+		return real, why
 	}
 	return "", why
 }

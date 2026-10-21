@@ -61,3 +61,27 @@ func TestTSServerChoiceTscOnPath(t *testing.T) {
 		})
 	}
 }
+
+// An untrusted checkout's tsc must not run, not even for --version.
+func TestTSServerChoiceDoesNotRunUntrustedTsc(t *testing.T) {
+	t.Setenv("ORCH_TSLS", "")
+	repo := t.TempDir()
+	dir := filepath.Join(repo, "node_modules", ".bin")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(t.TempDir(), "ran")
+	script := "#!/bin/sh\n/usr/bin/touch '" + marker + "'\necho 'Version 7.0.2'\n"
+	if err := os.WriteFile(filepath.Join(dir, "tsc"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir)
+	tscNativeCache.Range(func(k, _ any) bool { tscNativeCache.Delete(k); return true })
+	got, _ := tsServerChoice(repo)
+	if _, err := os.Stat(marker); err == nil {
+		t.Fatal("untrusted tsc was executed")
+	}
+	if got != "" {
+		t.Fatalf("got %q, want none", got)
+	}
+}
