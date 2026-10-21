@@ -21,6 +21,7 @@ import json
 import os
 import re
 import sys
+from datetime import datetime, timezone
 
 GUARD_MARKER = "orch tool guard"
 
@@ -40,6 +41,19 @@ SEARCH_SOURCE = frozenset({"find", "fd", "rg", "ag"})
 SEARCH_SINK = frozenset({"grep", "rg", "ag"})
 PLAIN_SEARCH = frozenset({"grep", "egrep", "fgrep", "rg", "ag"})
 RECURSIVE_BY_DEFAULT = frozenset({"rg", "ag"})
+# What a blocked pattern asks for. The same three shapes are classified by
+# skills/orchestrate/tool/pi_ctx_reminder.ts, so a change here needs the twin
+# change there and a case in toolguard_cases.json.
+IDENTIFIER_SHAPE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*$")
+QUESTION_WORDS = frozenset({"how", "what", "which", "where", "when", "why", "who"})
+# A character class escape says regex, so the pattern is a mix and not a name.
+CHAR_CLASS = re.compile(r"\\[wWdDsS]")
+ESCAPE = re.compile(r"\\.")
+WILDCARD = re.compile(r"\.\*|\.\+")
+CONCEPT_STRIP = re.compile(r"[|^$*+?()\[\]{}]")
+# A concept query already begins with this, so a pattern carrying it does not
+# get it twice.
+LEADING_CODE_THAT = re.compile(r"^code that ", re.IGNORECASE)
 GREP_VALUE = frozenset(
     {
         "-e",
@@ -308,30 +322,203 @@ def search_targets(args):
     return out
 
 
+def search_pattern(args):
+    """The pattern of a grep: the -e/--regexp value, else its first non-flag
+    word."""
+    at = 0
+    total = len(args)
+    while at < total:
+        arg = args[at]
+        if arg in ("-e", "--regexp"):
+            return args[at + 1] if at + 1 < total else ""
+        if arg.startswith("-") and arg != "-":
+            if arg in GREP_VALUE:
+                at += 1
+            at += 1
+            continue
+        return arg
+    return ""
+
+
+def branches(pattern):
+    """Alternation branches, ignoring an escaped pipe."""
+    count = 1
+    at = 0
+    total = len(pattern)
+    while at < total:
+        if pattern[at] == "\\":
+            at += 2
+            continue
+        if pattern[at] == "|":
+            count += 1
+        at += 1
+    return count
+
+
+def wildcard_between_words(pattern):
+    """.* or .+ with words on both sides: the model is describing a gap."""
+    for marker in (".*", ".+"):
+        at = pattern.find(marker)
+        if at > 0 and at + len(marker) < len(pattern):
+            return True
+    return False
+
+
+def pattern_kind(pattern):
+    """Three kinds by shape alone, the same in the pi guard: concept is a broad
+    query, symbol one identifier, text anything else (a string, a route, a path,
+    a short regex with simple anchors only)."""
+    trimmed = pattern.strip()
+    if not trimmed:
+        return "text"
+    words = trimmed.split()
+    if branches(trimmed) >= 3:
+        return "concept"
+    if wildcard_between_words(trimmed):
+        return "concept"
+    if len(words) >= 4:
+        return "concept"
+    if "?" in trimmed or words[0].lower() in QUESTION_WORDS:
+        return "concept"
+    if CHAR_CLASS.search(trimmed):
+        return "concept"
+    if IDENTIFIER_SHAPE.match(trimmed):
+        return "symbol"
+    return "text"
+
+
+def search_dir(args):
+    """The directory a grep searches, which the text line scopes with --glob: a
+    file names its own directory, and no target or `.` searches the root."""
+    targets = search_targets(args)
+    if not targets:
+        return ""
+    first = targets[0].rstrip("/")
+    if not first or first == ".":
+        return ""
+    parts = first.split("/")
+    if "." in parts[-1]:
+        return "/".join(parts[:-1])
+    return first
+
+
+def shell_quoted(text):
+    """One shell word, safe to paste into a command."""
+    return "'" + text.replace("'", "'\\''") + "'"
+
+
+def concept_words(pattern):
+    """The concept phrase: the model's own words with the regex dropped."""
+    cleaned = ESCAPE.sub(" ", pattern)
+    cleaned = WILDCARD.sub(" ", cleaned)
+    cleaned = CONCEPT_STRIP.sub(" ", cleaned)
+    return LEADING_CODE_THAT.sub("", " ".join(cleaned.split()))
+
+
+def pattern_hint(segment):
+    """The one line a pattern hint adds: the ctx query that fits what was typed.
+    Empty when the grep has no pattern to build it from."""
+    name, args = command(segment)
+    if name == "git":
+        args = args[1:]
+    pattern = search_pattern(args)
+    if not pattern:
+        return ""
+    kind = pattern_kind(pattern)
+    if kind == "symbol":
+        return f"Use orch ctx sym {pattern} --refs 3."
+    words = concept_words(pattern)
+    if kind == "concept" and words:
+        phrase = words.replace('"', "'")
+        return (
+            f'Use orch ctx find "Code that {phrase}" '
+            "(a broader search; use it when no name or string is known)."
+        )
+    where = search_dir(args)
+    if where:
+        return f"Use orch ctx text {shell_quoted(pattern)} --glob {shell_quoted(where + '/**')}."
+    return f"Use orch ctx text {shell_quoted(pattern)}."
+
+
+def grep_searches(segment, tools):
+    """One segment is a raw content search over files."""
+    name, args = command(segment)
+    if not name:
+        return False
+    if name == "git":
+        return bool(args) and args[0] == "grep" and not segment["stdin"]
+    if name == "rg" and not tools["orch"]:
+        return False
+    if name not in PLAIN_SEARCH:
+        return False
+    if search_targets(args):
+        return True
+    recurses = name in RECURSIVE_BY_DEFAULT or any(
+        arg.startswith("--recursive") or RECURSIVE.match(arg) for arg in args
+    )
+    return recurses and not segment["stdin"]
+
+
+def grep_segment(line, tools):
+    """The grep segment a block names, so the hint is built from the model's own
+    pattern and not from a generic example."""
+    for segment in segments(line):
+        if grep_searches(segment, tools):
+            return segment
+    return None
+
+
+def grep_kind(line, tools):
+    """The kind of the blocked grep's pattern, for the log."""
+    segment = grep_segment(line, tools)
+    if segment is None:
+        return ""
+    name, args = command(segment)
+    if name == "git":
+        args = args[1:]
+    pattern = search_pattern(args)
+    return pattern_kind(pattern) if pattern else ""
+
+
+def grep_tuned(line, tools):
+    """The one line a deny-grep-rg block adds in pattern mode."""
+    segment = grep_segment(line, tools)
+    return pattern_hint(segment) if segment else ""
+
+
 def deny_grep_rg(line, tools):
     """A grep with a file or directory argument, or one that recurses, searches
     files. One reading stdin is a filter. With no orch, rg is the preferred grep
     rather than a raw search, so rg itself stays allowed."""
-    for segment in segments(line):
-        name, args = command(segment)
-        if not name:
-            continue
-        if name == "git":
-            if args and args[0] == "grep" and not segment["stdin"]:
-                return True
-            continue
-        if name == "rg" and not tools["orch"]:
-            continue
-        if name not in PLAIN_SEARCH:
-            continue
-        if search_targets(args):
-            return True
-        recurses = name in RECURSIVE_BY_DEFAULT or any(
-            arg.startswith("--recursive") or RECURSIVE.match(arg) for arg in args
-        )
-        if recurses and not segment["stdin"]:
-            return True
-    return False
+    return any(grep_searches(segment, tools) for segment in segments(line))
+
+
+def hint_mode():
+    """ORCH_TOOL_GUARD_HINT=pattern appends one line built from the blocked
+    pattern, so the two messages can be A/B tested. Unset or generic keeps the
+    generic text."""
+    return "pattern" if os.environ.get("ORCH_TOOL_GUARD_HINT") == "pattern" else "generic"
+
+
+def guard_log(rule, hint, kind, line):
+    """ORCH_TOOL_GUARD_LOG=<path> appends one JSON line per block, for the A/B
+    count. Off by default, and a guard never fails a call because of it."""
+    path = os.environ.get("ORCH_TOOL_GUARD_LOG")
+    if not path:
+        return
+    entry = {
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "harness": "claude",
+        "rule": rule,
+        "hint": hint,
+        "kind": kind,
+        "command": line[:200],
+    }
+    try:
+        with open(path, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps(entry) + "\n")
+    except OSError:
+        pass
 
 
 def deny_cat_head_tail(line):
@@ -411,6 +598,7 @@ def rules():
             "name": "deny-grep-rg",
             "id": "grep-rg",
             "match": deny_grep_rg,
+            "tuned": grep_tuned,
             "reason": lambda tools: (
                 f"{GUARD_MARKER} (deny-grep-rg): a plain grep"
                 + (", rg" if tools["orch"] else "")
@@ -477,7 +665,16 @@ def main(argv):
     tools = installed()
     for rule in active:
         if rule["match"](line, tools):
-            sys.stderr.write(rule["reason"](tools) + "\n")
+            mode = hint_mode()
+            # The pattern hint is one extra line, and only when the reason can
+            # name the tool it points at.
+            tuned = ""
+            if mode == "pattern" and tools["orch"] and rule.get("tuned"):
+                tuned = rule["tuned"](line, tools)
+            kind = grep_kind(line, tools) if rule["id"] == "grep-rg" else ""
+            guard_log(rule["id"], mode, kind, line)
+            reason = rule["reason"](tools) + ("\n" + tuned if tuned else "")
+            sys.stderr.write(reason + "\n")
             return 2
     return 0
 

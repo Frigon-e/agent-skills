@@ -40,11 +40,16 @@ A blocked command stays blocked on every retry. Two switches are the human escap
 - `ORCH_TOOL_GUARD=off` disables all four scripts.
 - `ORCH_TOOL_GUARD_SKIP=find-chains,sed-inplace,cat-head-tail,grep-rg` disables rules by short name or full name. Plain `find` has its own id, `find` (or `deny-find`), inside `deny-find-chains.sh`.
 
+Two more switches are for the message, not for what is blocked:
+
+- `ORCH_TOOL_GUARD_HINT=pattern` makes a `deny-grep-rg` block end with one line built from the pattern that was typed, instead of leaving the model to pick the kind itself: `orch ctx sym <Name> --refs 3` for one identifier, `orch ctx text '<pattern>' --glob '<dir>/**'` for a string, a route or a path, and `orch ctx find "Code that <words>"` for a broad pattern (an alternation of three or more, a `.*` gap, four or more words, a question, or a regex character class). Unset or `generic` keeps the text above, so the two can be A/B tested. Without `orch` on PATH nothing is added, and no other rule changes.
+- `ORCH_TOOL_GUARD_LOG=<path>` appends one JSON line per block: `ts`, `harness` (`claude`), `rule`, `hint` (`generic` or `pattern`), `kind` (`symbol`, `text`, `concept`, or empty for a rule with no pattern) and `command` cut at 200 characters. Off by default, and it is the only thing the guard writes.
+
 `prefer-read-tool.sh` stays. It is a non-blocking reminder for the wider reader set (`less`, `more`, `bat`, `nl`, and `sed` without `-n` as well), so it complements `deny-cat-head-tail.sh`; it is not replaced by it. Register both if you want the block and the reminder.
 
 ## Tests
 
-`toolguard_cases.json` is one decision table shared with the pi guard: every case names the command, the PATH situation (`orch` on PATH, `fd` and `rg` but no `orch`, or neither) and the rule that must block it, or no rule when it is allowed. `toolguard_test.py` runs every case through the real shell scripts with only stub tools on PATH, plus `bash -n`/`shellcheck`, the two switches, the non-Bash and broken-stdin paths, and the task's required examples:
+`toolguard_cases.json` is one decision table shared with the pi guard: every case names the command, the PATH situation (`orch` on PATH, `fd` and `rg` but no `orch`, or neither) and the rule that must block it, or no rule when it is allowed. Its `patternKinds` table is the second half: each pattern and the kind `deny-grep-rg` must give it, at least eight per kind, run through both implementations so the tailored hint cannot drift. `toolguard_test.py` runs every case through the real shell scripts with only stub tools on PATH, plus `bash -n`/`shellcheck`, the two switches, the non-Bash and broken-stdin paths, the pattern hint in both modes (including the generic reason byte for byte and the A/B log), and the task's required examples:
 
 ```sh
 python3 hooks/claude/toolguard_test.py

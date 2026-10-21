@@ -1,12 +1,44 @@
 {
   "schema": 1,
   "guard": "orch tool guard",
-  "note": "One decision table for both harness guards. rule is the rule that must block the call, or empty when the call is allowed. situation names the PATH the hook runs with: orch on PATH, no orch but fd and rg installed, or neither. hooks/claude/toolguard_test.py runs every case through the real Claude hooks; TestCtxReminderSharedToolguardCases in skills/orchestrate/tool runs the same file through the pi extension and compares blocked vs allowed and the rule name only.",
+  "note": "One decision table for both harness guards. rule is the rule that must block the call, or empty when the call is allowed. situation names the PATH the hook runs with: orch on PATH, no orch but fd and rg installed, or neither. hooks/claude/toolguard_test.py runs every case through the real Claude hooks; TestCtxReminderSharedToolguardCases in skills/orchestrate/tool runs the same file through the pi extension and compares blocked vs allowed and the rule name only. patternKinds is the second table: the kind deny-grep-rg must classify a pattern into, run through both implementations so the tailored hint cannot drift.",
   "pathSituations": {
     "orch": { "tools": ["orch"] },
     "fd-rg": { "tools": ["fd", "rg"] },
     "none": { "tools": [] }
   },
+  "patternKinds": [
+    { "pattern": "Normalize", "kind": "symbol" },
+    { "pattern": "render_user", "kind": "symbol" },
+    { "pattern": "Parser.Parse", "kind": "symbol" },
+    { "pattern": "findUser", "kind": "symbol" },
+    { "pattern": "Gateway", "kind": "symbol" },
+    { "pattern": "_internal", "kind": "symbol" },
+    { "pattern": "gateway_test", "kind": "symbol" },
+    { "pattern": "NewClient", "kind": "symbol" },
+    { "pattern": "Schema.Validate", "kind": "symbol" },
+
+    { "pattern": "/api/users", "kind": "text" },
+    { "pattern": "cannot find user", "kind": "text" },
+    { "pattern": "Gateway|Foo", "kind": "text" },
+    { "pattern": "^Gateway$", "kind": "text" },
+    { "pattern": "Gateway$", "kind": "text" },
+    { "pattern": "refund failed", "kind": "text" },
+    { "pattern": "internal/gateway.go", "kind": "text" },
+    { "pattern": "user not found", "kind": "text" },
+    { "pattern": "timeout: 30s", "kind": "text" },
+    { "pattern": "grpc error code", "kind": "text" },
+
+    { "pattern": "refund.*failed", "kind": "concept" },
+    { "pattern": "refund|payment|charge", "kind": "concept" },
+    { "pattern": "how are refunds issued", "kind": "concept" },
+    { "pattern": "Code that saves a card", "kind": "concept" },
+    { "pattern": "\\w+Handler\\b", "kind": "concept" },
+    { "pattern": "failed to charge the customer card", "kind": "concept" },
+    { "pattern": "where is the gateway wired", "kind": "concept" },
+    { "pattern": "refund.*then.*failed", "kind": "concept" },
+    { "pattern": "create|update|delete|list", "kind": "concept" }
+  ],
   "cases": [
     { "name": "find -exec rm", "situation": "orch", "rule": "find-chains", "command": "find . -name '*.log' -exec rm {} \\;" },
     { "name": "find -exec ls", "situation": "orch", "rule": "find-chains", "command": "find . -name '*.go' -exec ls {} \\;" },

@@ -33,6 +33,16 @@ Start with the cheapest tool that can answer, and move up only when it cannot:
 3. `find` (concept) only when you do not know any name to search for.
 4. `batch` whenever you have two or more independent lookups.
 
+When the tool guard blocks a raw grep or rg, one line of its reason is built
+from the pattern you typed (`ORCH_TOOL_GUARD_HINT=pattern`; without it the
+reason stays generic). One identifier such as `Normalize` or `Parser.Parse`
+names `orch ctx sym`, a string, route or path such as `cannot find user` or
+`/api/users` names `orch ctx text`, and a broad pattern names `orch ctx find`:
+an alternation of three or more, a `.*` gap between words, four or more words,
+a question, or a regex character class. Take the kind it names rather than
+widening the same grep: `find` is for the case where no single name or string
+is known yet, and `text` answers faster when one is.
+
 | You need | Command | Why this one |
 |---|---|---|
 | String matches within a stated scope | `orch ctx text <pattern> [--glob G] [--word] [--fixed] [--type T] [-l] [-c] [-C n]` | ripgrep: smart-case, skips lockfiles, minified, generated and vendored files; hits grouped by file, each with its enclosing function and configurable context (default 6 lines) |
