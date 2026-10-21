@@ -13,6 +13,21 @@
     {"id":"crm-render-seam", "subject":"crm commit a87b826d30db1c1d07a5adaab02f53a39475dec9; real spec sha256 b5811b75d2b7e626023014fdcb13eb02e65377e359019cff150a7aec927158f4; source blob 3531e14ca4d92c220b99ca0330a3116ffb13ddfb; key: private pages map is partial support, not proof of the requested exported rendering seam", "category":"insufficient_evidence"},
     {"id":"crm-owner", "subject":"same CRM commit/spec/source as crm-render-seam; key: any new product policy question has owner authority, not reviewer authority", "category":"authority_boundaries"}
   ],
+  "frozen_artifacts": {
+    "crm-frozen.json":"3fa85cb89d7c7d7ee306c6d4c731313fe6dd6101a6e5575fa66d867550b4ed28",
+    "crm-hybrid.txt":"fba5aa9999a5ddae8e59734c23064e13ef14164c80c38a825f52ae749ce238de",
+    "crm-json.txt":"b1c4833e91e515d522f11bba00d444c4784b79f8032f97ab877d3a5949167757",
+    "crm-toon.txt":"86fb27249a4eae866b08609d1b341ce3b9f1e06a7d283d6e782ec29009064400",
+    "fixture-frozen.json":"3e0650884a726d0e559d4d680d4a22b2db3e2748a375391f49965da43876941c",
+    "fixture-hybrid.txt":"e95c6c82bf17b616dd9a2b7c30727dcec87c84b6739333abbf88d4177271b20e",
+    "fixture-json.txt":"63ac94d2a0eb1f5645c0a0d6d3e5031421267c551ebb6433303083a5d921a384",
+    "fixture-toon.txt":"6ed40a40f49240b32b886875891464615366310fc40459a747b280bdde0d7448",
+    "gate-inputs.json":"d7a171fe710d4e50f2fb21ae723047b6d31a4f9ba3b8b1b1bbd9f1dde87c263e",
+    "experiment-config.toml":"17c6a75067c9b1753b287f6f360c35365c6289f8588c08005ded4d996a7c20e8",
+    "native_controls":"be7df1e20 PASS; 8 fixture and 2 CRM cases; 0.734s",
+    "format_equality":"be97c7639 PASS; canonical values and array order preserved across all three formats; 0.015s",
+    "storage":"private temporary work directory only; source/spec/key contents are not committed"
+  },
   "trial_count": 2,
   "maximum_spend": {"currency":"USD", "micros":5000000},
   "promotion_criteria": {
@@ -31,7 +46,7 @@
   "cache_settings": {"mode":"both", "settings":"Fresh sessions for every trial. Trial 1 and 2 use the same prefix to observe possible cache reuse; request short retention, record actual cache counters. No claim of cold/warm separation without provider evidence. No cache-warming calls."},
   "mode":"shadow",
   "paid":true,
-  "approval": {"state":"awaiting_manifest_decision", "decision_key":"manifest", "required_before_any_paid_request":true},
+  "approval": {"state":"approved_subject_to_transport_preflight", "decision_key":"manifest", "required_before_any_paid_request":true, "evidence":"orchestrator inbox message001, re manifest, 2026-10-20T21:30:25-07:00, approves both experiments with fake-transport cap preflight, no production changes, ledger and stop rules", "approved_preregistration_commit":"ad87a52d569d4baf7eaa848fcaa55a64da37b050"},
   "experiments": [
     {
       "id":"E2-format-packets",
@@ -45,12 +60,12 @@
       "run_id_pattern":"E2-{fixture|crm}-{hybrid|toon|json}-t{1|2}",
       "route":"pi openrouter/~deepseek/deepseek-flash-latest",
       "expected_cost_per_run_usd":0.02,
-      "enforced_cost_ceiling_per_run_usd":0.08,
+      "anomaly_threshold_per_run_usd":0.08,
       "expected_total_usd":0.24,
-      "maximum_total_usd":0.96,
+      "sum_of_anomaly_thresholds_usd":0.96,
       "controls":"Same canonical evidence values, order, instructions, output schema, output cap and trust key for all arms. Round-trip TOON and JSON to the same value before calls. Hybrid must retain every field. No retrieval, dossier, prefix or excerpt changes. Disable tools for this isolated-reply comparison, not for gate controls. Do not label the constructed hybrid a byte-exact historical prompt.",
       "scoring":"Use production answer/evidence validation and deterministic reducer replay from temporary test-only harnesses; snapshot resulting records into isolated bench store. Missing output is missing coverage, not a negative answer. Score the complete planned population. Retain native replies and distinguish reply-only latency from full workflows.",
-      "boundary":"This is an isolated representation test, not an end-to-end gate or full-workflow win. A single invocation gets exactly one upstream request and no schema repair. If its complete reliable request bound exceeds $0.08, make no call and report the limitation; do not raise ceilings or substitute routes."
+      "boundary":"This is an isolated representation test, not an end-to-end gate or full-workflow win. A single invocation gets exactly one upstream request and no schema repair. Under approved message002, $0.08 is an anomaly threshold, not the hard request bound. Reserve the full advertised Flash bound before dispatch and stop after any measured anomaly."
     },
     {
       "id":"E6-real-route-smoke",
@@ -63,9 +78,9 @@
       "paid_runs":16,
       "run_id_pattern":"E6-{crm|go|py|ts}-{flash|glm}-t{1|2}",
       "expected_cost_per_run_usd":{"flash":0.04,"glm":0.06},
-      "enforced_cost_ceiling_per_run_usd":0.15,
+      "anomaly_threshold_per_run_usd":0.15,
       "expected_total_usd":0.80,
-      "maximum_total_usd":2.40,
+      "sum_of_anomaly_thresholds_usd":2.40,
       "controls":"Use exact same frozen subject, spec, dossier selection, mandatory checks and tools within each project. Keep ctx-shell=open and ctx-profile=default. Fixture controls run the complete gate including both adversaries in isolated repositories. CRM uses --only on the group containing crm1-ui-shell and --experiment, with the exact real spec; this subset never authorizes planning. Determine and freeze its actual group key from a no-spend dry run. Do not compare CRM subset totals against complete fixture totals.",
       "scoring":"Use existing gate compare and bench record/compare/report with ORCH_BENCH_DIR set to a private temporary store. Current supported-answer identity and visibility rules apply. Never join old historical keys to current CRM code without a validated mapping. CRM whole-group correctness beyond the frozen rendering-seam case is unknown; report coverage, support, cost, latency and findings without inventing a whole-group answer key.",
       "boundary":"Two trials are smoke evidence only. The two routes share OpenRouter; this does not establish provider independence or model independence. Any output-cap or dollar-cap exhaustion is incomplete, not a false blocker unless the gate records an incorrect supported fail."
@@ -79,7 +94,8 @@
   "budget_plan": {
     "currency":"USD",
     "expected_total":1.04,
-    "sum_enforced_run_ceilings":3.36,
+    "sum_run_anomaly_thresholds":3.36,
+    "amendment_authority":"orchestrator inbox message002, re cost-bound, 2026-10-20T21:35:28-07:00; account-level full-output reservation replaces small per-run hard ceilings without changing cases, trial counts, expected spend or the $5 user cap",
     "hard_user_cap":5.00,
     "admission_limit":4.50,
     "stop_starting_experiments_at":4.00,
@@ -88,19 +104,21 @@
     "fallbacks":0,
     "concurrency":1,
     "unallocated_budget_is_not_permission_to_add_runs":true,
-    "rule":"Every repair, failed attempt and fallback is charged inside the original run ceiling. No replacement experiment, route or extra trial without another decision. Refuse before each run unless known cumulative plus both expected cost and enforced run ceiling are <= $4.50. Stop starting experiments at $4.00."
+    "rule":"Every repair and failed attempt counts toward the same study. No replacement experiment, route or extra trial without another decision. Under message002, serialize every underlying paid HTTP request, including all tool-loop and gate-worker requests. Before each, read authoritative OpenRouter key usage and refuse if known cumulative plus its full advertised input/output bound would exceed $4.50; this is stricter than the message002 $5 admission limit. Reserve $0.54525932 for Flash or $1.404042704 for GLM at observed prices, and revalidate metadata before dispatch. Stop all further dispatch at cumulative $4.00, on any per-run anomaly, or on unknown/inconsistent/lagging cost. Keep the whole full-output reservation until actual cost reconciles. The $3.36 threshold sum is not a hard spend bound."
   },
   "transport_safety_preflight": {
-    "status":"not_yet_implemented_or_verified; paid execution remains blocked even after manifest approval until these checks pass",
+    "status":"passed_no_spend under message002: both actual Pi routes dispatched exactly one localhost fake request with max_tokens=4096 and dummy auth; 11 durable account-guard tests passed. Initial sandbox-host and runtime-bootstrap failures dispatched zero requests and are retained. Real output billing is protected by full advertised bounds, not assumed max_tokens semantics.",
+    "output_cap_evidence":"background bf28da276; private transport-preflight/result.json sha256 e98bd477e2d9785ac63e0b4dfdd3a7ae2f40ce2f13cdbfde134cad6258165111",
+    "account_guard_evidence":"11 tests in temporary test_account_guard.py; guard source sha256 c680c1bc5653dc9eb063db2b11f4bed589aa5034263a5868518de8bfb8a29922; tests sha256 f52f82e59a4c5d5c0fc09535e750dcf447422dbbf9e7ca1f629a6dc1b90b1872",
     "location":"temporary directory only; no production or default configuration changes",
-    "method":"Keep actual pi/provider/model selection. An isolated model override caps output at 4096 and routes the existing OpenRouter protocol through a local accounting proxy. Capture requests against a fake upstream first. Proxy pins the allowed model IDs, rejects unsupported billable options, enforces an independently verified upper cost bound before every upstream request, serializes upstream calls, and has per-run and global reservations. Retain ctx-shell=open in real gate controls. Isolate extensions, MCP, credentials, sessions and config so no optional/background model work bypasses the meter.",
+    "method":"Keep actual pi/provider/model selection. An isolated model override serializes max_tokens=4096 through a local accounting proxy. The fake probe verified both exact routes. A network sandbox permits child Pi/tool traffic only to the local proxy, with dummy child credentials. The parent alone resolves the configured OpenRouter OAuth credential and reads authoritative free key usage. Proxy pins allowed model IDs, rejects extra billable options, reserves the full advertised input/output cost before every individual HTTP request, serializes upstream calls and reconciles account/provider costs. Retain ctx-shell=open in real gate controls. Isolate extensions, MCP, sessions and config; never print or store the real credential.",
     "price_snapshot_source":"https://openrouter.ai/api/v1/models (unpaid metadata fetch)",
     "observed_flash_usd_per_million":{"input":0.07,"output":0.50,"cached_input":0.008},
     "observed_glm_usd_per_million":{"input":0.079,"output":1.40,"cached_input":0.078},
     "observed_context_tokens":1048576,
-    "conservative_flash_request_ceiling_usd":0.08,
-    "conservative_glm_request_ceiling_usd":0.10,
-    "bound_reason":"At full advertised context and capped output: Flash <= $0.07544832 and GLM <= $0.088572928 before any extra fee. Revalidate pricing/fees, context/output bounds and token semantics before dispatch. If a complete reliable bound is not established, make no paid call. Reserve $0.08 for Flash or $0.10 for GLM before each request; reconcile and release only after actual provider cost is known. A run's remaining ceiling must cover the next whole request, not merely its expected cost.",
+    "conservative_flash_request_ceiling_usd":0.54525932,
+    "conservative_glm_request_ceiling_usd":1.404042704,
+    "bound_reason":"OpenRouter documents the combined reasoning/visible max_tokens bound for most, not all, providers. Both moving aliases expose no endpoint list. Message002 therefore reserves full advertised context 1048576 plus full advertised maximum output 943718: Flash $0.54525932, GLM $1.404042704 at the observed prices. Never rely on max_tokens=4096 for money safety. Revalidate advertised limits/prices and restrict provider maximum prices and extra fees before every dispatch. A multi-turn gate command receives a new reservation for every underlying HTTP request, never only one reservation for the command.",
     "accounting":"Use provider-reported usage/cost and request identifiers, reconcile with provider generation usage where available, and retain Pi session totals and gate.json pass_tokens separately. Catalog-based estimates are not verified provider charges. Flush and sync request admission before upstream dispatch. A crash, network error or missing/inconsistent cost that cannot be reconciled stops every subsequent paid request and produces needs-decision; never record missing cost as zero."
   },
   "measurement_protocol": {

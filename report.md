@@ -2,7 +2,7 @@
 
 ## Status
 
-Phase 1: pre-registration only. No paid model request has started. Approval is required through decision `manifest` before any paid call.
+The orchestrator approved both experiments in inbox message001, then approved a revised full-output account guard in message002 (`re: cost-bound`). The original pre-registration is commit `ad87a52d569d4baf7eaa848fcaa55a64da37b050`. No paid model request has started. The no-spend output-cap probe now passes for both routes, and the durable account guard passes 11 tests. Frozen packet checks and the amended pre-registration must complete before paid execution.
 
 - Branch: `orch/paid-experiments`.
 - Code baseline: `8a062d2c2f8d15c0916e9bd87ba6cc58378e7c1b`.
@@ -10,7 +10,7 @@ Phase 1: pre-registration only. No paid model request has started. Approval is r
 - Paid ledger: [`checks/ledger.jsonl`](checks/ledger.jsonl), currently empty.
 - Verified experiment spend so far: **$0.00**. No gate, shadow, adjudicator, classifier, decision API, model scout, or model-based web-search call was made.
 - Estimated planned spend: **$1.04**. This is a planning estimate, not measured cost.
-- Sum of enforced per-run ceilings: **$3.36** across 28 planned runs.
+- Sum of per-run anomaly thresholds: **$3.36** across 28 planned runs. Under approved message002, this is not a hard total spend bound.
 - Absolute user cap: **$5.00**, including failed calls and repairs. Admission cutoff: $4.50. Stop starting experiments at $4.00.
 
 This report is not a completion claim. Paid execution, results, final live-store verification and final acceptance remain pending.
@@ -19,11 +19,13 @@ This report is not a completion claim. Paid execution, results, final live-store
 
 The manifest selects experiments 2 and 6 from the implementation plan, in that order:
 
-| Experiment | Design | Planned runs | Estimate | Sum of run ceilings |
+| Experiment | Design | Planned runs | Estimate | Sum of anomaly thresholds |
 |---|---|---:|---:|---:|
 | E2: equivalent representation | Fixed evidence as hybrid text, TOON and compact JSON; fixture packet and real CRM rendering-seam packet; two trials per cell | 12 | $0.24 | $0.96 |
 | E6: current gate route smoke | Default Flash and configured GLM; CRM, Go, Python and TypeScript; two trials per cell | 16 | $0.80 | $2.40 |
 | Total | No extra trials or paid fallback routes | 28 | $1.04 | $3.36 |
+
+Message002 changes only the money guard. The $0.08 packet and $0.15 gate thresholds stop further work after a measured anomaly. Hard admission instead reserves the full advertised input/output cost before **each underlying HTTP model request**, including every tool-loop request in a gate command. Full observed bounds are $0.54525932 for Flash and $1.404042704 for GLM. Requests are strictly serialized. The implementation retains the task's stricter $4.50 admission cutoff and the $4.00 stop.
 
 E2 is an isolated reply test. It cannot establish a complete-workflow format win. Its constructed hybrid retains identical fields but is not described as an exact historical gate prompt.
 
@@ -47,15 +49,19 @@ Experiments 3, 4 and 5 are deferred, not negative results. A default-versus-lean
 
 ## Required spending guard
 
-Paid execution remains blocked until approval **and** a no-spend transport preflight pass.
+Manifest approval and the revised account-usage contract are recorded. No-spend transport/output-cap checks now pass; frozen packet and serialization checks still precede paid execution.
 
 Use temporary configuration and test-only execution tooling, not production edits. Keep Pi, the configured provider/model IDs, and the gate's open-shell setting. A temporary model override caps output at 4,096. A local accounting proxy must verify that cap on actual serialized requests against a fake upstream before any real request. It must serialize upstream calls, pin allowed models, reject unbounded billable options, sync admission records, and reserve the whole conservative next-request ceiling before dispatch.
 
-At the observed prices, full advertised context plus 4,096 output tokens costs at most $0.07544832 for Flash and $0.088572928 for GLM, before any extra fee. Proposed conservative reservations are $0.08 and $0.10. A reliable complete fee/usage bound is a precondition, not an assumed fact. Run ceilings are $0.08 for E2 and $0.15 for E6. The proxy must refuse a new request if the remaining run/global allowance cannot cover the whole reservation, even when normal replies cost much less.
+The original cap assumption was not sufficient: OpenRouter documents combined reasoning and visible output under `max_tokens` on most providers, not all. Both moving aliases return an empty endpoint list. Message002 therefore requires full advertised context **and full advertised output**, not a 4,096-token money assumption. Reserve $0.54525932 for Flash or $1.404042704 for GLM before every underlying paid request. Refuse when cumulative plus that reservation exceeds $4.50, or cumulative reaches $4.00. Revalidate catalog prices/limits and provider price restrictions. The old $0.08/$0.15 per-run limits now detect anomalies; any measured breach is recorded and stops further calls.
 
 Provider-reported charges and request IDs must reconcile with actual generation usage where available. Preserve Pi session/catalog totals and `gate.json` pass totals separately; do not relabel a catalog estimate as a verified provider charge. An unreconciled timeout, crash, missing cost, unexpected fee or bypass-capable model workflow stops further spending and requires a new decision. No paid fallback, retries outside a declared run allowance, background classifier, default change or additional experiment is approved by unused budget.
 
-The temporary guard is not implemented or verified yet. If this proves infeasible without a production/default change, stop and escalate rather than relax the cap.
+Temporary tooling now implements durable Decimal admission, one-request serialization, synced reservations, authoritative OpenRouter key-usage reconciliation, anomaly stops and crash/unknown-cost refusal. Eleven offline tests passed. The output-cap probe passed for both exact Pi routes: one localhost-only request each, `max_tokens=4096`, dummy auth and no paid provider requests. The probe used an OS network restriction and a pinned installed Node runtime. Its initial failures were a rejected numeric sandbox host and a runtime downloader blocked by the sandbox; both dispatched zero requests. These failures are preserved, not counted as successful probes.
+
+Evidence: background `bf28da276`; private result SHA256 `e98bd477e2d9785ac63e0b4dfdd3a7ae2f40ce2f13cdbfde134cad6258165111`. Guard source SHA256 `c680c1bc5653dc9eb063db2b11f4bed589aa5034263a5868518de8bfb8a29922`; 11-test source SHA256 `f52f82e59a4c5d5c0fc09535e750dcf447422dbbf9e7ca1f629a6dc1b90b1872`. These are separate fake-transport and guard-unit checks, not evidence of real-provider billing semantics.
+
+The configured OpenRouter credential is OAuth. The API-key export command correctly refuses it; the bearer-token command resolves an OpenRouter-format credential in memory. The free authoritative key-usage endpoint works. No credential was printed or stored. A fresh usage baseline is required immediately before the first paid request; account history is not experiment spend.
 
 ## Scoring and interpretation
 
@@ -79,7 +85,13 @@ The live store was opened only for read-only discovery and a copy. Every benchma
 
 ## Verification
 
-A CPU-locked background preflight runs the required repository checks and deterministic fixture/manifest selection:
+Fixed packet preparation passed before any paid call:
+
+- Native reducer controls: **8 fixture and 2 real-CRM cases**, PASS, 0.734 seconds (`be7df1e20`).
+- Serialization equality: exact canonical JSON values and array order match after decoding hybrid, TOON and compact JSON for both packs, PASS, 0.015 seconds (`be97c7639`).
+- The manifest records SHA256 identities for all six input representations, both frozen key/policy files, the three-project gate input manifest and private experiment configuration. No private source, spec, key or prompt contents are committed.
+
+A CPU-locked background preflight ran the required repository checks and deterministic fixture/manifest selection:
 
 ```sh
 cd skills/orchestrate/tool
