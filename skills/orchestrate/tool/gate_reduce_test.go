@@ -9,6 +9,36 @@ import (
 	"testing"
 )
 
+// gateView checks the public default selection, not its TOON spelling.
+func gateView(t *testing.T, out string) gateInformation {
+	t.Helper()
+	fields := decodedOutput(t, []byte(out), outputAgent).(map[string]any)
+	if fields["schema_version"] != float64(2) || fields["status"] != nil {
+		t.Fatalf("not a state-only v2 gate view: %#v", fields)
+	}
+	b, err := json.Marshal(fields)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var view gateInformation
+	if err := json.Unmarshal(b, &view); err != nil {
+		t.Fatal(err)
+	}
+	if view.Gate != view.State {
+		t.Fatalf("gate alias differs from state: %+v", view)
+	}
+	return view
+}
+
+func wantGateState(t *testing.T, out, state string) gateInformation {
+	t.Helper()
+	view := gateView(t, out)
+	if view.State != state {
+		t.Fatalf("state %q, want %q: %s", view.State, state, out)
+	}
+	return view
+}
+
 func reducerFixture(language string) (*gateSubject, []reviewCheck, []reviewAnswer, []reviewFinding, reviewPolicy) {
 	p := evidenceTestPacket(language)
 	if language == "go" {
@@ -100,7 +130,7 @@ func TestReduceExperimentRetainsNonApprovalDetails(t *testing.T) {
 		if mask&8 != 0 {
 			want = "error"
 		}
-		if r.State != want || r.Status == "pass" {
+		if r.State != want || r.State == "pass" {
 			t.Fatalf("experiment acquired approval: %+v", r)
 		}
 		if len(r.Findings) != len(fs) || len(r.ActiveBlockers) != len(fs) {
@@ -355,7 +385,7 @@ func TestReduceNotApplicableAndDecisionAuthority(t *testing.T) {
 	q := reviewQuestion{SchemaVersion: evidenceSchemaVersion, ID: "overwrite", ItemID: cs[0].Item.ID, ItemRevision: cs[0].Item.Revision, CheckID: cs[0].ID, Question: "May export overwrite an existing file?", Authority: reviewAuthority{Owner: "owner", Basis: "Public CLI behavior"}, Options: []reviewQuestionOption{{"yes", "Overwrite", "Existing file is replaced"}, {"no", "Refuse", "Existing file remains"}}, Answer: "yes", AnsweringActor: "reviewer"}
 	p.Questions = []reviewQuestion{q}
 	r := ReduceReview(s, cs, as, nil, p)
-	if r.State != "incomplete" || r.Status != "fail" || r.Reasons[0].Actor != "owner" {
+	if r.State != "incomplete" || r.Reasons[0].Reason != reviewAwaitingDecision || r.Reasons[0].Actor != "owner" {
 		t.Fatalf("unauthorized decision passed: %+v", r)
 	}
 	p.Questions[0].AnsweringActor = "owner"
@@ -476,7 +506,7 @@ func TestGateStateLocatorIsNotSemanticSupport(t *testing.T) {
 			if len(rec.Findings) != 1 {
 				t.Fatal("finding disappeared")
 			}
-			if kind == "unsupported" && (rec.Findings[0].Accepted || rec.Status != "unverified") {
+			if kind == "unsupported" && (rec.Findings[0].Accepted || rec.State != "incomplete") {
 				t.Fatal("a valid locator accepted an unsupported interpretation")
 			}
 		})
@@ -521,15 +551,53 @@ func TestGateStateSupportingRepairCompletesTheSameClaim(t *testing.T) {
 	}
 }
 
-func TestGateStateLegacyQuoting(t *testing.T) {
-	for _, tc := range []struct{ value, want string }{
-		{"plain words", "plain words"}, {"true", "true"}, {"null", "null"}, {"", `""`},
-		{"group:api", `"group:api"`}, {" left ", `" left "`}, {"a,b", `"a,b"`},
-		{"line\nnext", `"line\nnext"`}, {`a"b\c`, `"a\"b\\c"`},
-	} {
-		if got := legacyGateValue(tc.value); got != tc.want {
-			t.Errorf("legacy quoting %q: %q != %q", tc.value, got, tc.want)
+func TestGateStateOutputQuoting(t *testing.T) {
+	values := []string{"plain words", "true", "null", "", "group:api", " left ", "a,b", "line\nnext", `a"b\c`}
+	for _, audience := range []outputAudience{outputAgent, outputHuman, outputJSON} {
+		var out strings.Builder
+		if err := writeOutput(&out, audience, gateInformation{SchemaVersion: 2, State: "incomplete", Gate: "incomplete", Notes: values}); err != nil {
+			t.Fatal(err)
 		}
+		view := decodedOutput(t, []byte(out.String()), audience).(map[string]any)
+		for i, value := range values {
+			if got := view["notes"].([]any)[i]; got != value {
+				t.Fatalf("audience %d changed string %q to %#v", audience, value, got)
+			}
+		}
+	}
+}
+
+func TestGateStateRetiresSchemaOneBeforeExecution(t *testing.T) {
+	h := setup(t)
+	h.gateRepo(1)
+	dir := h.fakePi(gatePasses(nil))
+	for _, flag := range []string{"", "--human", "--json"} {
+		args := []string{"gate", "spec.md", "--schema-version", "1"}
+		if flag != "" {
+			args = append(args, flag)
+		}
+		code, out := h.run(args...)
+		if code == 0 {
+			t.Fatalf("retired schema accepted: %s", out)
+		}
+		fields := decodedOutput(t, []byte(out), explicitAudience(args)).(map[string]any)
+		if fields["status"] != "failed" || !strings.Contains(fields["error"].(string), "--schema-version 1 is retired; use --schema-version 2") {
+			t.Fatalf("missing migration hint: %#v", fields)
+		}
+	}
+	if exists(dir + "/calls.log") {
+		t.Fatal("retired schema invoked a reviewer")
+	}
+	code, out := h.run("gate", "spec.md", "--schema-version", "3")
+	if code == 0 || !strings.Contains(out, "--schema-version is 2, not 3") {
+		t.Fatalf("unknown schema accepted: %s", out)
+	}
+	for _, args := range [][]string{{"gate", "--help"}, {"gate", "--schema-version", "2", "--help"}, {"gate", "--human", "--help"}, {"gate", "--json", "--help"}} {
+		code, help := h.run(args...)
+		if code != 0 || strings.Contains(help, "help requested") || strings.Contains(help, "status: failed") {
+			t.Fatalf("help became a failure for %v: exit %d\n%s", args, code, help)
+		}
+		wantContains(t, help, "2 (default)", "error|stale|fail|incomplete|pass", "only a current reducer pass authorizes plan")
 	}
 }
 
@@ -539,22 +607,17 @@ func TestGateStateOutputAudiencesShareV2Selection(t *testing.T) {
 			h := setup(t)
 			dir := h.gateRepo(1)
 			over := map[string]string{}
-			wantState, wantStatus, wantCode := "pass", "pass", 0
+			wantState, wantCode := "pass", 0
 			if incomplete {
 				over["adv-a"] = `{"findings":[{"severity":"blocker","where":"Design","claim":"Unsupported interpretation","evidence":"missing.py:1"}]}`
-				wantState, wantStatus, wantCode = "incomplete", "unverified", 1
+				wantState, wantCode = "incomplete", 1
 			}
 			h.fakePi(gatePasses(over))
-			legacyCode, legacyOut := h.run("gate", "spec.md")
-			if legacyCode != wantCode || !strings.HasPrefix(legacyOut, "gate: "+wantStatus+"\nspec: spec.md (version ") || strings.Contains(legacyOut, "schema_version:") {
-				t.Fatalf("default legacy gate protocol changed: %s", legacyOut)
-			}
-			wantContains(t, legacyOut, "blockers: 0 verified", "concerns: 0 verified, ")
 			var selected any
 			for _, audience := range []struct {
 				flag string
 				kind outputAudience
-			}{{"--schema-version=2", outputAgent}, {"--human", outputHuman}, {"--json", outputJSON}} {
+			}{{"", outputAgent}, {"--schema-version=2", outputAgent}, {"--human", outputHuman}, {"--json", outputJSON}} {
 				args := []string{"gate", "spec.md"}
 				if audience.flag != "" {
 					args = append(args, audience.flag)
@@ -565,8 +628,11 @@ func TestGateStateOutputAudiencesShareV2Selection(t *testing.T) {
 				}
 				decoded := decodedOutput(t, []byte(out), audience.kind)
 				view := decoded.(map[string]any)
-				if view["schema_version"] != float64(2) || view["state"] != wantState || view["status"] != wantStatus || view["gate"] != wantStatus {
+				if view["schema_version"] != float64(2) || view["state"] != wantState || view["status"] != nil || view["gate"] != wantState {
 					t.Fatalf("wrong public state: %+v", view)
+				}
+				if view["blockers"] != "0 verified" || !strings.HasPrefix(view["concerns"].(string), "0 verified, ") || !strings.HasPrefix(view["spec"].(string), "spec.md (version ") {
+					t.Fatalf("public counts/spec changed: %#v", view)
 				}
 				completion := view["completion"].(map[string]any)
 				if completion["required"].(float64) <= 0 {
@@ -681,18 +747,25 @@ func TestGateStateExecutionFailuresHaveTypedReasons(t *testing.T) {
 	}
 }
 
-func TestGateStateLegacyMapping(t *testing.T) {
+func TestGateStateSerializationHasNoLegacyStatus(t *testing.T) {
 	for _, state := range []string{"error", "stale", "fail", "incomplete", "pass", "experiment"} {
-		want := state
-		if state == "error" || state == "stale" || state == "incomplete" {
-			want = "unverified"
+		for _, value := range []any{
+			reviewResult{SchemaVersion: 2, State: state},
+			gateRecord{SchemaVersion: 2, State: state, Reduction: &reviewResult{SchemaVersion: 2, State: state}},
+			benchRun{SchemaVersion: 2, State: state},
+		} {
+			b, err := json.Marshal(value)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var fields map[string]json.RawMessage
+			if err := json.Unmarshal(b, &fields); err != nil {
+				t.Fatal(err)
+			}
+			if string(fields["state"]) != `"`+state+`"` || fields["status"] != nil || fields["historical_status"] != nil {
+				t.Fatalf("new %T retained a legacy result: %s", value, b)
+			}
 		}
-		if got := legacyReviewStatus(state, nil); got != want {
-			t.Fatalf("%s -> %s", state, got)
-		}
-	}
-	if legacyReviewStatus("incomplete", []reviewNextAction{{Reason: reviewAwaitingDecision}}) != "fail" {
-		t.Fatal("blocking question legacy mapping changed")
 	}
 }
 
@@ -711,8 +784,8 @@ func TestGateStateFindingsSurviveFinish(t *testing.T) {
 	if len(rec.Findings) != 1 || len(rec.Questions) != 1 || len(rec.Items) != 1 || len(rec.TreeChanged) == 0 {
 		t.Fatalf("finish erased records: %+v", rec)
 	}
-	if rec.Status != "" {
-		t.Fatal("finish decided status outside reducer")
+	if rec.State != "" {
+		t.Fatal("finish decided state outside reducer")
 	}
 }
 

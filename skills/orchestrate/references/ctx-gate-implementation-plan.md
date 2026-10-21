@@ -20,7 +20,17 @@ The rule in plain English: **A pass means the required review finished, its answ
 
 Example: a Python CSV exporter has three required checks. Ownership is valid. A reviewer finds an existing writer and recommends extending it. The public behavior for overwriting files is still undecided. The gate reports incomplete and names that decision and its owner. It does not discard the useful review, invent the overwrite policy, or accept a concluding “looks good.”
 
-### Overall status and detail
+### Overall state and detail
+
+The public v2 `state` is the sole result model for new gate and bench records.
+The old `status` derivation and v1 prose writer are retired. Default gate stdout
+is v2 TOON; `--human` and `--json` select readable and machine JSON of the same
+facts. Gate `--schema-version 1` is rejected with a migration hint. The ctx
+schema-version and legacy JSON contracts do not change.
+Historical `status` labels are decoded
+only by `tool/gate_legacy_read.go` and retained as `historical_status`, not
+inferred v2 states. In particular, old `unverified` cannot identify whether a
+run was error, stale or incomplete. Old labels cannot authorize planning.
 
 Evaluate these rules in order. Keep findings, completion counts, failures and next actions in the report even when one status takes precedence.
 
@@ -309,7 +319,7 @@ Files: tool/gate.go, tool/gate_reply.go, tool/gate_items.go, tool/gate_verdicts.
 - Invalid candidate references leave the item unsupported and eligible for repair. Retry exhaustion or missing required answers prevents pass.
 - Use the current bounded retry infrastructure with one explicit schema repair attempt as the initial proposed limit. Keep a total review budget; repair is not an unbounded new conversation.
 - Verify future-file ownership conflicts against the spec graph rather than requiring the file to exist.
-- Until the new status schema lands, use the existing unverified status plus precise reasons for incomplete work.
+- Use v2 state `incomplete` plus precise reasons for incomplete required work; reserve `error` for invalid system state.
 
 Acceptance: fake package-ID-only and {} adversary replies cannot pass; explicit complete empty findings can pass a genuinely clean fixture; invalid candidates are not covered; duplicate/unknown IDs fail validation; a future file in another package's owns blocks appropriately; downstream-owner wiring retains its documented treatment.
 
@@ -522,7 +532,7 @@ Recommended first implementation slice: A1 with the reproduced empty-response, u
 
 ## Deferred decisions and ideas
 
-Recommended defaults remain proposals until accepted: the precise five-state public schema, the optional Builds id: syntax, and eventual decider promotion from shadow to targeted adjudication. The trust fixes do not require automatic decider promotion or XML.
+The five-state public schema is accepted, with `experiment` as a non-approval mode. Remaining proposals include the optional Builds id: syntax and eventual decider promotion from shadow to targeted adjudication. The trust fixes do not require automatic decider promotion or XML.
 
 Defer selective evidence-cache invalidation until conservative subject binding works; defer graph-ranking changes until retrieval coverage is measured correctly; defer TOON model replies until output validation is reliable; defer XML wrappers until a format-boundary experiment shows a benefit; defer OPA or a plugin framework unless actual policy/configuration requirements exceed small Go types and functions.
 

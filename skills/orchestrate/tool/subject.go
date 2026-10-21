@@ -384,7 +384,7 @@ func gateApproval(root, code string, src []byte) (bool, string) {
 	if !r.Subject.valid() || r.ReviewPolicy == nil || r.ReviewPolicy.Version != gateReviewPolicyVersion {
 		return false, "unbound or legacy approval; a fresh review is required"
 	}
-	if r.SchemaVersion != gateStatusSchemaVersion || r.State != gateStatePass || r.Status != gateStatePass || r.Review == nil {
+	if r.SchemaVersion != gateStatusSchemaVersion || r.State != gateStatePass || r.Review == nil {
 		return false, "recorded gate is not an accepted reducer pass; a fresh review is required"
 	}
 	now, err := captureGateSubject(code, src)

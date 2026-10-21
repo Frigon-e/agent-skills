@@ -154,9 +154,14 @@ Flash through pi): one per package for scope and open questions, and two
 adversaries. A model
 claim counts only when its evidence line exists in the repo, and only a
 question whose answer changes visible behaviour blocks. The verdict is
-`pass`, `fail` or `unverified` (a pass could not run, or pi is marked
-limited); only `pass` unlocks `orch plan`. The report, findings and
-question cards are in `<run root>/gate/<hash>/`.
+the `state` field: `error`, `stale`, `fail`, `incomplete`, or `pass`, in that
+precedence order. Experiments use `experiment` and never authorize planning.
+Unavailable reviewers leave required checks `incomplete`; invalid system
+records cause `error`. Only a subject-bound `pass` with a successful current
+reducer replay unlocks `orch plan`. The report, findings and
+question cards are in `<run root>/gate/<hash>/`. Default stdout is the v2 TOON
+selection; `--human` and `--json` serialize the same facts as readable and
+machine JSON. Gate schema 1 is retired; use `--schema-version 2` or omit it.
 
 ## Requirement splits, merges and migration
 

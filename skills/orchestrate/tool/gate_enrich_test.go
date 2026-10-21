@@ -532,8 +532,10 @@ func TestGateEnrichesItsCardsAndAskStillParsesThem(t *testing.T) {
 	if code != 1 {
 		t.Fatalf("exit %d: %s", code, out)
 	}
-	wantContains(t, out, "questions: 1 need a decision")
-	wantContains(t, out, "question cards: 1 -> 1 after merging; owner 1, lead-may-decide 0, unclear 0; spec hints 0; code hits 1; symbol facts 0")
+	view := wantGateState(t, out, "incomplete")
+	if view.Questions != "1 need a decision" || view.QuestionCards != "1 -> 1 after merging; owner 1, lead-may-decide 0, unclear 0; spec hints 0; code hits 1; symbol facts 0" {
+		t.Fatalf("question-card accounting changed: %+v", view)
+	}
 	gdir := filepath.Join(runRoot(h.repo), "gate", specHash(mustRead(t, filepath.Join(h.repo, "spec.md"))))
 	wantContains(t, string(mustRead(t, filepath.Join(gdir, "questions", "q1-api.md"))), "## Tag\nowner (mentions refund)")
 	ask := h.must("ask", "--cards", filepath.Join(gdir, "questions"))

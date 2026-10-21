@@ -96,7 +96,7 @@ the spec is risky, and show the user only what survives. Decisive open
 questions arrive as cards: `orch ask --cards <gate dir>/questions`. A model
 verdict is input, not truth: Flash can miss a flaw and the gate can fail a
 fine spec, so the call is yours and the user's. Inside herdr the model passes always run in the panes of a
-`gate-<hash>` tab (at most six, closed when the gate ends; if it cannot be opened no pass runs, the report says so and the verdict is `unverified`; headless passes are only for runs outside herdr, `--headless` or `ORCH_HEADLESS=1`); each pass is a
+`gate-<hash>` tab (at most six, closed when the gate ends; if it cannot be opened no pass runs, the report says so and the state is `incomplete`; headless passes are only for runs outside herdr, `--headless` or `ORCH_HEADLESS=1`); each pass is a
 real pi or Claude agent in a pane named after it, which you can watch and attach to; a pass that
 failed keeps its session and output under `gate/<hash>/` for 7 days and
 for the newest 5 gate runs. After a run, with no model call, `orch gate`
@@ -115,6 +115,20 @@ cards to the lead before preparing user decisions. The tag and hints are advice;
 `orch ask --cards` still asks every root card and does not filter by route. `orch plan` then makes the
 tasks and prints the waves: check and spawn the first wave, then each later
 wave when its dependencies are done.
+
+Gate records and v2 output use only `state`: `error`, `stale`, `fail`,
+`incomplete`, `pass`, plus the non-approval `experiment` mode. Precedence is
+error > stale > fail > incomplete > pass. Completion, reasons, responsible
+actors and next actions remain visible even when a higher-priority state wins.
+Only a current, subject-bound `pass` whose recorded inputs still reduce to
+pass can authorize `orch plan`. New gate and bench records do not write the
+old `status` field. A read-only shim preserves old gate/bench labels as
+`historical_status`, never as inferred v2 states or new approvals.
+Default `orch gate` stdout is the v2 TOON selection. `--human` selects readable
+JSON and `--json` selects machine JSON of the same facts, without legacy
+`status`. `--schema-version 2` is explicit but optional; gate schema 1 is
+retired and rejected with a migration hint. This does not change `orch ctx`
+output or its legacy JSON contract.
 
 Model roles live in the user config next to dispatch rules: `[roles.gate]`,
 `[roles.spec_queries]`, `[roles.shadow_flash]`, `[roles.decider]`. Each role has
@@ -138,7 +152,7 @@ Provider-down errors skip that connector lane for the run and retry the pass onc
 the next choice, without writing health; the report prints the exact manual
 `orch health set <lane> limited --for 3h` hint. Stalls keep their existing retry
 rules. With no usable runner, deterministic checks and dossiers are still
-written and the gate is unverified. `gate.json` `pass_runners`, the report and
+written and the gate state is `incomplete` when its subject and system records are valid. `gate.json` `pass_runners`, the report and
 compare output identify each pass's runner.
 If triage is off, `orch spawn <id> --auto` gives one short message, invents no
 tier, and starts no lead. `--auto --tier settled|standard|planning` skips the
@@ -163,7 +177,7 @@ Both settings are in gate/experiment records, reports, and compare output.
 Every runner, including ctx-off runs, gets a post-pass unchanged-checkout
 check against the pre-pass baseline: Git status, diff and untracked-file
 content hashes. A change discards model results, cancels pending/in-flight
-passes, forces unverified, and puts a loud warning first in stdout/report.
+passes, sets state to `stale` (or `error` if the subject cannot be checked), and puts a loud warning in stdout/report.
 The record names changed files and passes in flight, not a proven culprit.
 Files are never reverted. Ignored files and writes outside the checkout are
 not covered; edits restored before the check can also escape detection.

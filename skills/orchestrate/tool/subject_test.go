@@ -16,7 +16,7 @@ func saveSubjectApproval(t *testing.T, h *harness, code string) (*gateRecord, []
 	if err != nil {
 		t.Fatal(err)
 	}
-	rec := &gateRecord{Spec: "spec.md", Hash: specHash(src), Status: gateStatePass, Subject: subject,
+	rec := &gateRecord{Spec: "spec.md", Hash: specHash(src), Subject: subject,
 		ReviewPolicy: &gateReviewPolicy{Version: gateReviewPolicyVersion, CtxTool: "on", ContextFiles: "off", CtxShell: "open", Dossier: "code"}}
 	initGateReview(rec, &spec{}, string(src), nil)
 	reduceGateRecord(rec)
@@ -32,10 +32,11 @@ func TestPlanSubjectApprovalLegacyRefused(t *testing.T) {
 	h.commitSpec(planHeader + planPkg("alpha", "kind: ship\nowns: app.py", "") + planTail)
 	src := mustRead(t, filepath.Join(h.repo, "spec.md"))
 	dir := gateDir(h.a.siteRoot(t), specHash(src))
-	rec := &gateRecord{Status: gateStatePass, Hash: specHash(src), Spec: "spec.md"}
-	if err := writeGate(dir, rec); err != nil {
+	// Historical bytes, not a legacy writer for new records.
+	if err := os.MkdirAll(dir, 0755); err != nil {
 		t.Fatal(err)
 	}
+	writeFiles(t, dir, map[string]string{"gate.json": `{"status":"pass","spec":"spec.md","hash":"` + specHash(src) + `"}`})
 	var legacy gateRecord
 	if err := json.Unmarshal(mustRead(t, filepath.Join(dir, "gate.json")), &legacy); err != nil {
 		t.Fatal(err)
@@ -43,7 +44,7 @@ func TestPlanSubjectApprovalLegacyRefused(t *testing.T) {
 	if err := writeGate(dir, &legacy); err != nil {
 		t.Fatal(err)
 	}
-	wantContains(t, string(mustRead(t, filepath.Join(dir, "report.md"))), "Status: **pass**", "off (legacy)")
+	wantContains(t, string(mustRead(t, filepath.Join(dir, "report.md"))), "Historical result: **pass** (legacy record, not a v2 state)", "off (legacy)")
 	code, out := h.run("plan", "spec.md", "--dry-run", "--no-ctx")
 	if code != 1 {
 		t.Fatalf("legacy approval authorized planning: exit %d\n%s", code, out)
@@ -51,6 +52,34 @@ func TestPlanSubjectApprovalLegacyRefused(t *testing.T) {
 	wantContains(t, out, "unbound or legacy approval", "fresh review", "nothing was created")
 	if gatePassed(h.a.siteRoot(t), h.repo, src) {
 		t.Fatal("legacy gatePassed")
+	}
+}
+
+func TestPlanGateStateOnlyApproval(t *testing.T) {
+	h := setup(t)
+	h.commitSpec(planHeader + planPkg("alpha", "kind: ship\nowns: app.py", "") + planTail)
+	_, src, dir := saveSubjectApproval(t, h, h.repo)
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(mustRead(t, filepath.Join(dir, "gate.json")), &fields); err != nil {
+		t.Fatal(err)
+	}
+	for _, state := range []string{"pass", "fail", "incomplete", "stale", "error", "experiment", ""} {
+		t.Run(orDefault(state, "missing"), func(t *testing.T) {
+			delete(fields, "status")
+			fields["state"], _ = json.Marshal(state)
+			if state != "pass" {
+				// An obsolete pass cannot override the current state or supply it.
+				fields["status"] = json.RawMessage(`"pass"`)
+			}
+			b, err := json.Marshal(fields)
+			if err != nil {
+				t.Fatal(err)
+			}
+			writeFiles(t, dir, map[string]string{"gate.json": string(b)})
+			if got := gatePassed(h.a.siteRoot(t), h.repo, src); got != (state == "pass") {
+				t.Fatalf("state %q approval = %v", state, got)
+			}
+		})
 	}
 }
 
@@ -247,7 +276,7 @@ func TestGateSubjectRecordsReviewAndReusesApproval(t *testing.T) {
 		t.Fatalf("unreadable checkout passed gate: %d %s", code, out)
 	}
 	failed := readRecord(t, dir)
-	if failed.Status != "unverified" || failed.TreeCheckError == "" || len(failed.Reasons) == 0 {
+	if failed.State != "error" || failed.TreeCheckError == "" || len(failed.Reasons) == 0 {
 		t.Fatalf("unreadable gate: %+v", failed)
 	}
 }
@@ -340,9 +369,9 @@ func TestCheckoutCompletionRechecks(t *testing.T) {
 	}
 	defer guard.cancel()
 	writeFiles(t, h.repo, map[string]string{"after-final-pass.py": "changed"})
-	rec := &gateRecord{Status: gateStatePass, PassErrors: map[string]string{}}
+	rec := &gateRecord{State: gateStatePass, PassErrors: map[string]string{}}
 	guard.finish(rec)
-	if rec.Status != gateStatePass || len(rec.TreeChanged) != 1 || rec.PassErrors["all"] == "" {
-		t.Fatalf("completion did not record the change without deciding status: %+v", rec)
+	if rec.State != gateStatePass || len(rec.TreeChanged) != 1 || rec.PassErrors["all"] == "" {
+		t.Fatalf("completion did not record the change without deciding state: %+v", rec)
 	}
 }

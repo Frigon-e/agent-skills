@@ -111,9 +111,13 @@ must be named by its 16-hex spec ID:
 orch bench import /gate/0123456789abcdef --suite history --label old --kind report-only
 ```
 
-Report-only runs preserve `report.md` and its status line, but have null findings.
-Their `created_at` is the import date, not an invented execution date. No counts
-are extracted from prose.
+New gate captures record the v2 `state`, not the old `status` derivation.
+Report-only runs preserve `report.md`, but have null findings. A v2 review-state
+line supplies `state`; an old Status line supplies only `historical_status`.
+The read-only shim in `tool/gate_legacy_read.go` also retains old gate.json and
+bench archive labels. Historical labels never imply a v2 state or plan approval.
+Original records remain unchanged. Their `created_at` is the import date, not
+an invented execution date. No counts are extracted from prose.
 
 Historical commits and dirty state are never taken from the checkout today or
 inferred from dates. To assert a historical commit:

@@ -66,7 +66,6 @@ type reviewAction struct {
 type reviewResult struct {
 	SchemaVersion  int                `json:"schema_version"`
 	State          string             `json:"state"`
-	Status         string             `json:"status"`
 	Completion     reviewCompletion   `json:"completion"`
 	Reasons        []reviewNextAction `json:"reasons"`
 	NextActors     []string           `json:"next_actors"`
@@ -89,20 +88,6 @@ type reviewPolicy struct {
 	SystemFailures []string           `json:"system_failures,omitempty"`
 	Stale          bool               `json:"stale,omitempty"`
 	Experiment     bool               `json:"experiment,omitempty"`
-}
-
-func legacyReviewStatus(state string, reasons []reviewNextAction) string {
-	switch state {
-	case "pass", "fail", "experiment":
-		return state
-	case "incomplete":
-		for _, r := range reasons {
-			if r.Reason == reviewAwaitingDecision {
-				return "fail"
-			}
-		}
-	}
-	return "unverified"
 }
 
 // ReduceReview performs no I/O, model calls or clock reads. Invalid system
@@ -392,7 +377,6 @@ func ReduceReview(subject *gateSubject, requiredChecks []reviewCheck, answers []
 	r.Failures = slices.Compact(r.Failures)
 	sort.Strings(r.ActiveBlockers)
 	sort.Slice(r.Findings, func(i, j int) bool { return r.Findings[i].ID < r.Findings[j].ID })
-	r.Status = legacyReviewStatus(r.State, r.Reasons)
 	return r
 }
 func authorizedReviewDecision(q reviewQuestion, c reviewCheck) bool {
@@ -710,7 +694,6 @@ func reduceGateRecord(rec *gateRecord) {
 	result := ReduceReview(rec.Subject, g.Checks, g.Answers, g.Findings, g.Policy)
 	rec.SchemaVersion = gateStatusSchemaVersion
 	rec.State = result.State
-	rec.Status = result.Status
 	rec.Completion = result.Completion
 	rec.NextActors = result.NextActors
 	rec.NextActions = result.NextActions

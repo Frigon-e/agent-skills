@@ -556,12 +556,7 @@ func benchRecordReportOnly(a *app, dir, suite, label, arm string, opts benchReco
 		if v, e := benchSpecLoad(hash); e == nil {
 			rec.Spec, rec.SpecRel = v.Path, v.Path
 		}
-		for _, line := range strings.Split(string(b), "\n") {
-			if strings.HasPrefix(line, "Status:") {
-				r.Status = strings.TrimSpace(strings.TrimPrefix(line, "Status:"))
-				break
-			}
-		}
+		r.State, r.historicalGateResult = readStoredGateReport(string(b))
 		snap := filepath.Join(tmp, "snapshot")
 		if e := benchWrite(filepath.Join(snap, "report.md"), b); e != nil {
 			return e

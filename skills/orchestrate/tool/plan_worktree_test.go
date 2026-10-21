@@ -106,7 +106,7 @@ func TestGateChecksTheCheckoutHoldingTheSpec(t *testing.T) {
 	}
 	h.fakePi(gatePasses(nil))
 	out := h.must("gate", filepath.Join(wt, "spec.md"))
-	wantContains(t, out, "gate: pass")
+	wantGateState(t, out, "pass")
 	hash := specHash(mustRead(t, filepath.Join(wt, "spec.md")))
 	report := string(mustRead(t, filepath.Join(runRoot(h.repo), "gate", hash, "report.md")))
 	if strings.Contains(report, "does not resolve") {
@@ -143,7 +143,7 @@ func TestGateRunsOneGroupPassForRelatedPackages(t *testing.T) {
 	wantContains(t, string(mustRead(t, filepath.Join(runRoot(h.repo), "gate", hash, "report.md"))), "group:store+2: store, api, docs")
 }
 
-func TestGateGroupWithoutAnEntryForAPackageIsUnverified(t *testing.T) {
+func TestGateGroupWithoutAnEntryForAPackageIsIncomplete(t *testing.T) {
 	h := setup(t)
 	h.commitSpec(threePkgSpec())
 	h.fakePi(gatePasses(map[string]string{"group": `{"packages":[{"id":"store","will_change":[],"claims":[],"questions":[],"reuse":[]},{"id":"api","will_change":[],"claims":[],"questions":[],"reuse":[]}]}`}))
@@ -151,7 +151,8 @@ func TestGateGroupWithoutAnEntryForAPackageIsUnverified(t *testing.T) {
 	if code != 1 {
 		t.Fatalf("a group that skipped a package passed: %d %s", code, out)
 	}
-	wantContains(t, out, "gate: unverified", "pass_failed: group:store+2 -", "no entry for docs")
+	view := wantGateState(t, out, "incomplete")
+	wantContains(t, view.PassErrors["group:store+2"], "no entry for docs")
 }
 
 func TestGateRecordsAndPrintsPassTokens(t *testing.T) {
@@ -165,10 +166,14 @@ func TestGateRecordsAndPrintsPassTokens(t *testing.T) {
 			}
 			out := h.must("gate", "spec.md")
 			// 3 passes of 100 input, 300 cache read, 5 cache write, 10 output each.
-			wantContains(t, out, "tokens: input 300, cache read 900 (75% of input), cache write 15, output 30 over 3 pass(es), 3 requests, max context 400 in adversary-a")
+			view := wantGateState(t, out, "pass")
+			wantContains(t, view.Tokens, "input 300, cache read 900 (75% of input), cache write 15, output 30 over 3 pass(es), 3 requests, max context 400 in adversary-a")
 			var rec gateRecord
 			if err := json.Unmarshal(mustRead(t, filepath.Join(gdir, "gate.json")), &rec); err != nil {
 				t.Fatal(err)
+			}
+			if view.Tokens != rec.tokenSummary() {
+				t.Fatalf("public tokens differ from recorded summary: %q != %q", view.Tokens, rec.tokenSummary())
 			}
 			want := passTokens{Input: 100, Output: 10, CacheRead: 300, CacheWrite: 5, MaxContext: 400, Requests: 1, NoCost: 1}
 			if mode == "pane" {

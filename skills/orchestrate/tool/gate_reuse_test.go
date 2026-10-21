@@ -357,7 +357,9 @@ func TestGroupVerdictsAreOffByDefaultAndTheRetryAsksOnlyForMissingItems(t *testi
 	if code != 1 {
 		t.Fatalf("missing verdict passed: %d %s", code, out)
 	}
-	wantContains(t, out, "gate: unverified", "no verdict 1", "1 items had no verdict", "api#2")
+	view := wantGateState(t, out, "incomplete")
+	wantContains(t, view.Coverage, "no verdict 1")
+	wantContains(t, strings.Join(view.Notes, "\n"), "1 items had no verdict", "api#2")
 	if rec := readRecord(t, gdir); len(rec.Reasons) == 0 {
 		t.Fatal("missing verdict has no reason")
 	}
@@ -599,7 +601,7 @@ func TestGateCompareCommandReadsItemsShadowRowsAndReference(t *testing.T) {
 	for i, name := range []string{"e1", "e2"} {
 		dir := filepath.Join(gdir, "experiments", name)
 		os.MkdirAll(dir, 0o755)
-		rec := gateRecord{Spec: "spec.md", Experiment: name, Status: "experiment", PassSeconds: map[string]int{}, PassTokens: map[string]passTokens{}}
+		rec := gateRecord{Spec: "spec.md", Experiment: name, State: "experiment", PassSeconds: map[string]int{}, PassTokens: map[string]passTokens{}}
 		if i == 0 {
 			rec.Items = []gateItemResult{{ID: "api#1", Package: "api", Text: "Build api.", Verdict: "reuse", Candidate: "internal/store.go:3", Verified: true}, {ID: "api#2", Package: "api", Text: items[1].Text, Verdict: "extend", Candidate: "internal/store.go:3", Verified: true}}
 		}

@@ -30,7 +30,7 @@ func TestGateDossierCodeGoesAfterThePackageBlocksAndOffIsToday(t *testing.T) {
 	h.sessionPi(gatePasses(nil))
 	t.Setenv("HERDR_ENV", "")
 	out := h.must("gate", "spec.md")
-	wantContains(t, out, "dossier: code, 2 package(s),", "chars (~")
+	wantContains(t, wantGateState(t, out, "pass").Dossier, "code, 2 package(s),", "chars (~")
 	calls := piCalls(t, h)
 	var group string
 	for _, l := range strings.Split(calls, "\n") {
@@ -58,7 +58,7 @@ func TestGateDossierCodeGoesAfterThePackageBlocksAndOffIsToday(t *testing.T) {
 	h.sessionPi(gatePasses(nil))
 	out = h.must("gate", "spec.md", "--dossier", "off")
 	calls = piCalls(t, h)
-	if strings.Contains(calls, dossierTitle) || strings.Contains(calls, "Use the evidence dossier") || strings.Contains(out, "dossier:") || exists(filepath.Join(gdir, "dossier")) {
+	if strings.Contains(calls, dossierTitle) || strings.Contains(calls, "Use the evidence dossier") || gateView(t, out).Dossier != "" || exists(filepath.Join(gdir, "dossier")) {
 		t.Errorf("--dossier off still produced a dossier:\n%s\n%s", out, calls)
 	}
 	if code, _ := h.run("gate", "spec.md", "--dossier", "maybe"); code == 0 {
@@ -134,10 +134,10 @@ func TestGatePlanArmRunsAToolLessPlannerThenTheLookups(t *testing.T) {
 			if rec.PassTokens["plan:group:api+1"].Input == 0 {
 				t.Errorf("no planner tokens: %v", rec.PassTokens)
 			}
-			if rec.Status != "pass" {
-				t.Errorf("status %s: %v", rec.Status, rec.PassErrors)
+			if rec.State != "pass" {
+				t.Errorf("state %s: %v", rec.State, rec.PassErrors)
 			}
-			wantContains(t, out, "dossier: plan,")
+			wantContains(t, gateView(t, out).Dossier, "plan,")
 			if b := mustRead(t, filepath.Join(gdir, "dossier", "p1.md")); !strings.Contains(string(b), "### 5.") {
 				t.Errorf("dossier file lacks section 5:\n%s", b)
 			}
@@ -151,8 +151,14 @@ func TestGatePlanArmFallsBackToTheCodeDossier(t *testing.T) {
 	h.sessionPi(gatePasses(map[string]string{"plan": "I cannot decide"}))
 	t.Setenv("HERDR_ENV", "")
 	out := h.must("gate", "spec.md", "--dossier", "plan")
-	wantContains(t, out, "gate: pass", "plan:group:api: the reply held no lookups; the pass used the code dossier only")
-	wantContains(t, out, `note: "plan:group:api: the reply held no lookups; the pass used the code dossier only"`)
+	view := wantGateState(t, out, "pass")
+	found := false
+	for _, note := range view.Notes {
+		found = found || note == "plan:group:api: the reply held no lookups; the pass used the code dossier only"
+	}
+	if !found {
+		t.Fatalf("missing exact planner fallback note: %+v", view.Notes)
+	}
 	if strings.Contains(piCalls(t, h), "### 5.") {
 		t.Error("section 5 appeared without lookups")
 	}
@@ -176,7 +182,11 @@ func TestGateExperimentIsolatedAndCompared(t *testing.T) {
 	t.Setenv("HERDR_ENV", "")
 
 	out := h.must("gate", "spec.md", "--only", "api+2", "--dossier", "code", "--experiment", "e1")
-	wantContains(t, out, "experiment: e1 (dossier code, cache short, groups group:api+2)", "dossier: code, 3 package(s)", "tokens: ")
+	view := wantGateState(t, out, "experiment")
+	if view.Experiment != "e1 (dossier code, cache short, groups group:api+2)" || view.Tokens == "" {
+		t.Fatalf("experiment metadata/tokens missing: %+v", view)
+	}
+	wantContains(t, view.Dossier, "code, 3 package(s)")
 	if strings.Contains(piCalls(t, h), "GATE-ADVERSARY") {
 		t.Error("an experiment ran an adversary")
 	}
@@ -190,7 +200,7 @@ func TestGateExperimentIsolatedAndCompared(t *testing.T) {
 	}
 	exp := filepath.Join(gdir, "experiments", "e1")
 	rec := readRecord(t, exp)
-	if rec.Experiment != "e1" || rec.Status != "experiment" || len(rec.Only) != 1 || len(rec.Questions) != 1 || len(rec.Findings) != 1 || rec.Findings[0].Source != "reuse" {
+	if rec.Experiment != "e1" || rec.State != "experiment" || len(rec.Only) != 1 || len(rec.Questions) != 1 || len(rec.Findings) != 1 || rec.Findings[0].Source != "reuse" {
 		t.Errorf("experiment record: %+v", rec)
 	}
 	for _, p := range []string{"report.md", "dossier/api.md", "sessions/group-api+2"} {
@@ -305,7 +315,7 @@ func TestGateTurnBudgetPromptsOnceAndInterruptsAtTheHardLimit(t *testing.T) {
 		h.sessionPi(gatePasses(nil))
 		os.WriteFile(h.fake+".budget", []byte("soft:4"), 0o644)
 		out := h.must("gate", "spec.md")
-		wantContains(t, out, "gate: pass", "budget hits: soft 1, hard 0")
+		wantContains(t, wantGateState(t, out, "pass").Tokens, "budget hits: soft 1, hard 0")
 		var prompts []string
 		for _, c := range h.gateCalls("agent", "prompt") {
 			prompts = append(prompts, fmt.Sprint(c.Extra["text"]))
@@ -331,7 +341,7 @@ func TestGateTurnBudgetPromptsOnceAndInterruptsAtTheHardLimit(t *testing.T) {
 		h.sessionPi(gatePasses(nil))
 		os.WriteFile(h.fake+".budget", []byte("hard:6"), 0o644)
 		out := h.must("gate", "spec.md")
-		wantContains(t, out, "gate: pass", "budget hits: soft 0, hard 1")
+		wantContains(t, wantGateState(t, out, "pass").Tokens, "budget hits: soft 0, hard 1")
 		var keys []string
 		for _, c := range h.gateCalls("agent", "send-keys") {
 			keys = append(keys, c.Args[3])
@@ -417,12 +427,12 @@ func TestGateInsideHerdrNeedsItsTabAndHeadlessIsExplicit(t *testing.T) {
 	if code != 1 {
 		t.Fatalf("exit %d: %s", code, out)
 	}
-	wantContains(t, out, "gate: unverified", `pass_failed: all - "the gate tab could not be opened in herdr, so no pass ran`)
+	wantContains(t, wantGateState(t, out, "incomplete").PassErrors["all"], "the gate tab could not be opened in herdr, so no pass ran")
 	if exists(filepath.Join(h.tmp, "fakepi", "calls.log")) {
 		t.Error("a pass ran headless after the tab failed")
 	}
-	if rec := readRecord(t, gdir); rec.Status != "unverified" {
-		t.Errorf("status %s", rec.Status)
+	if rec := readRecord(t, gdir); rec.State != "incomplete" {
+		t.Errorf("state %s", rec.State)
 	}
 	// An explicit choice runs headless, inside herdr as well.
 	for _, via := range []string{"flag", "env"} {
@@ -435,7 +445,7 @@ func TestGateInsideHerdrNeedsItsTabAndHeadlessIsExplicit(t *testing.T) {
 		} else {
 			t.Setenv("ORCH_HEADLESS", "1")
 		}
-		wantContains(t, h.must(args...), "gate: pass")
+		wantGateState(t, h.must(args...), "pass")
 		if exists(h.fake+".gate.log") || len(callsOf(h.fakeState(), "tab", "create")) != tabs {
 			t.Errorf("%s: herdr was used", via)
 		}

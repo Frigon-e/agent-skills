@@ -127,7 +127,7 @@ func TestGateCheckoutMutationDiscardsAndStops(t *testing.T) {
 					if kind == "untracked" {
 						want = "new.txt"
 					}
-					if len(rec.TreeChanged) != 1 || rec.TreeChanged[0] != want || len(rec.TreeChangedPasses) == 0 || len(rec.Findings) != 0 || rec.Status != "" || rec.PassErrors["all"] == "" {
+					if len(rec.TreeChanged) != 1 || rec.TreeChanged[0] != want || len(rec.TreeChangedPasses) == 0 || len(rec.Findings) != 0 || rec.State != "" || rec.PassErrors["all"] == "" {
 						t.Fatalf("mutation not rejected: %+v", rec)
 					}
 					if len(rec.PassSeconds) >= 12 {
@@ -170,11 +170,15 @@ func TestGatePaneCheckoutMutation(t *testing.T) {
 						t.Fatal(err)
 					}
 					code, out := h.run("gate", "spec.md", "--runner", harness+":test", "--ctx-tool", onOff(ctxOn))
-					if code != 1 || !strings.HasPrefix(out, "UNVERIFIED: checkout changed:") {
+					if code != 1 {
 						t.Fatalf("%d %s", code, out)
 					}
+					view := wantGateState(t, out, "stale")
 					rec := readRecord(t, gdir)
-					if rec.Status != "unverified" || len(rec.TreeChanged) != 1 || len(rec.Findings) > 0 || len(rec.TreeChangedPasses) == 0 {
+					if view.Warning != treeWarning(&rec) || !strings.HasPrefix(view.Warning, "UNVERIFIED: checkout changed:") {
+						t.Fatalf("checkout warning missing or differs from recorded facts: %+v", view)
+					}
+					if rec.State != "stale" || len(rec.TreeChanged) != 1 || len(rec.Findings) > 0 || len(rec.TreeChangedPasses) == 0 {
 						t.Fatalf("%+v", rec)
 					}
 					if len(h.gateCalls("agent", "start")) >= 3 {
@@ -222,18 +226,22 @@ func TestCheckoutConcurrentPassesCancel(t *testing.T) {
 	}
 }
 
-func TestGateCheckoutWarningIsFirstAndRecorded(t *testing.T) {
+func TestGateCheckoutWarningInV2AndFirstInReport(t *testing.T) {
 	h := setup(t)
 	gdir := h.gateRepo(1)
 	t.Setenv("HERDR_ENV", "")
 	t.Setenv("ORCH_PI", fakeRunner(t, "pi", `printf changed > agent.txt
 printf '{}'`))
 	code, out := h.run("gate", "spec.md", "--runner", "pi:test", "--ctx-tool", "off", "--context-files", "on")
-	if code != 1 || !strings.HasPrefix(out, "UNVERIFIED: checkout changed:") {
+	if code != 1 {
 		t.Fatalf("%d %s", code, out)
 	}
+	view := wantGateState(t, out, "stale")
 	rec := readRecord(t, gdir)
-	if rec.Status != "unverified" || rec.CtxTool != "off" || rec.ContextFiles != "on" || len(rec.Findings) != 0 {
+	if view.Warning != treeWarning(&rec) || !strings.HasPrefix(view.Warning, "UNVERIFIED: checkout changed:") {
+		t.Fatalf("checkout warning missing or differs from recorded facts: %+v", view)
+	}
+	if rec.State != "stale" || rec.CtxTool != "off" || rec.ContextFiles != "on" || len(rec.Findings) != 0 {
 		t.Fatalf("%+v", rec)
 	}
 	report := string(mustRead(t, filepath.Join(gdir, "report.md")))
