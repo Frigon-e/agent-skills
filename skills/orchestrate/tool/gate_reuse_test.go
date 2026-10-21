@@ -2,12 +2,14 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -71,7 +73,7 @@ func TestBuildsParserHandlesEmptyLongAndNumberedBullets(t *testing.T) {
 	}
 }
 
-func TestShipPackageNeedsBuildsAndTooManyIsAWarning(t *testing.T) {
+func TestBuildsWarningsAndReusePointers(t *testing.T) {
 	mk := func(builds string) string {
 		return planHeader + "### api: Queue API\nkind: ship\nowns: internal/queue\n\nBody.\n\n" + builds + "#### Acceptance\nTests pass.\n\n### look: Look around\nkind: scout\n\nBody.\n\n#### Acceptance\nA note.\n" + planTail
 	}
@@ -85,17 +87,12 @@ func TestShipPackageNeedsBuildsAndTooManyIsAWarning(t *testing.T) {
 	if len(sp.problems) != 0 {
 		t.Errorf("empty Builds must not block: %v", sp.problems)
 	}
-	// the deterministic check names it too
-	det := gateDeterministic(t.TempDir(), config{}, sp, mk(""))
-	found := false
-	for _, d := range det {
-		found = found || strings.Contains(d, "note: package api has no Builds bullets; reuse checklist is skipped")
-	}
-	if !found {
-		t.Errorf("deterministic: %v", det)
-	}
 	var chk config
 	chk.Check = "x"
+	det := gateDeterministic(t.TempDir(), chk, sp, "")
+	if len(det) != 1 || hasError(det) || !strings.Contains(det[0], "note: package api has no Builds bullets; reuse checklist is skipped for this package") {
+		t.Errorf("missing Builds must warn for api only, not the scout: %v", det)
+	}
 	var many strings.Builder
 	many.WriteString("#### Builds\n")
 	for i := 0; i < 9; i++ {
@@ -277,7 +274,7 @@ func TestVerdictsAreParsedNormalisedAndSalvaged(t *testing.T) {
 		t.Fatalf("salvage failed")
 	}
 	_ = es
-	if strings.Count(rec.coverageLine(), "extend 1") != 1 {
+	if rec.coverageLine() != "items: 4, with a verdict 3 (reuse 1, extend 1, new 1, unclear 0), no verdict 1" {
 		t.Errorf("coverage line %q", rec.coverageLine())
 	}
 }
@@ -410,12 +407,12 @@ func TestShadowModeFlagOverridesConfig(t *testing.T) {
 
 func shadowFixture(t *testing.T) (*dossierSet, *spec) {
 	t.Helper()
-	code := reuseRepo(t)
-	src := planHeader + "### p: Sender\nkind: ship\nowns: mine/\n\nBuild a sender with `Alpha` and `Delta`.\n\n#### Builds\n- Sends a transfer.\n  search: Code that sends a transfer using `Alpha` and `Delta`.\n\n#### Acceptance\nTests pass.\n" + planTail
-	sp := parseSpec(src)
-	sp.validate()
-	ds := newDossierSet(newCtxEnv(code, ctxOpts{}), sp, packageBlocks(sp, src))
-	ds.build([]string{"p"})
+	sp := &spec{packages: []*specPackage{{id: "p", title: "Sender", body: "Sends a transfer."}}}
+	ic := itemCands{Item: gateItem{ID: "p#1", Package: "p", Text: "Sends a transfer."}, Cands: []reuseCand{
+		{Path: "sender.go", Start: 3, End: 3, Sig: "func Send()", Lines: []string{"func Send() {}"}, Total: 1},
+		{Path: "retry.go", Start: 4, End: 4, Sig: "func Retry()", Lines: []string{"func Retry() {}"}, Total: 1},
+	}}
+	ds := &dossierSet{cands: map[string][]itemCands{"p": {ic}}}
 	return ds, sp
 }
 
@@ -450,8 +447,16 @@ func TestShadowJudgesRecordAndNeverDecide(t *testing.T) {
 			}}
 		rows, sum := sr.run()
 		if mode != "off" {
-			if b := mustRead(t, filepath.Join(gdir, "shadow", "run", "items.jsonl")); strings.Count(string(b), "\n") != len(rows) {
-				t.Errorf("items.jsonl has %d lines for %d rows", strings.Count(string(b), "\n"), len(rows))
+			var stored []shadowRow
+			for _, line := range strings.Split(strings.TrimSpace(string(mustRead(t, filepath.Join(gdir, "shadow", "run", "items.jsonl")))), "\n") {
+				var row shadowRow
+				if err := json.Unmarshal([]byte(line), &row); err != nil {
+					t.Fatalf("invalid persisted judge row: %v", err)
+				}
+				stored = append(stored, row)
+			}
+			if !reflect.DeepEqual(stored, rows) {
+				t.Errorf("persisted rows differ: %+v, want %+v", stored, rows)
 			}
 		}
 		return rows, sum
@@ -505,7 +510,19 @@ func TestShadowStateIsCutUnderTheLimitAndTheRequestIsNotSent(t *testing.T) {
 	if n > 3000 || cut == "" {
 		t.Errorf("state %d chars, cut %q", n, cut)
 	}
-	_ = st
+	encoded, err := json.Marshal(st)
+	if err != nil || len(encoded) != n || st["item_id"] != "p#1" || st["package_purpose"] != "purpose" {
+		t.Fatalf("state metadata or encoded size: %v, %d bytes, reported %d: %v", st, len(encoded), n, err)
+	}
+	candidates := st["candidates"].([]map[string]any)
+	if len(candidates) != len(ic.Cands) {
+		t.Fatalf("budget unnecessarily removed candidate locations: %v", candidates)
+	}
+	for _, c := range candidates {
+		if c["implementation_lines"] != 0 || c["implementation"] != "" || c["path"] == "" {
+			t.Errorf("expected budget to remove bodies but retain candidate locations: %v", c)
+		}
+	}
 	if _, n, cut := shadowState(ic, "purpose", 1<<20); cut != "" || n < len(ic.Cands)*80*100 {
 		t.Errorf("an uncut state was reported cut: %d %q", n, cut)
 	}
@@ -532,17 +549,57 @@ func TestPostDecisionsSendsTypedQuestionsAndReadsUsage(t *testing.T) {
 	t.Setenv("ORCH_TRIAGE_URL", srv.URL)
 	t.Setenv("ORCH_TRIAGE_KEY", "k")
 	ans, model, u, err := postDecisions("m", map[string]any{"item": "x"}, deciderQuestions(2))
-	if err != nil || model != "served" || ans["relation"].Choice != "none" || u.Tokens != 5 || got["model"] != "m" {
+	if err != nil || model != "served" || ans["relation"].Choice != "none" || u.Tokens != 5 || u.Cost != 0.01 || got["model"] != "m" {
 		t.Fatalf("%v %v %v %v %v", ans, model, u, err, got)
 	}
 	qs := got["questions"].(map[string]any)
 	if best := qs["best_candidate"].(map[string]any)["criteria"].(map[string]any); len(best) != 3 {
 		t.Errorf("best_candidate criteria %v", best)
 	}
-	if got, _ := probeDecider(t.TempDir(), "m", func(string, map[string]any, map[string]any) (map[string]decAnswer, string, shadowUsage, error) {
-		return nil, "", shadowUsage{}, nil
-	}); got != 256000 {
-		t.Errorf("probe with an API that takes everything = %d", got)
+	if !reflect.DeepEqual(got["state"], map[string]any{"item": "x"}) {
+		t.Errorf("request lost its state: %v", got)
+	}
+}
+
+func TestProbeDeciderStopsAtRejectionAndRecordsAcceptedLimit(t *testing.T) {
+	rejected := errors.New("state too large")
+	for _, limit := range []int{0, 16000, 256000} {
+		t.Run(fmt.Sprint(limit), func(t *testing.T) {
+			root := t.TempDir()
+			var sizes []int
+			got, err := probeDecider(root, "m", func(model string, state, questions map[string]any) (map[string]decAnswer, string, shadowUsage, error) {
+				n := len(state["filler"].(string))
+				sizes = append(sizes, n)
+				if model != "m" || questions["ok"] == nil {
+					t.Errorf("probe omitted model or question: %s %v", model, questions)
+				}
+				if n > limit {
+					return nil, "", shadowUsage{}, rejected
+				}
+				return nil, "", shadowUsage{}, nil
+			})
+			path := filepath.Join(root, "gate", "decider-limit.json")
+			if limit == 0 {
+				if got != 0 || !errors.Is(err, rejected) || !reflect.DeepEqual(sizes, []int{8000}) || exists(path) {
+					t.Fatalf("first rejection: limit %d, err %v, requests %v, record exists %t", got, err, sizes, exists(path))
+				}
+				return
+			}
+			wantSizes := []int{8000, 16000, 32000}
+			if limit == 256000 {
+				wantSizes = []int{8000, 16000, 32000, 64000, 128000, 256000}
+			}
+			if err != nil || got != limit || !reflect.DeepEqual(sizes, wantSizes) {
+				t.Fatalf("probe did not stop at rejected size: limit %d, err %v, requests %v", got, err, sizes)
+			}
+			var saved struct {
+				MaxStateChars int    `json:"max_state_chars"`
+				Model         string `json:"model"`
+			}
+			if err := json.Unmarshal(mustRead(t, path), &saved); err != nil || saved.MaxStateChars != limit || saved.Model != "m" {
+				t.Fatalf("recorded probe: %+v, %v", saved, err)
+			}
+		})
 	}
 }
 

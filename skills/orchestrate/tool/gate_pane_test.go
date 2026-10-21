@@ -404,6 +404,20 @@ func TestGatePanePassesRunInPanesAndApplyLikeHeadless(t *testing.T) {
 		t.Fatalf("pi ran %d times, want 3", strings.Count(string(got), "GATE-"))
 	}
 
+	var labels []string
+	for _, c := range h.gateCalls("pane", "rename") {
+		labels = append(labels, fmt.Sprint(c.Extra["label"]))
+	}
+	for _, want := range []string{"adversary-a", "adversary-b", "group:api+2"} {
+		found := false
+		for _, l := range labels {
+			found = found || l == want
+		}
+		if !found {
+			t.Errorf("no pane was renamed %q: %v", want, labels)
+		}
+	}
+
 	// The same passes headless give the same verdict and the same output.
 	t.Setenv("HERDR_ENV", "")
 	code, headOut := h.run("gate", "spec.md")
@@ -558,8 +572,8 @@ func TestGateAgentStartNamesAreValidAndPromptFilesShareTheirPrefix(t *testing.T)
 			t.Errorf("%s was sent %d times, want %d", f, len(prompts), want)
 		}
 		common := len(prompts[0])
-		for _, pr := range prompts[1:] {
-			common = min(common, commonPrefix(prompts[0], pr))
+		for _, prompt := range prompts[1:] {
+			common = min(common, commonPrefix(prompts[0], prompt))
 		}
 		specSrc := string(mustRead(t, filepath.Join(h.repo, "spec.md")))
 		sharedText := gateHeader + gateSpecContext(specSrc, "spec.md")
@@ -567,7 +581,12 @@ func TestGateAgentStartNamesAreValidAndPromptFilesShareTheirPrefix(t *testing.T)
 			sharedText = gateHeader + gatePackageShared(sp, specSrc, "spec.md")
 		}
 		if common < len(sharedText) {
-			t.Errorf("prompts of %s share %d bytes, want at least %d", filepath.Base(f), common, len(sharedText))
+			t.Errorf("prompts of %s share %d prefix bytes, want at least %d", filepath.Base(f), common, len(sharedText))
+		}
+		for _, prompt := range prompts {
+			if !strings.Contains(prompt, sharedText) {
+				t.Errorf("prompt for %s lacks the shared spec context", filepath.Base(f))
+			}
 		}
 	}
 }
@@ -698,26 +717,6 @@ func TestPruneGateKeepsNewestRunsAndRecentOnes(t *testing.T) {
 	pruneGate(root2, "none", now)
 	if pruned(a) || !pruned(b) {
 		t.Errorf("7-day boundary: exact pruned = %v, older pruned = %v", pruned(a), pruned(b))
-	}
-}
-
-func TestGatePaneIsNamedAfterItsPass(t *testing.T) {
-	h := setup(t)
-	h.gateRepo(1)
-	h.sessionPi(gatePasses(nil))
-	h.must("gate", "spec.md")
-	var labels []string
-	for _, c := range h.gateCalls("pane", "rename") {
-		labels = append(labels, fmt.Sprint(c.Extra["label"]))
-	}
-	for _, want := range []string{"adversary-a", "adversary-b", "group:api"} {
-		found := false
-		for _, l := range labels {
-			found = found || l == want
-		}
-		if !found {
-			t.Errorf("no pane was renamed %q: %v", want, labels)
-		}
 	}
 }
 
