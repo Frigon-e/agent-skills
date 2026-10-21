@@ -171,6 +171,44 @@ func ctxErr(a *app, msg string, help ...string) error {
 	return &exitError{code: 2}
 }
 
+// batchShortKeys maps the short flags of the single lookups to the key a batch
+// query takes for the same option.
+var batchShortKeys = map[string]string{"p": "path", "F": "fixed", "w": "word", "i": "ignore_case", "l": "files_only", "c": "count", "U": "multiline", "o": "only_matching", "C": "context"}
+
+// batchOptionHint answers a per-lookup flag given to `ctx batch`: those options
+// go inside the query as key=value. It shows the flag the model wrote, with its
+// value, rewritten that way. "" for a flag that is no lookup option.
+func batchOptionHint(args []string, bad string) string {
+	key, ok := batchShortKeys[bad]
+	if !ok {
+		key = strings.ReplaceAll(bad, "-", "_")
+		valid := false
+		for _, k := range ctxOptionKeys {
+			valid = valid || k == key
+		}
+		if !valid {
+			return ""
+		}
+	}
+	val := "true"
+	for i, arg := range args {
+		if arg == "--" {
+			break
+		}
+		if n := strings.TrimLeft(arg, "-"); n == bad || strings.HasPrefix(n, bad+"=") {
+			if _, v, has := strings.Cut(n, "="); has {
+				val = v
+			} else if i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") && !ctxBoolOption[key] {
+				val = args[i+1]
+			}
+			break
+		}
+	}
+	return fmt.Sprintf(": per-query options go inside the query, for example -q \"text:x %s=%s\" instead of %s", key, val, flagName(bad))
+}
+
+var ctxBoolOption = map[string]bool{"fixed": true, "word": true, "ignore_case": true, "files_only": true, "count": true, "multiline": true, "only_matching": true, "all": true, "impl": true}
+
 func flagName(n string) string {
 	if len(n) == 1 {
 		return "-" + n
@@ -233,7 +271,12 @@ func ctxParse(a *app, name string, fs *flag.FlagSet, args []string) (pos []strin
 			var names []string
 			fs.VisitAll(func(f *flag.Flag) { names = append(names, flagName(f.Name)) })
 			if msg != perr.Error() {
-				return nil, true, ctxErr(a, "unknown flag "+flagName(strings.TrimLeft(msg, "-"))+" for `ctx "+name+"`", "valid flags for `ctx "+name+"`: "+strings.Join(names, ", ")+" (--help shows examples)")
+				bad := strings.TrimLeft(msg, "-")
+				head := "unknown flag " + flagName(bad) + " for `ctx " + name + "`"
+				if name == "batch" {
+					head += batchOptionHint(args, bad)
+				}
+				return nil, true, ctxErr(a, head, "valid flags for `ctx "+name+"`: "+strings.Join(names, ", ")+" (--help shows examples)")
 			}
 			return nil, true, ctxErr(a, strings.ReplaceAll(perr.Error(), "\n", " ")+" for `ctx "+name+"`", "valid flags for `ctx "+name+"`: "+strings.Join(names, ", "))
 		}

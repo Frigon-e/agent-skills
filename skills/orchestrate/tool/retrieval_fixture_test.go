@@ -101,6 +101,8 @@ func TestFixtureRetrievalTruth(t *testing.T) {
 					t.Fatal(err)
 				}
 				toonValue := decodedOutput(t, []byte(toonOut), outputAgent)
+				// The agent view drops what --json keeps (counters, empty fields, paths).
+				jsonValue = agentTrimmed(jsonValue)
 				if !reflect.DeepEqual(jsonValue, toonValue) {
 					t.Fatalf("selection differs: JSON %#v TOON %#v", jsonValue, toonValue)
 				}

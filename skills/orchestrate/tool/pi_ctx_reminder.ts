@@ -570,6 +570,17 @@ function patternHint(segment: segment): string {
 			`Use orch ctx find "Code that ${words.replaceAll('"', "'")}" (a broader search; use it when no name or string is known).`
 		);
 	}
+	return textHint(pattern, dir);
+}
+
+// The literal-string line, in the batch form the rest of the guard shows: the
+// pattern in single quotes inside the query, the query one double-quoted shell
+// word. A pattern or directory that cannot sit in both keeps the single command.
+function textHint(pattern: string, dir: string): string {
+	if (!pattern.includes("'") && !(dir && /[\s'"\\$`]/.test(dir))) {
+		const escaped = pattern.replaceAll(/([\\$`"])/g, "\\$1");
+		return `Use orch ctx batch -q "text:'${escaped}'${dir ? ` glob=${dir}/**` : ""}".`;
+	}
 	return dir
 		? `Use orch ctx text ${shellQuoted(pattern)} --glob ${shellQuoted(`${dir}/**`)}.`
 		: `Use orch ctx text ${shellQuoted(pattern)}.`;

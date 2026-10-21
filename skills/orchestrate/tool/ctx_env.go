@@ -432,11 +432,22 @@ func (e *ctxEnv) indexNote() {
 
 // Sources names the tools that answered and any staleness, for the last line
 // of every `orch ctx` output.
-func (e *ctxEnv) Sources() string {
+func (e *ctxEnv) Sources() string { return e.sources(false) }
+
+// SourcesBrief is Sources for a model reader: the tool names and any staleness
+// or tier note, without the path of the binary that ran.
+func (e *ctxEnv) SourcesBrief() string { return e.sources(true) }
+
+func (e *ctxEnv) sources(brief bool) string {
 	e.mu.Lock()
 	var parts []string
 	for tool, detail := range e.used {
-		parts = append(parts, tool+" "+sourceDetail(tool, detail))
+		d := sourceDetail(tool, detail)
+		if brief && (strings.HasPrefix(d, "/") || strings.HasPrefix(d, "~/")) {
+			parts = append(parts, tool)
+			continue
+		}
+		parts = append(parts, tool+" "+d)
 	}
 	e.mu.Unlock()
 	sort.Strings(parts)

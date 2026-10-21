@@ -9,6 +9,7 @@ import (
 	"io"
 	"math/big"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -312,17 +313,102 @@ type ctxV2Selection struct {
 	Sources       string          `json:"sources"`
 }
 
+// ctxV2Agent is the same selection as ctxV2Selection for a model or a person:
+// empty omissions and notes, the excerpt byte counters and the binary path in
+// sources add tokens and no information, so they are left out. --json keeps
+// the full selection.
+type ctxV2Agent struct {
+	SchemaVersion int             `json:"schema_version"`
+	Status        string          `json:"status"`
+	Common        []ctxCommonFile `json:"common,omitempty"`
+	SearchedScope string          `json:"searched_scope,omitempty"` // shared by the lookups of a batch
+	Excluded      []string        `json:"excluded,omitempty"`       // shared by the lookups of a batch
+	Result        any             `json:"result"`
+	Omissions     []ctxOmission   `json:"omissions,omitempty"`
+	Notes         []string        `json:"notes,omitempty"`
+	Sources       string          `json:"sources"`
+}
+
+// ctxHoistScope lifts the searched scope and the exclusion list out of the
+// lookups of a batch when every lookup that has one has the same, so a reader
+// sees each once. They still apply to every lookup.
+func ctxHoistScope(views []*ctxView) (scope string, excluded []string) {
+	withScope, withExcl := 0, 0
+	sameScope, sameExcl := true, true
+	for _, v := range views {
+		if v.SearchedScope != "" {
+			if withScope > 0 && v.SearchedScope != scope {
+				sameScope = false
+			}
+			scope = v.SearchedScope
+			withScope++
+		}
+		if len(v.Excluded) > 0 {
+			if withExcl > 0 && !slices.Equal(v.Excluded, excluded) {
+				sameExcl = false
+			}
+			excluded = v.Excluded
+			withExcl++
+		}
+	}
+	if !sameScope || withScope < 2 {
+		scope = ""
+	}
+	if !sameExcl || withExcl < 2 {
+		excluded = nil
+	}
+	for _, v := range views {
+		if scope != "" {
+			v.SearchedScope = ""
+		}
+		if excluded != nil {
+			v.Excluded = nil
+		}
+	}
+	return scope, excluded
+}
+
+// ctxDropMatch clears the match flag on every line when none of the lines is a
+// context row: a match flag that is true on every row says nothing.
+func ctxDropMatch(views []*ctxView) {
+	for _, v := range views {
+		for _, p := range v.Parts {
+			for _, f := range p.Files {
+				for _, l := range f.Lines {
+					if !l.Match {
+						return
+					}
+				}
+			}
+		}
+	}
+	for _, v := range views {
+		for _, p := range v.Parts {
+			for fi := range p.Files {
+				for li := range p.Files[fi].Lines {
+					p.Files[fi].Lines[li].Match = false
+				}
+			}
+		}
+	}
+}
+
+// ctxEvidenceID is a short handle for a source line or file: 32 bits are enough
+// to tell the rows of one answer apart, and the selection keys repeats on the
+// content itself, not on this handle.
 func ctxEvidenceID(path string, line int, text string) string {
 	hash := sha256.Sum256(fmt.Appendf(nil, "%s:%d\n%s", path, line, text))
-	return fmt.Sprintf("ctx-%x", hash[:8])
+	return fmt.Sprintf("ctx-%x", hash[:4])
 }
 
 // ctxEmitV2 selects once, including source excerpts and a single shared budget.
 // Legacy v1 machine JSON deliberately retains its old indentation transforms
 // and prose-only caps. --json --schema-version 2 opts into this same selection.
 func (a *app) ctxEmitV2(e *ctxEnv, data any, f ctxFmt, budget int) error {
+	var shown []*ctxView // the selected copies, for the agent-facing trims
 	selection := ctxV2Selection{SchemaVersion: 2, Status: "ok", Result: data, ExcerptBudget: budget, Omissions: []ctxOmission{}, Notes: e.Notes(), Sources: e.Sources()}
 	remaining := budget
+	plain := !e.ReadOnly // gate agents run read-only and cite ids; other sessions do not
 	seenSources := map[string]bool{}
 	keep := func(id, source, text, expand string) bool {
 		if budget > 0 && len(text) > remaining {
@@ -366,24 +452,37 @@ func (a *app) ctxEmitV2(e *ctxEnv, data any, f ctxFmt, budget int) error {
 				lines := file.Lines[:0]
 				for _, line := range file.Lines {
 					id := ctxEvidenceID(file.Path, line.N, line.Text)
-					if seenSources[id] {
-						file.References = append(file.References, id)
+					at := fmt.Sprintf("%s:%d", file.Path, line.N)
+					seen := fmt.Sprintf("%s\n%s", at, line.Text)
+					if seenSources[seen] {
+						ref := id
+						if plain {
+							ref = at // no line ids to point at: name the row
+						} else {
+							file.References = append(file.References, id)
+						}
 						// Keep this lookup's match/range/enclosing relationship even
 						// when its source body was already emitted as context.
-						line.ID, line.Reference, line.Text = "", id, ""
+						line.ID, line.Reference, line.Text = "", ref, ""
 						lines = append(lines, line)
 						continue
 					}
 					line.ID = id
+					if plain {
+						// A session that cites no evidence ids does not need one per row;
+						// the file keeps its id and every row its path and line.
+						line.ID, id = "", at
+					}
 					expand := fmt.Sprintf("Use native read on %s with offset %d and limit 1.", filepath.Join(e.Code, file.Path), line.N)
-					if keep(id, fmt.Sprintf("%s:%d", file.Path, line.N), line.Text, expand) {
+					if keep(id, at, line.Text, expand) {
 						lines = append(lines, line)
-						seenSources[id] = true
+						seenSources[seen] = true
 					}
 				}
 				file.Lines = lines
 			}
 		}
+		shown = append(shown, &out)
 		return &out, nil
 	}
 	switch v := data.(type) {
@@ -493,7 +592,17 @@ func (a *app) ctxEmitV2(e *ctxEnv, data any, f ctxFmt, budget int) error {
 		selection.Status = "partial"
 	}
 	selection.Notes, selection.Sources = e.Notes(), e.Sources()
-	return writeOutput(a.out, ctxAudience(a.out), selection)
+	audience := ctxAudience(a.out)
+	if audience == outputJSON {
+		return writeOutput(a.out, audience, selection)
+	}
+	ctxDropMatch(shown)
+	var scope string
+	var excluded []string
+	if _, ok := data.([]*ctxView); ok {
+		scope, excluded = ctxHoistScope(shown)
+	}
+	return writeOutput(a.out, audience, ctxV2Agent{selection.SchemaVersion, selection.Status, selection.Common, scope, excluded, selection.Result, selection.Omissions, selection.Notes, e.SourcesBrief()})
 }
 
 // agentScalar is the shared boundary for legacy prose renderers and embedded
