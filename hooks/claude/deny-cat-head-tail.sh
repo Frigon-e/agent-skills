@@ -5,8 +5,8 @@
 # Does not touch: tail -f/--follow, several files at once, a pipe on either
 # side (cat f | grep TODO, head -n 5 f | wc -l), a redirect (cat f > copy) and
 # cat reading stdin.
-# Replacement: the built-in Read tool with offset and limit, and orch ctx sym
-# Name for a function or type body when orch is installed.
+# Replacement: the built-in Read tool with offset and limit (a section or the
+# whole file), whether or not orch is installed.
 set -u
 unset CDPATH
 dir=$(cd -- "$(dirname -- "$0")" && pwd) || exit 0

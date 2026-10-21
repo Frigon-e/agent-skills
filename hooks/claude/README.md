@@ -33,7 +33,7 @@ These are the Claude side of the pi guard in `skills/orchestrate/tool/pi_ctx_rem
 | `deny-cat-head-tail.sh` | `deny-cat-head-tail` | a bare `cat`, `head`, `tail` or `sed -n` over exactly one file | `tail -f`/`--follow`, several files, a pipe on either side, a redirect, `cat` reading stdin |
 | `deny-grep-rg.sh` | `deny-grep-rg` | `grep`, `egrep`, `fgrep`, `ag`, `git grep` over files or a directory, and `rg` too while `orch` is on PATH | a `grep` filtering another command's output (`go test ./... \| grep FAIL`), `grep -q` as a condition, `grep` reading stdin, a quoted word, `orch ctx` itself, and `rg` when `orch` is not installed |
 
-The replacement is the same order as pi: one `orch ctx` call first when `orch` is on PATH, then `fd` for a file search and `rg` for a content search, then the built-in Claude tools (`Glob`, `Grep`, `Read` with offset and limit, `Edit`). `sed -i` always names `Edit`, because `orch ctx` is read-only.
+The replacement is the same order as pi: one `orch ctx` call first when `orch` is on PATH, then `fd` for a file search and `rg` for a content search, then the built-in Claude tools (`Glob`, `Grep`, `Edit`). Two rules name one fixed tool whichever tools are installed: `sed -i` always names `Edit`, because `orch ctx` is read-only, and `deny-cat-head-tail` always names `Read` with offset and limit (a section or the whole file), never `orch ctx`.
 
 A blocked command stays blocked on every retry. Two switches are the human escapes, same as pi:
 

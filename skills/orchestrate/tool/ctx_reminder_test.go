@@ -362,7 +362,7 @@ func TestCtxReminderGuardDenySedInplace(t *testing.T) {
 
 // deny-cat-head-tail: one bare file read belongs to the read tool.
 func TestCtxReminderGuardDenyCatHeadTail(t *testing.T) {
-	read := []string{"read", "orch ctx sym"}
+	read := []string{"read", "offset and limit"}
 	cases := []reminderCase{
 		{Name: "cat one file", Tool: "bash", Input: bash(`cat notes.txt`), Blocks: "cat-head-tail", Needs: read},
 		{Name: "head -n 20", Tool: "bash", Input: bash(`head -n 20 notes.txt`), Blocks: "cat-head-tail", Needs: read},
@@ -388,6 +388,11 @@ func TestCtxReminderGuardDenyCatHeadTail(t *testing.T) {
 	}
 	got := runCtxReminder(t, nil, cases)
 	reminded, quiet, blocked := checkReminder(t, got, cases)
+	for name, out := range got.Out {
+		if strings.Contains(out.Block, "orch ctx") {
+			t.Errorf("%s: a file read points at orch ctx instead of the built-in read: %q", name, out.Block)
+		}
+	}
 	t.Logf("deny-cat-head-tail: %d blocked, %d allowed, %d reminded", blocked, quiet, reminded)
 }
 
@@ -622,6 +627,13 @@ func TestCtxReminderSharedToolguardCases(t *testing.T) {
 				// The parens keep deny-find from matching deny-find-chains.
 				if want := "(deny-" + c.Rule + ")"; !strings.Contains(reason, want) {
 					t.Errorf("%q must be blocked by %s in pi: %s", c.Name, want, reason)
+				}
+				// Reading a file points at the built-in read, never orch ctx,
+				// whatever is installed.
+				if c.Rule == "cat-head-tail" {
+					if !strings.Contains(reason, "built-in read") || strings.Contains(reason, "orch ctx") {
+						t.Errorf("%q must name the built-in read only: %s", c.Name, reason)
+					}
 				}
 			}
 			t.Logf("shared cases, %s PATH: %d cases, %d must block", situation, len(cases), blocked)

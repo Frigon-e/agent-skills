@@ -414,11 +414,9 @@ const rules: rule[] = [
 		name: "deny-cat-head-tail",
 		id: "cat-head-tail",
 		match: denyCatHeadTail,
-		reason: ({ orch }) =>
+		reason: () =>
 			`${guardMarker} (deny-cat-head-tail): a bare cat, head, tail or sed -n floods the context.\n` +
-			(orch
-				? `Use the built-in read tool with offset and limit; for a function or type body prefer orch ctx sym Name.`
-				: `Use the built-in read tool with offset and limit; orch ctx is not installed.`),
+			`Use the built-in read tool with offset and limit (a section or the whole file).`,
 	},
 ];
 

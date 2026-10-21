@@ -475,9 +475,12 @@ on a file) and `deny-grep-rg` (a plain `grep`, `egrep`, `fgrep`, `ag` or
 A `tool_call` block names the replacement in order: one `orch ctx` call when
 `orch` is on PATH, otherwise `fd` for a file search and `rg` for a content
 search, and the built-in `edit`, `read`, `grep` or `find` when those are
-missing too; the reason is two or three lines. Allowed: a grep or rg filtering
-another command's output, a read that feeds a pipe or a redirect, `tail -f`,
-several files to `cat`, a `find` reading a pipe, and plain `fd`. Plain `fd`
+missing too; the reason is two or three lines. Reading a file is the
+exception: `deny-cat-head-tail` always names the built-in `read` with offset
+and limit (a section or the whole file), never `orch ctx`, whether or not
+`orch` is installed. Allowed: a grep or rg filtering another command's
+output, a read that feeds a pipe or a redirect, `tail -f`, several files to
+`cat`, a `find` reading a pipe, and plain `fd`. Plain `fd`
 and pi's built-in `grep`, `find` and `ls`, which are never blocked, keep the
 appended reminder that names one `orch ctx batch` call. A blocked command line
 is blocked every time and does not run on a retry; from the third block in a

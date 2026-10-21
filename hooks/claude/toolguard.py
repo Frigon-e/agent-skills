@@ -432,12 +432,7 @@ def rules():
             "match": lambda line, tools: deny_cat_head_tail(line),
             "reason": lambda tools: (
                 f"{GUARD_MARKER} (deny-cat-head-tail): a bare cat, head, tail or sed -n floods the context.\n"
-                + (
-                    "Use the built-in Read tool with offset and limit; for a function or type body "
-                    "prefer orch ctx sym Name."
-                    if tools["orch"]
-                    else "Use the built-in Read tool with offset and limit; orch ctx is not installed."
-                )
+                "Use the built-in Read tool with offset and limit (a section or the whole file)."
             ),
         },
     ]

@@ -43,7 +43,7 @@ REPLACEMENT = {
         "find-chains": "orch ctx batch",
         "find": "orch ctx batch",
         "sed-inplace": "built-in Edit",
-        "cat-head-tail": "orch ctx sym",
+        "cat-head-tail": "built-in Read",
         "grep-rg": "orch ctx batch",
     },
     "fd-rg": {
