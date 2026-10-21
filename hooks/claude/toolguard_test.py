@@ -16,10 +16,18 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 CASES = os.path.join(ROOT, "toolguard_cases.json")
 GUARD_MARKER = "orch tool guard"
+
+# What the broken orch stub prints, so a test can look for it in a block.
+BROKEN_DETAIL = "cd: /nonexistent/tool: No such file or directory"
+BROKEN_LINE = (
+    f"orch ctx is installed but broken here ({BROKEN_DETAIL}); "
+    "use the tools above and tell the user."
+)
 
 SCRIPTS = [
     "deny-find-chains.sh",
@@ -45,6 +53,13 @@ REPLACEMENT = {
         "sed-inplace": "built-in Edit",
         "cat-head-tail": "built-in Read",
         "grep-rg": "orch ctx batch",
+    },
+    "orch broken": {
+        "find-chains": "fd instead",
+        "find": "fd instead",
+        "sed-inplace": "built-in Edit",
+        "cat-head-tail": "built-in Read",
+        "grep-rg": "rg instead",
     },
     "fd-rg": {
         "find-chains": "fd instead",
@@ -222,10 +237,11 @@ def check_pattern_hints(checker, kinds, workdir):
 
 
 class Checker:
-    def __init__(self, cases, situations, paths):
+    def __init__(self, cases, situations, paths, state_root):
         self.cases = cases
         self.situations = situations
         self.paths = paths
+        self.state_root = state_root
         self.blocked = 0
         self.allowed = 0
         self.failures = []
@@ -250,7 +266,14 @@ class Checker:
         )
 
     def env(self, situation, extra=None):
-        env = {"PATH": self.paths[situation], "HOME": os.environ.get("HOME", "")}
+        # A probe cache per situation, so a healthy orch, a broken one and no
+        # orch at all never share one answer. Tests never touch the real one.
+        state = os.path.join(self.state_root, situation)
+        env = {
+            "PATH": self.paths[situation],
+            "HOME": os.environ.get("HOME", ""),
+            "ORCH_TOOL_GUARD_STATE_DIR": state,
+        }
         env.update(extra or {})
         return env
 
@@ -303,12 +326,24 @@ class Checker:
                 self.fail(case["name"], f"{hook} wrote to stderr: {done.stderr.strip()}")
 
 
-def stubs(directory, names):
+def stubs(directory, names, broken=()):
+    """A stand-in executable per name. A broken one writes an error to stderr,
+    records the probe when ORCH_PROBE_LOG is set, and exits 1, which is what a
+    wrapper that cannot find its tool directory does."""
     os.makedirs(directory, exist_ok=True)
     for name in names:
         path = os.path.join(directory, name)
+        if name in broken:
+            body = (
+                "#!/bin/sh\n"
+                'if [ -n "$ORCH_PROBE_LOG" ]; then echo probe >> "$ORCH_PROBE_LOG"; fi\n'
+                f'echo "{BROKEN_DETAIL}" >&2\n'
+                "exit 1\n"
+            )
+        else:
+            body = "#!/bin/sh\nexit 0\n"
         with open(path, "w", encoding="utf-8") as handle:
-            handle.write("#!/bin/sh\nexit 0\n")
+            handle.write(body)
         os.chmod(path, 0o700)
 
 
@@ -448,6 +483,117 @@ def check_non_bash(checker):
     return failures
 
 
+def probe_count(path):
+    """How many probes the broken stub has recorded."""
+    try:
+        with open(path, encoding="utf-8") as handle:
+            return len([line for line in handle if line.strip()])
+    except OSError:
+        return 0
+
+
+def check_orch_health(checker, workdir):
+    """A broken orch is not a replacement: a search block says so, rg stays
+    allowed, the probe is cached for a minute and a broken probe is logged once."""
+    failures = []
+    probes = os.path.join(workdir, "broken-probes.log")
+    log = os.path.join(workdir, "broken-health.log")
+    # A state directory of its own, so the cases above cannot have warmed it.
+    state = os.path.join(workdir, "health-state")
+    cache = os.path.join(state, "toolguard-health.json")
+    extra = {
+        "ORCH_PROBE_LOG": probes,
+        "ORCH_TOOL_GUARD_LOG": log,
+        "ORCH_TOOL_GUARD_STATE_DIR": state,
+    }
+
+    # Two blocked greps: both name rg and the broken line, and the cache means
+    # one probe served both calls.
+    for attempt in ("first", "second"):
+        done = grep_hook(checker, "grep -rn x src", "orch broken", extra)
+        reason = done.stderr.strip()
+        if done.returncode != 2:
+            failures.append(f"broken orch {attempt} grep: exit {done.returncode}, want 2: {reason}")
+            continue
+        if BROKEN_LINE not in reason.splitlines():
+            failures.append(f"broken orch {attempt} grep: no broken line: {reason!r}")
+        if "orch ctx batch" in reason:
+            failures.append(f"broken orch {attempt} grep: named orch ctx: {reason!r}")
+        if ", rg, ag" in reason:
+            failures.append(f"broken orch {attempt} grep: named rg as the preferred grep: {reason!r}")
+        if "rg instead" not in reason:
+            failures.append(f"broken orch {attempt} grep: did not name rg: {reason!r}")
+    if probe_count(probes) != 1:
+        failures.append(f"two calls within the minute probed {probe_count(probes)} times, want 1")
+
+    # One JSON line per probe, next to the blocks: the event, the harness and
+    # the probe's first error line.
+    try:
+        with open(log, encoding="utf-8") as handle:
+            entries = [json.loads(line) for line in handle if line.strip()]
+    except (OSError, ValueError) as error:
+        failures.append(f"the broken probe was not logged: {error}")
+        entries = []
+    probes_logged = [entry for entry in entries if "event" in entry]
+    blocks = [entry for entry in entries if "rule" in entry]
+    if len(probes_logged) != 1:
+        failures.append(f"the log must hold one health line per probe, got {len(probes_logged)}")
+    if len(blocks) != 2:
+        failures.append(f"the log must still hold one line per block, got {len(blocks)}")
+    for entry in probes_logged:
+        if sorted(entry) != ["detail", "event", "harness", "ts"]:
+            failures.append(f"the health log line has the wrong fields: {sorted(entry)}")
+        elif entry["event"] != "orch-unhealthy" or entry["harness"] != "claude":
+            failures.append(f"the health log line names the wrong event: {entry}")
+        elif entry["detail"] != BROKEN_DETAIL:
+            failures.append(f"the health log detail is not the probe's first error line: {entry}")
+
+    # rg is the preferred grep when orch cannot answer, so it is not blocked.
+    done = grep_hook(checker, "rg Foo internal/", "orch broken", extra)
+    if done.returncode != 0 or done.stderr.strip():
+        failures.append(f"rg was not allowed with a broken orch: {done.stderr.strip()}")
+
+    # A stale cache is re-probed, so a wrapper fixed a minute ago works again.
+    os.makedirs(state, exist_ok=True)
+    with open(cache, "w", encoding="utf-8") as handle:
+        json.dump({"ts": time.time() - 120, "ok": True, "detail": ""}, handle)
+    done = grep_hook(checker, "grep -rn x src", "orch broken", extra)
+    if BROKEN_LINE not in done.stderr:
+        failures.append("a stale cache was trusted instead of re-probed")
+    if probe_count(probes) != 2:
+        failures.append(f"a stale cache probed {probe_count(probes)} times in all, want 2")
+
+    # A fresh cache is trusted: no probe, and the healthy text comes back.
+    with open(cache, "w", encoding="utf-8") as handle:
+        json.dump({"ts": time.time(), "ok": True, "detail": ""}, handle)
+    done = grep_hook(checker, "grep -rn x src", "orch broken", extra)
+    reason = done.stderr.strip()
+    if "orch ctx batch" not in reason or "broken here" in reason:
+        failures.append(f"a fresh healthy cache was not trusted: {reason!r}")
+    if probe_count(probes) != 2:
+        failures.append("a fresh cache still probed")
+
+    # The detail is the first line of the probe's error, cut at 120 characters.
+    long_first = "x" * 200
+    broken_dir = os.path.join(workdir, "long-broken")
+    os.makedirs(broken_dir, exist_ok=True)
+    stub = os.path.join(broken_dir, "orch")
+    with open(stub, "w", encoding="utf-8") as handle:
+        handle.write('#!/bin/sh\necho "' + long_first + '" >&2\necho "second line" >&2\nexit 1\n')
+    os.chmod(stub, 0o700)
+    long_env = {
+        "ORCH_TOOL_GUARD_STATE_DIR": os.path.join(workdir, "long-state"),
+        "PATH": broken_dir + os.pathsep + checker.paths["orch broken"],
+    }
+    done = grep_hook(checker, "grep -rn x src", "orch broken", long_env)
+    reason = done.stderr.strip()
+    if f"({long_first[:120]})" not in reason:
+        failures.append(f"the detail is not the first line cut at 120 characters: {reason!r}")
+    if "second line" in reason:
+        failures.append(f"the detail is not one line: {reason!r}")
+    return failures
+
+
 def main():
     with open(CASES, encoding="utf-8") as handle:
         data = json.load(handle)
@@ -461,10 +607,11 @@ def main():
         support_bin(support)
         paths = {}
         for situation, spec in situations.items():
-            stubs(os.path.join(workdir, situation), spec["tools"])
+            stubs(os.path.join(workdir, situation), spec["tools"], spec.get("broken", ()))
             paths[situation] = os.path.join(workdir, situation) + os.pathsep + support
 
-        checker = Checker(cases, situations, paths)
+        state_root = os.path.join(workdir, "state")
+        checker = Checker(cases, situations, paths, state_root)
         failures = []
         failures.extend(shell_checks())
         failures.extend(required_cases(cases))
@@ -472,6 +619,7 @@ def main():
         failures.extend(checker.failures)
         failures.extend(check_switches(checker))
         failures.extend(check_non_bash(checker))
+        failures.extend(check_orch_health(checker, workdir))
         kind_failures, kind_counts = check_pattern_hints(checker, data["patternKinds"], workdir)
         failures.extend(kind_failures)
     finally:
