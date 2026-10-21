@@ -9,11 +9,14 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"sort"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/toon-format/toon-go"
 )
 
 const adjudicatorRole = "gate_adjudicator"
@@ -829,6 +832,8 @@ func adjudicationProposals(p adjudicationPacket) map[string]adjudicationReply {
 
 type adjudicationRequest struct {
 	Prompt         string
+	Format         string // text transport: toon or json
+	FormatReason   string // why json was sent instead of toon
 	State          map[string]any
 	Questions      map[string]any
 	Proposals      map[string]map[string]adjudicationReply
@@ -838,20 +843,7 @@ type adjudicationRequest struct {
 func formatAdjudication(env adjudicationEnvelope, transport, repair string) (adjudicationRequest, error) {
 	var req adjudicationRequest
 	if transport == "text" {
-		s, err := selectOutput(env.Packets)
-		if err != nil {
-			return req, err
-		}
-		b, err := s.render(outputAgent)
-		if err != nil {
-			return req, err
-		}
-		req.Prompt = adjudicatorPrefix + "\nDecision packets (TOON):\n" + string(b)
-		if repair != "" {
-			req.Prompt += "\nRepair only the invalid response schema/fields: " + repair
-		}
-		req.InputAllowance = int64(len(req.Prompt))
-		return req, nil
+		return formatAdjudicationText(env, repair, true)
 	}
 	if transport != "decisions" {
 		return req, fmt.Errorf("unsupported connector state fields")
@@ -877,6 +869,123 @@ func formatAdjudication(env adjudicationEnvelope, transport, repair string) (adj
 	raw, err := json.Marshal([]any{req.State, req.Questions})
 	req.InputAllowance = int64(len(raw))
 	return req, err
+}
+
+// formatAdjudicationText builds the chat request for the text transport. toonOK
+// is false for the one schema repair, which re-sends the same packets as JSON.
+func formatAdjudicationText(env adjudicationEnvelope, repair string, toonOK bool) (adjudicationRequest, error) {
+	var req adjudicationRequest
+	s, err := selectOutput(env.Packets)
+	if err != nil {
+		return req, err
+	}
+	format, reason, body := adjudicationPacketBody(s, toonOK, func(s selectedOutput) ([]byte, error) { return s.render(outputAgent) })
+	req.Format, req.FormatReason = format, reason
+	label := "TOON"
+	if format != "toon" {
+		label = "JSON"
+	}
+	req.Prompt = adjudicatorPrefix + "\nDecision packets (" + label + "):\n" + string(body)
+	if repair != "" {
+		req.Prompt += "\nRepair only the invalid response schema/fields: " + repair
+	}
+	req.InputAllowance = int64(len(req.Prompt))
+	return req, nil
+}
+
+// adjudicationPacketBody picks the packet encoding for the text transport. TOON
+// is sent only for a uniform packet table whose rendering decodes back to the
+// source packets; every other case sends compact JSON and reason names why.
+func adjudicationPacketBody(s selectedOutput, toonOK bool, encodeToon func(selectedOutput) ([]byte, error)) (format, reason string, body []byte) {
+	if !toonOK {
+		return "json", "unusable reply", s.json
+	}
+	if !uniformPackets(s) {
+		return "json", "packets are not uniformly shaped", s.json
+	}
+	b, err := encodeToon(s)
+	if err != nil {
+		return "json", "toon encode error", s.json
+	}
+	if !toonRoundTrip(s, b) {
+		return "json", "toon round trip mismatch", s.json
+	}
+	return "toon", "", b
+}
+
+// uniformPackets reports whether every packet has the same fields in the same
+// order with uniformly shaped values, the only case where TOON's tabular form
+// pays for itself. Mixed or heterogeneous packets are not uniform.
+func uniformPackets(s selectedOutput) bool {
+	rows, ok := s.value.([]any)
+	if !ok || len(rows) == 0 {
+		return false
+	}
+	first := packetShape(rows[0])
+	for _, row := range rows[1:] {
+		if packetShape(row) != first {
+			return false
+		}
+	}
+	return true
+}
+
+// packetShape is a structural signature: object keys keep their order, scalars
+// and null collapse to one token, and an array reports the distinct shapes of
+// its items, so rows of different length still compare equal.
+func packetShape(v any) string {
+	switch v := v.(type) {
+	case toon.Object:
+		var b strings.Builder
+		b.WriteByte('{')
+		for i, f := range v.Fields {
+			if i > 0 {
+				b.WriteByte(',')
+			}
+			fmt.Fprintf(&b, "%q:", f.Key)
+			b.WriteString(packetShape(f.Value))
+		}
+		b.WriteByte('}')
+		return b.String()
+	case []any:
+		if len(v) == 0 {
+			return "[]"
+		}
+		shapes := map[string]bool{}
+		for _, item := range v {
+			shapes[packetShape(item)] = true
+		}
+		distinct := make([]string, 0, len(shapes))
+		for shape := range shapes {
+			distinct = append(distinct, shape)
+		}
+		sort.Strings(distinct)
+		return "[" + strings.Join(distinct, "|") + "]"
+	case nil:
+		return "null"
+	default:
+		return "scalar"
+	}
+}
+
+// toonRoundTrip reports whether the TOON rendering decodes back to exactly the
+// selected packets. It is the normalized comparison the output tests use:
+// numbers, strings, null and array order must all survive, while key order is
+// not compared because TOON decoding returns unordered maps.
+func toonRoundTrip(s selectedOutput, b []byte) bool {
+	got, err := toon.Decode(b)
+	if err != nil {
+		return false
+	}
+	wantJSON, err := s.render(outputHuman)
+	if err != nil {
+		return false
+	}
+	var want any
+	if err := json.Unmarshal(wantJSON, &want); err != nil {
+		return false
+	}
+	return reflect.DeepEqual(got, want)
 }
 
 func normalizeAdjudicationDecisions(env adjudicationEnvelope, req adjudicationRequest, answers map[string]decAnswer) (adjudicationNormalized, error) {
@@ -912,15 +1021,23 @@ type adjudicationResponse struct {
 }
 type adjudicationRunner func(context.Context, profile, adjudicationRequest) (adjudicationResponse, error)
 
+// adjudicationPacketFormat records which packet encoding the text transport
+// sent, and why JSON replaced an eligible TOON body.
+type adjudicationPacketFormat struct {
+	Format string `json:"format"`
+	Reason string `json:"reason,omitempty"`
+}
+
 type adjudicationAudit struct {
-	Envelope     adjudicationEnvelope    `json:"request"`
-	Responses    []adjudicationResponse  `json:"responses"`
-	Execution    reviewExecution         `json:"execution"`
-	Normalized   *adjudicationNormalized `json:"normalized,omitempty"`
-	Error        string                  `json:"error,omitempty"`
-	Reason       reviewReason            `json:"reason,omitempty"`
-	NextAction   string                  `json:"next_action,omitempty"`
-	LaterOutcome string                  `json:"later_outcome,omitempty"`
+	Envelope     adjudicationEnvelope       `json:"request"`
+	Responses    []adjudicationResponse     `json:"responses"`
+	TextPackets  []adjudicationPacketFormat `json:"text_packets,omitempty"`
+	Execution    reviewExecution            `json:"execution"`
+	Normalized   *adjudicationNormalized    `json:"normalized,omitempty"`
+	Error        string                     `json:"error,omitempty"`
+	Reason       reviewReason               `json:"reason,omitempty"`
+	NextAction   string                     `json:"next_action,omitempty"`
+	LaterOutcome string                     `json:"later_outcome,omitempty"`
 }
 
 func executeAdjudication(rr *roleRun, budget *RunBudget, env adjudicationEnvelope, run adjudicationRunner) adjudicationAudit {
@@ -998,6 +1115,9 @@ func executeAdjudication(rr *roleRun, budget *RunBudget, env adjudicationEnvelop
 			return fail(err)
 		}
 		budget.LastRoute = selected.String()
+		if transport == "text" {
+			audit.TextPackets = append(audit.TextPackets, adjudicationPacketFormat{Format: req.Format, Reason: req.FormatReason})
+		}
 		ctx, cancel := context.WithTimeout(context.Background(), budget.remaining())
 		resp, err := run(ctx, selected, req)
 		ctxErr := ctx.Err()
@@ -1045,8 +1165,14 @@ func executeAdjudication(rr *roleRun, budget *RunBudget, env adjudicationEnvelop
 		if attempt == 1 {
 			return fail(err)
 		}
-		// Exactly one schema repair; it uses the same selected route and budget.
-		req, capabilityErr = formatAdjudication(env, transport, err.Error())
+		// Exactly one schema repair; it uses the same selected route and budget. An
+		// unusable text reply is retried as compact JSON, the one input the repair
+		// can change; the decisions transport keeps its existing repair request.
+		if transport == "text" {
+			req, capabilityErr = formatAdjudicationText(env, err.Error(), false)
+		} else {
+			req, capabilityErr = formatAdjudication(env, transport, err.Error())
+		}
 		if capabilityErr != nil {
 			return fail(capabilityErr)
 		}
