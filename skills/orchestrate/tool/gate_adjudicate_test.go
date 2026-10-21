@@ -11,6 +11,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/toon-format/toon-go"
 )
 
 const adjudicationSourceFixture = "rename(temp, destination)\n"
@@ -33,6 +35,30 @@ func adjudicationFixture(t *testing.T) adjudicationEnvelope {
 		t.Fatal(err)
 	}
 	return adjudicationEnvelope{Subject: s, AttemptID: "attempt-atomic", Packets: []adjudicationPacket{packet}, Review: g}
+}
+
+// adjudicationPairFixture adds a related unresolved item in the same package, so
+// the text transport sends two rows of the same shape: a uniform packet table.
+func adjudicationPairFixture(t *testing.T) adjudicationEnvelope {
+	t.Helper()
+	env := adjudicationFixture(t)
+	c := env.Review.Checks[0]
+	c.Item.ID += "-related"
+	a := env.Review.Answers[0]
+	a.ID += "-related"
+	a.ItemID = c.Item.ID
+	q := env.Review.Policy.Questions[0]
+	q.ID += "-related"
+	q.ItemID = c.Item.ID
+	env.Review.Checks = append(env.Review.Checks, c)
+	env.Review.Answers = append(env.Review.Answers, a)
+	env.Review.Policy.Questions = append(env.Review.Policy.Questions, q)
+	p, err := buildAdjudicationPacket(env.Subject, env.Review, q, func(evidenceRecord) (string, error) { return adjudicationSourceFixture, nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	env.Packets = append(env.Packets, p)
+	return env
 }
 
 func adjudicationReplyFixture(env adjudicationEnvelope) adjudicationReplyBatch {
@@ -567,6 +593,135 @@ func TestAdjudicationValidUncertaintyDoesNotRetry(t *testing.T) {
 				t.Fatal("uncertainty approved a decision", result)
 			}
 		})
+	}
+}
+
+func TestAdjudicationUniformPacketsRule(t *testing.T) {
+	field := func(key string, value any) toon.Field { return toon.Field{Key: key, Value: value} }
+	row := func(fields ...toon.Field) any { return toon.NewObject(fields...) }
+	cases := []struct {
+		name string
+		rows any
+		want bool
+	}{
+		{"identical rows", []any{row(field("a", 1), field("b", "x")), row(field("a", 2), field("b", "y"))}, true},
+		{"different lengths", []any{row(field("a", []any{1})), row(field("a", []any{1, 2, 3}))}, true},
+		{"different scalar kinds", []any{row(field("a", "1")), row(field("a", 1.0))}, true},
+		{"one packet", []any{row(field("a", 1))}, true},
+		{"no packets", []any{}, false},
+		{"not a list", row(field("a", 1)), false},
+		{"different field order", []any{row(field("a", 1), field("b", 2)), row(field("b", 2), field("a", 1))}, false},
+		{"different field set", []any{row(field("a", 1)), row(field("a", 1), field("b", 2))}, false},
+		{"null against array", []any{row(field("a", nil)), row(field("a", []any{}))}, false},
+		{"empty against non-empty array", []any{row(field("a", []any{})), row(field("a", []any{1}))}, false},
+		{"different item shape", []any{row(field("a", []any{1})), row(field("a", []any{row(field("k", 1))}))}, false},
+		{"different nested field", []any{row(field("a", row(field("k", 1)))), row(field("a", row(field("k", 1), field("j", 2))))}, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := uniformPackets(selectedOutput{value: c.rows}); got != c.want {
+				t.Fatalf("uniform=%v want %v", got, c.want)
+			}
+		})
+	}
+}
+
+func TestAdjudicationPacketFormatGuard(t *testing.T) {
+	env := adjudicationPairFixture(t)
+	s, err := selectOutput(env.Packets)
+	if err != nil {
+		t.Fatal(err)
+	}
+	agentRender := func(s selectedOutput) ([]byte, error) { return s.render(outputAgent) }
+	format, reason, body := adjudicationPacketBody(s, true, agentRender)
+	if format != "toon" || reason != "" || !strings.Contains(string(body), "schema_version") {
+		t.Fatalf("uniform lossless packets should stay TOON: %s %s %q", format, reason, body)
+	}
+	req, err := formatAdjudicationText(env, "", true)
+	if err != nil || req.Format != "toon" || !strings.Contains(req.Prompt, "Decision packets (TOON):") || req.InputAllowance != int64(len(req.Prompt)) {
+		t.Fatalf("toon request: %+v %v", req.Format, err)
+	}
+	// A rendering that decodes but loses fields must fall back to the source JSON.
+	format, reason, body = adjudicationPacketBody(s, true, func(selectedOutput) ([]byte, error) { return []byte("schema_version: 1\n"), nil })
+	if format != "json" || reason != "toon round trip mismatch" || string(body) != string(s.json) {
+		t.Fatalf("lossy round trip not caught: %s %s", format, reason)
+	}
+	// An undecodable body is the same fallback.
+	if format, reason, _ = adjudicationPacketBody(s, true, func(selectedOutput) ([]byte, error) { return []byte("\t\tunexpected"), nil }); format != "json" || reason != "toon round trip mismatch" {
+		t.Fatalf("undecodable toon not caught: %s %s", format, reason)
+	}
+	if format, reason, _ = adjudicationPacketBody(s, true, func(selectedOutput) ([]byte, error) { return nil, errors.New("encode failed") }); format != "json" || reason != "toon encode error" {
+		t.Fatalf("encode error not caught: %s %s", format, reason)
+	}
+	// Mixed packets and the JSON repair resend never reach the TOON encoder.
+	env.Packets[1].Claims = nil
+	mixed, err := selectOutput(env.Packets)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reached := false
+	format, reason, body = adjudicationPacketBody(mixed, true, func(s selectedOutput) ([]byte, error) { reached = true; return agentRender(s) })
+	if format != "json" || reason != "packets are not uniformly shaped" || reached || string(body) != string(mixed.json) {
+		t.Fatalf("mixed packets used TOON: %s %s reached=%v", format, reason, reached)
+	}
+	if req, err = formatAdjudicationText(env, "", true); err != nil || req.Format != "json" || !strings.Contains(req.Prompt, "Decision packets (JSON):") {
+		t.Fatalf("mixed request did not use JSON: %+v %v", req.Format, err)
+	}
+	if format, reason, _ = adjudicationPacketBody(s, false, agentRender); format != "json" || reason != "unusable reply" {
+		t.Fatalf("repair resend not JSON: %s %s", format, reason)
+	}
+}
+
+func TestAdjudicationUnusableReplyRetriesOnceAsJSON(t *testing.T) {
+	env := adjudicationPairFixture(t)
+	rr := adjudicationRoleFixture(t, profile{Harness: "claude", Model: "haiku"})
+	b := newRunBudget(defaultAdjudicationLimits(), time.Now())
+	var prompts []string
+	audit := executeAdjudication(rr, b, env, func(_ context.Context, _ profile, req adjudicationRequest) (adjudicationResponse, error) {
+		prompts = append(prompts, req.Prompt)
+		if len(prompts) == 1 {
+			return adjudicationResponse{Text: "not an adjudication reply"}, nil
+		}
+		return adjudicationResponse{Text: adjudicationJSON(t, adjudicationReplyFixture(env))}, nil
+	})
+	if audit.Error != "" || audit.Normalized == nil {
+		t.Fatalf("one unusable reply voided the pass: %+v", audit)
+	}
+	if len(prompts) != 2 || b.Repairs != 1 || b.Requests != 2 {
+		t.Fatalf("retry not exactly once or budget not shared: calls=%d %+v", len(prompts), b)
+	}
+	if !strings.Contains(prompts[0], "Decision packets (TOON):") || !strings.Contains(prompts[1], "Decision packets (JSON):") {
+		t.Fatal("repair did not switch the packet encoding")
+	}
+	if !strings.Contains(prompts[1], "Repair only the invalid response schema/fields") {
+		t.Fatal("repair text missing")
+	}
+	want := []adjudicationPacketFormat{{Format: "toon"}, {Format: "json", Reason: "unusable reply"}}
+	if !reflect.DeepEqual(audit.TextPackets, want) {
+		t.Fatalf("recorded formats %+v want %+v", audit.TextPackets, want)
+	}
+	if len(audit.Execution.Attempts) != 2 || audit.Execution.Attempts[0].Status != "failed" || audit.Execution.Attempts[1].Status != "succeeded" {
+		t.Fatalf("attempt records: %+v", audit.Execution.Attempts)
+	}
+	applyAdjudication(env.Review, audit)
+	if r := ReduceReview(env.Subject, env.Review.Checks, env.Review.Answers, nil, env.Review.Policy); r.State != "pass" {
+		t.Fatalf("repaired reply did not decide the pass: %+v", r)
+	}
+}
+
+func TestAdjudicationTwoUnusableRepliesFail(t *testing.T) {
+	env := adjudicationPairFixture(t)
+	rr := adjudicationRoleFixture(t, profile{Harness: "claude", Model: "haiku"})
+	calls := 0
+	audit := executeAdjudication(rr, newRunBudget(defaultAdjudicationLimits(), time.Now()), env, func(context.Context, profile, adjudicationRequest) (adjudicationResponse, error) {
+		calls++
+		return adjudicationResponse{Text: "still not an adjudication reply"}, nil
+	})
+	if calls != 2 || audit.Error == "" || audit.Normalized != nil || audit.Reason != reviewDependencyUnavailable {
+		t.Fatalf("second failure not executed as before: calls=%d %+v", calls, audit)
+	}
+	if len(audit.TextPackets) != 2 || audit.TextPackets[1].Reason != "unusable reply" {
+		t.Fatalf("recorded formats %+v", audit.TextPackets)
 	}
 }
 
