@@ -465,16 +465,25 @@ ignored files and outside paths are not covered by that check. Gate records,
 reports and compare show `ctx_shell`; missing historical fields display `open`.
 
 `skills/orchestrate/tool/pi_ctx_reminder.ts` is a user-level pi extension (the
-orchestrator installs it under `~/.pi/agent/extensions/`) that appends a
-short reminder to every raw search: a bash `rg`, `grep`, `egrep`, `fgrep`,
-`ag`, `fd`, `find` or `git grep`, including after `cd x &&` or inside a pipe,
-and pi's built-in `grep`, `find` or `ls`. The reminder names the single
-`orch ctx batch` call that replaces several searches. It does not block: the
-search still runs and the reminder joins its result, so the model sees it
-right away. A pi build without the `tool_result` hook instead blocks the first
-search of the session once, then lets every later search through. It stays
-silent when `orch` is not on PATH and inside the ctx-only gate shell. Its
-decision table runs in node: `go test -run 'CtxReminder' .` in `tool`.
+orchestrator installs it under `~/.pi/agent/extensions/`). It carries four
+small deny rules, each a table entry with a name, a matcher and a reason:
+`deny-find-chains` (find `-exec`/`-delete`, and a search tool feeding a grep),
+`deny-sed-inplace` (`sed -i`, `perl -pi`), `deny-cat-head-tail` (one bare
+`cat`, `head`, `tail` or `sed -n` on a file) and `deny-grep-rg` (a plain
+`grep`, `egrep`, `fgrep`, `rg`, `ag` or `git grep` over files or a directory).
+A `tool_call` block names `orch ctx` first when `orch` is on PATH and the
+built-in `edit`, `read` or `grep`/`find` otherwise; the reason is two lines.
+Allowed: a grep or rg filtering another command's output, a read that feeds a
+pipe or a redirect, `tail -f`, several files to `cat`, and plain `find` or
+`fd`. Those last two, and pi's built-in `grep`, `find` and `ls`, which are
+never blocked, keep the appended reminder that names one `orch ctx batch` call.
+A command line blocked once runs on its next attempt and is never blocked
+again. `ORCH_TOOL_GUARD=off` turns the guard off and
+`ORCH_TOOL_GUARD_SKIP=find-chains,sed-inplace,cat-head-tail,grep-rg` disables
+rules by name; the reminder stays either way. A pi build without the
+`tool_result` hook blocks the first search of the session once instead. It
+stays silent inside the ctx-only gate shell. Its decision tables run in node:
+`go test -run 'CtxReminder' .` in `tool`.
 
 Harness verification uses only local mock endpoints, never a paid model:
 
