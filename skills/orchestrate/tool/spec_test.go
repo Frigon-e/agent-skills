@@ -84,7 +84,7 @@ func TestAdaptiveCandidatesAndDeduplicatedBodies(t *testing.T) {
 	if strings.Count(got, "| func Save()") != 1 {
 		t.Fatal(got)
 	}
-	wantContains(t, got, "`p#1`", "`p#2`", "`p#5`", "also supports requirement p#2 (decide independently)", "also supports requirement p#5 (decide independently)", "`x.go:2-3` referenced above or in omissions", `Read path="x.go" offset=2 limit=2`)
+	wantContains(t, got, "`p#1`", "`p#2`", "`p#5`", "also for #2, #5", "also: `x.go:2-3` (listed under #1)")
 }
 
 func TestSpecQueriesParserGenerationAndSelection(t *testing.T) {
@@ -332,7 +332,7 @@ func TestSpecStableItemsPythonAndTypeScriptFixtures(t *testing.T) {
 			}
 			candidate := reuseCand{Path: fixture.path, Start: 1, End: 3, Lines: strings.Split(strings.TrimSpace(fixture.code), "\n"), Total: 3}
 			text := renderChecklist([]itemCands{{Item: items[0], Cands: []reuseCand{candidate}}, {Item: items[1], Cands: []reuseCand{candidate}}}, nil, "")
-			wantContains(t, text, "`api#save`", "`api#validate`", "also supports requirement api#validate (decide independently)", "referenced above or in omissions")
+			wantContains(t, text, "`api#save`", "`api#validate`", "also for #validate", "also: `"+fixture.path+":1-3` (listed under #save)")
 			if strings.Count(text, "| "+strings.Split(fixture.code, "\n")[0]) != 1 {
 				t.Fatalf("shared candidate body must appear once: %s", text)
 			}

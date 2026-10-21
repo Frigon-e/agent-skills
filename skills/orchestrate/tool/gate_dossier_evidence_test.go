@@ -170,7 +170,7 @@ func TestDossierSharedBodyPreservesDistinctRequirementRelationships(t *testing.T
 	d := &ctxBrief{ReuseItems: ics}
 	ds := &dossierSet{e: e, docs: map[string]*ctxBrief{"cli": d}, cands: map[string][]itemCands{"cli": ics}}
 	got := ds.text("cli")
-	wantContains(t, got, "cli#parse", "cli#run", c.EvidenceID, "decide independently")
+	wantContains(t, got, "cli#parse", "cli#run", c.EvidenceID, "also for #run", "also: `lib/cli.py:1` (listed under #parse)")
 	if strings.Count(got, "| def dispatch_command") != 1 {
 		t.Fatalf("body repeated: %s", got)
 	}

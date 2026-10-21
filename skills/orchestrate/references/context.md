@@ -425,10 +425,16 @@ ignore). jbcontext indexes a git revision (`index --revision`, default HEAD), so
   source if the claim needs more evidence. Symbols can be candidates; missing
   servers and reference failures are not evidence of zero callers.
 - No retrieval result alone establishes that a behavior does not exist.
-- The gate's dossier prints one line per distinct lookup failure, with the
-  queries it affected, and shortens machine paths; every lookup still keeps its
-  id, state, count and scope. A failed, unavailable or empty lookup is not
-  evidence of absence.
+- The gate's dossier leads with the scored picture: ranked files and the
+  interface sheet, then the reuse checklist with each candidate shown once
+  (`also for #2, #5` names the other items it serves). It ends with a short
+  "Search notes" block (at most 8 lines): lookup counts by state, one line per
+  distinct failure reason and the names found nowhere. Lookup ids, states, counts
+  and scopes are not in the markdown; `dossier-manifest.json` keeps the complete
+  records and the omission list. It says once that absence of a hit is not proof
+  of absence. When the byte budget cuts something it cuts the notes, then the
+  lowest-scored candidates, then source previews, and says so in one line; a
+  section with nothing to show is left out.
 
 ## Staleness
 
