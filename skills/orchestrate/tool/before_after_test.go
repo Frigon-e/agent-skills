@@ -124,6 +124,7 @@ func beforeAfterGateStatus(t *testing.T, code int, rec map[string]any, before bo
 		}
 		return "BAD: pass"
 	}
+	state, _ = rec["state"].(string)
 	reasons, _ := rec["reasons"].([]any)
 	if code == 0 || state == "pass" || (state != "fail" && len(reasons) == 0) {
 		t.Fatalf("AFTER trusted %s or omitted reasons: exit=%d record=%v", bad, code, rec)
@@ -145,7 +146,7 @@ func beforeAfterGateStatus(t *testing.T, code int, rec map[string]any, before bo
 	if rec["state"] != "incomplete" {
 		t.Fatalf("expected decoded v2 incomplete state for %s: %v", bad, rec["state"])
 	}
-	return "incomplete (legacy " + state + "); reason recorded"
+	return "incomplete; reason recorded"
 }
 
 func TestBeforeAfter(t *testing.T) {
@@ -196,7 +197,11 @@ func TestBeforeAfter(t *testing.T) {
 				h.commitSpec(planHeader + planPkg("api", "kind: ship\nowns: "+path, "") + planTail)
 				h.fakePi(gatePasses(map[string]string{"group": cleanPackageReply}))
 				code, rec := beforeAfterGate(t, h, bin, before)
-				if code != 0 || rec["status"] != "pass" {
+				stateKey := "state"
+				if before {
+					stateKey = "status"
+				}
+				if code != 0 || rec[stateKey] != "pass" {
 					t.Fatalf("approval control failed: %d %v", code, rec)
 				}
 				spec := "spec.md"
