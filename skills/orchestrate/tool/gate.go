@@ -756,7 +756,9 @@ func runPi(repo, model string, p gatePass, sessionDir, cache string) (string, er
 			}
 		}
 	}()
-	args := []string{"-p", "--session-dir", sessionDir, "--no-extensions", "--no-skills"}
+	args := []string{"-p", "--session-dir", sessionDir, "--no-extensions"}
+	args = append(args, piGuardArgs(p)...)
+	args = append(args, "--no-skills")
 	if !p.contextFiles {
 		args = append(args, "--no-context-files")
 	}

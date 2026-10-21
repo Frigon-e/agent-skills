@@ -15,7 +15,10 @@ type CtxCLI struct {
 	// Extension is a pi extension that limits the shell to orch ctx; a pass
 	// loads it only when the ctx-only shell is asked for.
 	Extension string
-	Ready     string // per-invocation acknowledgement from the loaded pi guard
+	// Guard is the tool guard extension (pi_ctx_reminder.ts); an open-shell pi
+	// pass loads it with -e, a ctx-only pass does not (the shell is restricted).
+	Guard string
+	Ready string // per-invocation acknowledgement from the loaded pi guard
 }
 
 const ctxCLINotice = `READ ONLY. Nothing in the repository may be edited, created, deleted, moved or formatted.
@@ -89,6 +92,9 @@ func ctxCLIForExecutable(harness, code, exe string) (CtxCLI, error) {
 	}
 	if harness == "pi" {
 		if cli.Extension, err = writeCtxOnlyExtension(dir); err != nil {
+			return CtxCLI{}, err
+		}
+		if cli.Guard, err = writeCtxReminderExtension(dir); err != nil {
 			return CtxCLI{}, err
 		}
 	}

@@ -805,3 +805,105 @@ func TestGateStalledGroupPassSucceedsOnTheRetry(t *testing.T) {
 		})
 	}
 }
+
+// The tool guard is the code under test in a guarded gate run, so an open-shell pi
+// pass must load the checkout's own copy, in the pane and headless alike. The
+// ctx-only shell restricts commands itself and ctx off has no orch ctx to name.
+func TestGatePiLoadsToolGuardOnlyInOpenShell(t *testing.T) {
+	cases := []struct {
+		name string
+		args []string
+		want bool
+	}{
+		{"open", []string{"--ctx-shell", "open"}, true},
+		{"ctx-only", nil, false},
+		{"ctx-off", []string{"--ctx-tool", "off"}, false},
+	}
+	for _, mode := range []string{"pane", "headless"} {
+		for _, c := range cases {
+			t.Run(mode+"/"+c.name, func(t *testing.T) {
+				h := setup(t)
+				h.gateRepo(1)
+				if mode == "headless" {
+					t.Setenv("HERDR_ENV", "")
+				}
+				t.Setenv("ORCH_TOOL_GUARD_HINT", "pattern")
+				h.sessionPi(gatePasses(nil))
+				h.must(append([]string{"gate", "spec.md"}, c.args...)...)
+				var lines [][]string
+				if mode == "pane" {
+					for _, call := range h.gateCalls("agent", "start") {
+						lines = append(lines, call.Args)
+					}
+				} else {
+					for _, l := range strings.Split(strings.TrimSpace(string(mustRead(t, filepath.Join(h.tmp, "fakepi", "calls.log")))), "\n") {
+						if strings.HasPrefix(l, "-p --session-dir ") { // later lines are prompt text
+							lines = append(lines, strings.Fields(l))
+						}
+					}
+				}
+				if len(lines) == 0 {
+					t.Fatal("no pi starts recorded")
+				}
+				for _, args := range lines {
+					loaded := false
+					for i, a := range args {
+						if a == "-e" && i+1 < len(args) && filepath.Base(args[i+1]) == "orch-ctx-reminder.ts" {
+							loaded = true
+							if !filepath.IsAbs(args[i+1]) || strings.Contains(args[i+1], ".pi/agent/extensions") {
+								t.Errorf("guard path %q is not the binary's own copy", args[i+1])
+							}
+							if !strings.Contains(args[i+1], "cli-") {
+								t.Errorf("guard path %q is not next to the ctx shim", args[i+1])
+							}
+						}
+					}
+					if loaded != c.want {
+						t.Errorf("guard loaded = %v, want %v: %v", loaded, c.want, args)
+					}
+					if !slices.Contains(args, "--no-extensions") {
+						t.Errorf("--no-extensions dropped: %v", args)
+					}
+				}
+				if mode != "pane" {
+					return
+				}
+				exported := false
+				for _, call := range h.gateCalls("pane", "run") {
+					if strings.Contains(strings.Join(call.Args, " "), "export ORCH_TOOL_GUARD_HINT='pattern'") {
+						exported = true
+					}
+				}
+				if exported != c.want {
+					t.Errorf("guard env exported to the pane = %v, want %v", exported, c.want)
+				}
+			})
+		}
+	}
+}
+
+// A headless pi inherits orch's environment; a pane's pi gets the knobs through
+// paneAgentEnv. Both read them from the pass's CtxCLI env.
+func TestGuardKnobsReachBothPiPaths(t *testing.T) {
+	h := setup(t)
+	t.Setenv("ORCH_TOOL_GUARD", "off")
+	t.Setenv("ORCH_TOOL_GUARD_SKIP", "find")
+	t.Setenv("ORCH_TOOL_GUARD_HINT", "")
+	p, err := gateAgentPass(h.repo, "pi", gatePass{name: "a", shared: "s", task: "t", prompt: "st", ctxTool: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	env := agentEnv(piEnv(""), p.cli.Env)
+	for _, want := range []string{"ORCH_TOOL_GUARD=off", "ORCH_TOOL_GUARD_SKIP=find", "ORCH_TOOL_GUARD_HINT="} {
+		if !slices.Contains(env, want) || !slices.Contains(p.cli.Env, want) {
+			t.Errorf("%s missing from the pass env", want)
+		}
+	}
+	only, err := gateAgentPass(h.repo, "pi", gatePass{name: "a", shared: "s", task: "t", prompt: "st", ctxTool: true, ctxOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(guardEnv(only.cli.Env)) != 0 {
+		t.Errorf("ctx-only pass exports guard env: %v", only.cli.Env)
+	}
+}

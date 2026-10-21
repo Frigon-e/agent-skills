@@ -219,6 +219,7 @@ func runPaneChoice(pane *string, repo string, choice profile, gdir string, p gat
 	if f := expandHome(gatePiExtension); fileExists(f) {
 		args = append(args, "-e", f)
 	}
+	args = append(args, piGuardArgs(p)...)
 	args = append(args, "--no-skills")
 	if !p.contextFiles {
 		args = append(args, "--no-context-files")
