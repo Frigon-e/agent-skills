@@ -471,24 +471,28 @@ func TestGateTimedOutPassGetsCtrlCAndDoesNotStallTheOthers(t *testing.T) {
 	gdir := h.gateRepo(3)
 	h.sessionPi(gatePasses(nil))
 	os.WriteFile(filepath.Join(h.tmp, "fakepi", "adv-a.sleep"), nil, 0o644)
+	// The cap covers a whole pass (setup, pane start, fake pi), which is slow
+	// under -race on a busy machine. It must leave the two passes that answer
+	// room to finish, so only the sleeping pass can hit it.
 	old := gateTimeout
-	gateTimeout = 3 * time.Second
+	gateTimeout = 12 * time.Second
 	t.Cleanup(func() { gateTimeout = old })
+	const wantTimeout = "timed out after 12s"
 
 	start := time.Now()
 	code, out := h.run("gate", "spec.md")
 	if code != 1 {
 		t.Fatalf("exit %d: %s", code, out)
 	}
-	if time.Since(start) > 20*time.Second {
-		t.Fatalf("gate took %s with a 3s pass timeout", time.Since(start))
+	if time.Since(start) > gateTimeout+20*time.Second {
+		t.Fatalf("gate took %s with a %s pass timeout", time.Since(start), gateTimeout)
 	}
 	view := wantGateState(t, out, "incomplete")
-	if view.PassErrors["adversary-a"] != "timed out after 3s" {
+	if view.PassErrors["adversary-a"] != wantTimeout {
 		t.Fatalf("wrong public timeout diagnostic: %+v", view.PassErrors)
 	}
 	failure := readRecord(t, gdir).PassErrors["adversary-a"]
-	if failure != "timed out after 3s" {
+	if failure != wantTimeout {
 		t.Fatalf("recorded timeout = %q, want clear wall-cap diagnostic", failure)
 	}
 	t.Logf("timeout diagnostic: %s", failure)
