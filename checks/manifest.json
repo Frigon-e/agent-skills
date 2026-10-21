@@ -46,6 +46,7 @@
   "cache_settings": {"mode":"both", "settings":"Fresh sessions for every trial. Trial 1 and 2 use the same prefix to observe possible cache reuse; request short retention, record actual cache counters. No claim of cold/warm separation without provider evidence. No cache-warming calls."},
   "mode":"shadow",
   "paid":true,
+  "execution_state": {"state":"stopped_pending_resume", "paid_provider_requests":1, "measured_total_usd":"0.00273309", "charge_reconciled":true, "dispatch_guard_still_stopped":true, "run":"E2-fixture-hybrid-t1", "generation_id":"gen-1792561488-D1OVkrrTAgUi7MvlBq2j", "cost_evidence":"key usage delta, generation.total_cost and raw response usage.cost agree exactly", "outcome":"finish_reason length; invalid structured JSON; 0/8 valid case coverage", "authority":"orchestrator message003 permits free reconciliation only and forbids further paid calls until explicit resume"},
   "approval": {"state":"approved_subject_to_transport_preflight", "decision_key":"manifest", "required_before_any_paid_request":true, "evidence":"orchestrator inbox message001, re manifest, 2026-10-20T21:30:25-07:00, approves both experiments with fake-transport cap preflight, no production changes, ledger and stop rules", "approved_preregistration_commit":"ad87a52d569d4baf7eaa848fcaa55a64da37b050"},
   "experiments": [
     {

@@ -2,13 +2,13 @@
 
 ## Status
 
-The orchestrator approved both experiments in inbox message001, then approved a revised full-output account guard in message002 (`re: cost-bound`). The original pre-registration is commit `ad87a52d569d4baf7eaa848fcaa55a64da37b050`. No paid model request has started. The no-spend output-cap probe now passes for both routes, and the durable account guard passes 11 tests. Frozen packet checks and the amended pre-registration must complete before paid execution.
+The orchestrator approved both experiments in inbox message001 and the full-output account guard in message002. Amended pre-registration and frozen input hashes were committed at `27f1411864d975fc6f422099f06ebe562e893d09` before the first paid call. One fixed-packet request has run. Its charge is now reconciled at **$0.00273309**. The guard stopped on billing-settlement uncertainty and remains stopped under message003 pending an explicit `resume` decision. No second paid request has started.
 
 - Branch: `orch/paid-experiments`.
 - Code baseline: `8a062d2c2f8d15c0916e9bd87ba6cc58378e7c1b`.
 - Manifest: [`checks/manifest.json`](checks/manifest.json).
-- Paid ledger: [`checks/ledger.jsonl`](checks/ledger.jsonl), currently empty.
-- Verified experiment spend so far: **$0.00**. No gate, shadow, adjudicator, classifier, decision API, model scout, or model-based web-search call was made.
+- Paid ledger: [`checks/ledger.jsonl`](checks/ledger.jsonl), with the original pending-cost event and a linked measured reconciliation event.
+- Verified experiment spend so far: **$0.00273309**, one fixed-packet Flash request. No paid gate, shadow, adjudicator, classifier, decision API, model scout or model-based web-search call was made.
 - Estimated planned spend: **$1.04**. This is a planning estimate, not measured cost.
 - Sum of per-run anomaly thresholds: **$3.36** across 28 planned runs. Under approved message002, this is not a hard total spend bound.
 - Absolute user cap: **$5.00**, including failed calls and repairs. Admission cutoff: $4.50. Stop starting experiments at $4.00.
@@ -111,13 +111,39 @@ Independent no-spend manifest checks passed:
 
 Successful manifest validation grants neither spending authority nor a default change.
 
+## First paid run and billing reconciliation
+
+`E2-fixture-hybrid-t1` made one request to the approved Flash alias. Generation ID: `gen-1792561488-D1OVkrrTAgUi7MvlBq2j`. The provider was Relace; the generation endpoint identifies the served model as `deepseek/deepseek-v4.1-flash-20261017`. The response's alias is `deepseek/deepseek-v4.1-flash-1017`.
+
+The guard did not reconcile account and response costs during its short post-response wait. It retained the full **$0.54525932** reservation and stopped all further dispatch. The ledger recorded `cost: null`, not zero. Message003 authorized free billing reconciliation only and forbids any resume without another instruction.
+
+At 2026-10-21T05:51:34.547613Z, the free billing evidence agreed exactly:
+
+| Evidence | USD |
+|---|---:|
+| Key usage after | 20.566618352 |
+| Key usage before | 20.563885262 |
+| Measured experiment delta | **0.002733090** |
+| Recorded generation `total_cost` | **0.00273309** |
+| Raw response `usage.cost` | **0.00273309** |
+
+The initial cost field was present, and the final values agree without a rounding difference. This supports **account-settlement lag** as the cause. The initial per-poll values were not journaled, so the exact lag and whether an early poll showed zero or a partial delta remain unknown. That is an accounting-instrumentation gap, not permission to label the run free.
+
+Recommended temporary guard change before resume: persist each free billing poll and timestamp, fetch the recorded generation's cost and allow up to 60 seconds for reconciliation. Require exact raw-response/generation-cost agreement. If aggregate key usage is stale, label that lag and use the verified per-generation charge as the explicit fallback, never a fabricated key delta. Retain the full reservation until the generation/response pair reconciles. Preserve cumulative measured charges across calls, still read key usage before every request, and stop on an unexplained excess over the verified generation sum. Check the final overall key delta once it settles. Any unresolved cost disagreement retains the full bound and stops again. The verified first-run reconciliation is appended to the ledger; the durable dispatch guard remains stopped pending the orchestrator's explicit instruction.
+
+The upstream reply also hit **`finish_reason: length`**. It contains 1,266 visible characters and is not valid JSON. No full structured case reply can be accepted: valid and supported case coverage are **0/8**. This is an incomplete experimental result, not a supported blocker or a format winner. No model repair or replacement trial was run.
+
+Measured complete-command latency was **35.230 seconds**. The provider reports 29.576 seconds generation time and 0.373 seconds latency; those are separate provider measurements, not substitutes for complete workflow latency. The response reports 9,787 prompt tokens, 4,096 completion tokens and 4,536 reasoning tokens. The reasoning count exceeds the completion count, so the split is inconsistent and must not be summed or repaired by inference. The verified dollar charge remains known.
+
+One truncated reply cannot establish false-approval, false-blocker, absence, reuse or support-quality rates. There were no accepted complete decisions; conditional accuracy and cost per supported correct decision are undefined. The 4,096-token response constraint failed to produce a usable eight-case reply in this trial. Keeping or amending that constraint requires an explicit `resume` decision, not silent tuning of the held-out matrix. Current defaults remain unchanged.
+
 ## Results and recommendations
 
 | Experiment | Result | Current recommendation |
 |---|---|---|
-| E2 format packets | Not run; approval and safe transport pending | Keep current TOON direction; no representation winner claimed |
-| E6 route smoke | Not run; approval and safe transport pending | Keep current default Flash route; no independence claim |
+| E2 format packets | One truncated/invalid first reply, 0/8 valid case coverage; $0.00273309; study stopped pending resume | Keep current TOON direction; no representation winner claimed |
+| E6 route smoke | No paid run; temporary fixture dry-run format correction is under verification | Keep current default Flash route; no independence claim |
 | E3 excerpts, E4 prefixes, E5 adjudication | Deferred | Keep current excerpt/prefix behavior and adjudication disabled |
 | Question classifier | Outside the selected experiments | Keep current classifier defaults; no promotion |
 
-Ledger total: **$0.00**. No paid evidence exists yet.
+Verified ledger total: **$0.00273309**. The original unknown-cost event is resolved by its linked reconciliation event, not counted twice. The full-bound guard remains stopped pending the `resume` decision. No additional budget is requested.
