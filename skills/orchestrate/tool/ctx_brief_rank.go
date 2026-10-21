@@ -135,7 +135,7 @@ func (e *ctxEnv) chunkSnippet(lines []string) []string {
 }
 
 func (e *ctxEnv) assemble(pl *briefPlan) *ctxBrief {
-	d := &ctxBrief{ID: pl.in.ID, Lookups: append([]evidenceLookup{}, pl.lookups...)}
+	d := &ctxBrief{ID: pl.in.ID, root: e.Code, Lookups: append([]evidenceLookup{}, pl.lookups...)}
 	sort.Slice(d.Lookups, func(i, j int) bool { return d.Lookups[i].ID < d.Lookups[j].ID })
 	owns := pl.in.Owns
 	files := map[string]*fileEv{}

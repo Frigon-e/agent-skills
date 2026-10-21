@@ -351,6 +351,7 @@ type briefNativeLike struct {
 
 type ctxBrief struct {
 	// Render-only views keep legacy --json Sheet/Like/LikeRows unchanged.
+	root                              string
 	interfaceSummary                  []string
 	nativeLike                        map[string]briefNativeLike
 	plannedShown                      map[string][]string
@@ -445,11 +446,39 @@ func (d *ctxBrief) Render(heading, noun string, total int) string {
 	add := func(text string) { entries = append(entries, entry{text: text + "\n"}) }
 	add(heading)
 	add("### Observations (bounded tool results, not semantic proof)")
+	// Failures are grouped once per reason, and the exclusions sentence is
+	// printed once, so a missing backend costs one line per distinct failure
+	// instead of one long line per query.
+	exclusionsShown, absenceShown := false, false
+	lookupNotes := func(lks []evidenceLookup) {
+		if len(lks) == 0 {
+			return
+		}
+		if !exclusionsShown {
+			if line := lookupExclusionsLine(lks); line != "" {
+				add(line)
+				exclusionsShown = true
+			}
+		}
+		if !absenceShown && lookupUncertainAny(lks) {
+			add(lookupAbsenceLine)
+			absenceShown = true
+		}
+	}
+	lookupNotes(d.Lookups)
+	if reasons := lookupReasonGroups(d.Lookups, d.root); reasons != "" {
+		add(reasons)
+	}
 	for _, lk := range d.Lookups {
-		add(lookupObservation(lk))
+		add(lookupLine(lk, d.root))
 	}
 	add("### Candidates (unverified)")
 	add("### 3a. Reuse checklist (each requirement remains a separate decision)")
+	var reuseLookups []evidenceLookup
+	for _, ic := range d.ReuseItems {
+		reuseLookups = append(reuseLookups, ic.Lookups...)
+	}
+	lookupNotes(reuseLookups)
 	seen := map[string]bool{}
 	for ri, ic := range d.ReuseItems {
 		if ri == itemPageMain {
@@ -457,7 +486,7 @@ func (d *ctxBrief) Render(heading, noun string, total int) string {
 		}
 		cs := ic.Cands
 		ic.Cands = nil
-		meta := itemText(ic, false)
+		meta := itemText(ic, false, d.root)
 		if len(cs) > 0 {
 			meta = strings.ReplaceAll(meta, "  (unresolved: requested search did not complete; no negative conclusion)\n", "")
 			meta = strings.ReplaceAll(meta, "  (completed search: no eligible candidates in the searched scope; not proof of absence)\n", "")
@@ -535,6 +564,20 @@ func (d *ctxBrief) Render(heading, noun string, total int) string {
 	}
 	if d.Planned != nil {
 		add("### 5. Lookups the planner asked for")
+		byID := map[string]evidenceLookup{}
+		for _, l := range d.Lookups {
+			byID[l.ID] = l
+		}
+		planned := make([]evidenceLookup, 0, len(d.PlannedIDs))
+		for _, id := range d.PlannedIDs {
+			if l, ok := byID[id]; ok {
+				planned = append(planned, l)
+			}
+		}
+		lookupNotes(planned)
+		if reasons := lookupReasonGroups(planned, d.root); reasons != "" {
+			add(reasons)
+		}
 		for i, text := range d.Planned {
 			id := "entry-" + subjectDigest([]byte(text))[:20]
 			if i < len(d.PlannedIDs) {

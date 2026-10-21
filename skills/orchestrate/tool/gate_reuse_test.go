@@ -203,7 +203,7 @@ func bigCands(n int) []itemCands {
 }
 
 func TestChecklistIsCappedPagedAndSaysWhatWasCut(t *testing.T) {
-	small := renderChecklist(bigCands(2), nil)
+	small := renderChecklist(bigCands(2), nil, "")
 	wantContains(t, small, "- `p#1` item 1", "1. `x/f1_1.go:1-90`", "func Fn", "| (50 more lines) omitted evidence-")
 	if strings.Contains(small, "cut:") || strings.Contains(small, "More items") {
 		t.Errorf("a small checklist was cut:\n%s", small)
@@ -212,7 +212,7 @@ func TestChecklistIsCappedPagedAndSaysWhatWasCut(t *testing.T) {
 	if strings.Count(small, "| \tline") != 2*3*reuseShowLines {
 		t.Errorf("long bodies show %d lines", strings.Count(small, "| \tline"))
 	}
-	big := renderChecklist(bigCands(20), nil)
+	big := renderChecklist(bigCands(20), nil, "")
 	wantContains(t, big, reuseMoreNotice, "- `p#13` item 13", "Recorded omissions")
 	if i := strings.Index(big, reuseMoreNotice); i < 0 || strings.Index(big, "`p#12`") > i || strings.Index(big, "`p#13`") < i {
 		t.Error("items 13 and later must come after the notice")
@@ -220,7 +220,7 @@ func TestChecklistIsCappedPagedAndSaysWhatWasCut(t *testing.T) {
 	if len(big) > dossierTotal {
 		t.Errorf("checklist is %d bytes, past its single overall budget", len(big))
 	}
-	only := renderChecklist(bigCands(5), map[string]bool{"p#2": true})
+	only := renderChecklist(bigCands(5), map[string]bool{"p#2": true}, "")
 	if strings.Contains(only, "`p#1`") || !strings.Contains(only, "`p#2`") {
 		t.Errorf("restricting to an item:\n%s", only)
 	}

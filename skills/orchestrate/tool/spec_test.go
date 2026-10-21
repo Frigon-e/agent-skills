@@ -80,7 +80,7 @@ func TestAdaptiveCandidatesAndDeduplicatedBodies(t *testing.T) {
 	}
 	c := reuseCand{Path: "x.go", Start: 2, End: 3, Lines: []string{"func Save() {", "}"}, Total: 2}
 	ics := []itemCands{{Item: gateItem{ID: "p#1", Text: "one"}, Cands: []reuseCand{c}}, {Item: gateItem{ID: "p#2", Text: "two"}, Cands: []reuseCand{c}}, {Item: gateItem{ID: "p#5", Text: "five"}, Cands: []reuseCand{c}}}
-	got := renderChecklist(ics, nil)
+	got := renderChecklist(ics, nil, "")
 	if strings.Count(got, "| func Save()") != 1 {
 		t.Fatal(got)
 	}
@@ -331,7 +331,7 @@ func TestSpecStableItemsPythonAndTypeScriptFixtures(t *testing.T) {
 				t.Fatal("wrong class qualified method accepted")
 			}
 			candidate := reuseCand{Path: fixture.path, Start: 1, End: 3, Lines: strings.Split(strings.TrimSpace(fixture.code), "\n"), Total: 3}
-			text := renderChecklist([]itemCands{{Item: items[0], Cands: []reuseCand{candidate}}, {Item: items[1], Cands: []reuseCand{candidate}}}, nil)
+			text := renderChecklist([]itemCands{{Item: items[0], Cands: []reuseCand{candidate}}, {Item: items[1], Cands: []reuseCand{candidate}}}, nil, "")
 			wantContains(t, text, "`api#save`", "`api#validate`", "also supports requirement api#validate (decide independently)", "referenced above or in omissions")
 			if strings.Count(text, "| "+strings.Split(fixture.code, "\n")[0]) != 1 {
 				t.Fatalf("shared candidate body must appear once: %s", text)

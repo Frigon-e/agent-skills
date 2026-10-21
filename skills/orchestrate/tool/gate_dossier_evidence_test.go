@@ -123,13 +123,13 @@ func TestDossierLookupExecutionStatesAreDistinct(t *testing.T) {
 	}{
 		{"failed", dossierLookup("dispatch", "cli", "concept", 0, 4, fmt.Errorf("index unavailable"), ""), "failed status=failed"},
 		{"empty", dossierLookup("dispatch", "cli", "text", 0, 0, nil, ""), "succeeded status=empty"},
-		{"unavailable", dossierLookup("dispatch", "cli", "concept", 0, 4, nil, "backend missing"), "unavailable status="},
+		{"unavailable", dossierLookup("dispatch", "cli", "concept", 0, 4, nil, "backend missing"), "unavailable completeness=unknown"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if err := tc.lk.Validate(evidenceEnvelope{Completeness: evidenceUnknown}); err != nil {
 				t.Fatal(err)
 			}
-			got := itemText(itemCands{Item: gateItem{ID: "cli#dispatch"}, Queries: []string{"dispatch"}, Lookups: []evidenceLookup{tc.lk}}, false)
+			got := itemText(itemCands{Item: gateItem{ID: "cli#dispatch"}, Queries: []string{"dispatch"}, Lookups: []evidenceLookup{tc.lk}}, false, "")
 			wantContains(t, got, tc.want, "scope=cli")
 		})
 	}
@@ -338,7 +338,7 @@ func TestGateDossierCLIHasUsefulPythonAndTypeScriptContextWithoutFormatterCalls(
 }
 
 func TestDossierZeroQueriesNotCompletedEmpty(t *testing.T) {
-	got := itemText(itemCands{Item: gateItem{ID: "cli#dispatch", Text: "Dispatch the selected command"}}, true)
+	got := itemText(itemCands{Item: gateItem{ID: "cli#dispatch", Text: "Dispatch the selected command"}}, true, "")
 	if !strings.Contains(got, "not_requested") || strings.Contains(got, "no candidates found by code") {
 		t.Fatalf("zero-query item claims search: %s", got)
 	}

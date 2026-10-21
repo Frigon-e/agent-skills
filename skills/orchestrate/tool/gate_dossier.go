@@ -61,7 +61,7 @@ func (d *dossierSet) build(ids []string) {
 		if len(items) > 0 {
 			d.cands[in.ID] = d.e.reuseCandidates(items, p.owns, p.title)
 			d.docs[in.ID].ReuseItems = d.cands[in.ID]
-			d.docs[in.ID].Reuse = renderChecklist(d.cands[in.ID], nil)
+			d.docs[in.ID].Reuse = renderChecklist(d.cands[in.ID], nil, d.e.Code)
 		}
 		d.docs[in.ID].Foreign = d.foreign(p)
 	}
@@ -99,7 +99,7 @@ func (d *dossierSet) checklistFor(items []gateItem) string {
 			continue
 		}
 		seen[it.Package] = true
-		if t := renderChecklist(d.cands[it.Package], only); t != "" {
+		if t := renderChecklist(d.cands[it.Package], only, d.e.Code); t != "" {
 			b.WriteString("Package " + it.Package + ":\n" + t)
 		}
 	}
@@ -319,13 +319,19 @@ func (s *dossierSet) runLookups(ids []string, lks []lookup) {
 				if lk.Kind == "read" {
 					what = fmt.Sprintf("%s:%d-%d", lk.Path, lk.From, lk.To)
 				}
-				d.Planned = append(d.Planned, fmt.Sprintf("- [%s] `%s` - %s\n%s\n%s", lk.Kind, what, lk.Why, lookupObservation(l), out.String()))
+				d.Planned = append(d.Planned, plannedEntry(s.e.Code, lk.Kind, what, lk.Why, l, out.String()))
 			}
 		}
 		if len(d.Planned) == 0 {
 			d.Planned = append(d.Planned, "(the planner asked for nothing for this package)")
 		}
 	}
+}
+
+// plannedEntry is one section 5 entry: the planner's request, the compact
+// observation of its lookup, then the lookup output.
+func plannedEntry(root, kind, what, why string, l evidenceLookup, out string) string {
+	return fmt.Sprintf("- [%s] `%s` - %s\n%s\n%s", kind, what, why, lookupLine(l, root), out)
 }
 
 // ctxLookup contains only JSON value types. Keep the original selectors, not
@@ -597,20 +603,170 @@ func dossierTextLookup(query, scope string, r rgResult, err error) evidenceLooku
 	return l
 }
 
-func lookupObservation(l evidenceLookup) string {
+// lookupExclusionsLine states once what the rendered lookups exclude. The
+// per-lookup lines no longer repeat it.
+func lookupExclusionsLine(lks []evidenceLookup) string {
+	var all []string
+	seen := map[string]bool{}
+	for _, l := range lks {
+		for _, e := range l.Exclusions {
+			if e != "" && !seen[e] {
+				seen[e] = true
+				all = append(all, e)
+			}
+		}
+	}
+	if len(all) == 0 {
+		return ""
+	}
+	return "exclusions: " + strings.Join(all, "; ")
+}
+
+// lookupAbsenceLine says what an incomplete lookup is not. A search that did
+// not run is not a finding about the code.
+const lookupAbsenceLine = "A failed, unavailable or empty lookup is not evidence of absence."
+
+var (
+	failureTemp    = regexp.MustCompile(`(^|[\s:(])(?:/private)?/(?:var/folders/[^/\s]+/[^/\s]+/T|tmp)`)
+	failureMissing = regexp.MustCompile(`\S*/([^\s/]+?)(?: was)? not found`)
+	failureKnown   = []struct {
+		re *regexp.Regexp
+		to string
+	}{
+		{regexp.MustCompile(`^(?:<repo>|<tmp>|~): `), ""},
+		{regexp.MustCompile(`^no TypeScript facts: `), ""},
+		{regexp.MustCompile(`no native TypeScript 7 server found(?: \([^)]*node_modules[^)]*\))?`), "typescript@7 server not found"},
+		{regexp.MustCompile(`; set (ORCH_[A-Z0-9_]+) to one`), " (set $1)"},
+	}
+)
+
+// lookupLine is the compact one-line observation of one lookup: its id,
+// execution and completeness state, count and count kind, query and scope.
+// Empty fields are dropped and machine-specific paths are shortened.
+func lookupLine(l evidenceLookup, root string) string {
 	count := "unknown"
 	if l.Counts.Total != nil {
 		count = fmt.Sprint(*l.Counts.Total)
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "  observation %s: %s status=%s completeness=%s count=%s (%s) query=%q scope=%s exclusions=%s", l.ID, l.ExecutionStatus, l.Status, l.Completeness, count, l.CountKind, l.Query, l.Scope, strings.Join(l.Exclusions, ", "))
-	for _, err := range l.Errors {
-		fmt.Fprintf(&b, "\n    search failure: %s", err)
+	fmt.Fprintf(&b, "  observation %s: %s", l.ID, l.ExecutionStatus)
+	if l.Status != "" {
+		fmt.Fprintf(&b, " status=%s", l.Status)
 	}
+	fmt.Fprintf(&b, " completeness=%s count=%s (%s)", l.Completeness, count, l.CountKind)
+	if l.Query != "" {
+		fmt.Fprintf(&b, " query=%q", l.Query)
+	}
+	fmt.Fprintf(&b, " scope=%s", shortScope(l.Scope, root))
 	for _, om := range l.Omissions {
-		fmt.Fprintf(&b, "\n    unresolved: %s", om)
+		fmt.Fprintf(&b, "\n    unresolved: %s", shortPathText(om, root))
 	}
 	return b.String()
+}
+
+// lookupReasonGroups names each distinct failure reason once, with the queries
+// of the lookups it affected. Reasons are compared after path normalisation, so
+// one missing backend is one line instead of one line per query.
+func lookupReasonGroups(lks []evidenceLookup, root string) string {
+	type failureGroup struct {
+		status, reason string
+		queries        []string
+	}
+	var groups []*failureGroup
+	byReason := map[string]*failureGroup{}
+	for _, l := range lks {
+		if len(l.Errors) == 0 {
+			continue
+		}
+		reason := shortFailure(strings.Join(l.Errors, "; "), root)
+		key := string(l.ExecutionStatus) + "\x00" + reason
+		g := byReason[key]
+		if g == nil {
+			g = &failureGroup{status: string(l.ExecutionStatus), reason: reason}
+			byReason[key] = g
+			groups = append(groups, g)
+		}
+		g.queries = append(g.queries, l.Query)
+	}
+	lines := make([]string, 0, len(groups))
+	for _, g := range groups {
+		noun := "lookups"
+		if len(g.queries) == 1 {
+			noun = "lookup"
+		}
+		line := fmt.Sprintf("%d %s %s: %s", len(g.queries), noun, g.status, g.reason)
+		if len(g.queries) > 0 {
+			quoted := make([]string, 0, len(g.queries))
+			for _, q := range g.queries {
+				quoted = append(quoted, fmt.Sprintf("%q", q))
+			}
+			line += "; affected queries: " + strings.Join(quoted, ", ")
+		}
+		lines = append(lines, line)
+	}
+	return strings.Join(lines, "\n")
+}
+
+// lookupUncertain reports whether a lookup's state leaves absence unproven.
+func lookupUncertain(l evidenceLookup) bool {
+	return l.ExecutionStatus != lookupSucceeded || l.Status == "empty" || l.Status == "partial" || len(l.Errors) > 0
+}
+
+func lookupUncertainAny(lks []evidenceLookup) bool {
+	for _, l := range lks {
+		if lookupUncertain(l) {
+			return true
+		}
+	}
+	return false
+}
+
+// shortScope renders a scope selector in short form: the path of a JSON
+// selector, or the path itself, without the machine-specific prefix.
+func shortScope(scope, root string) string {
+	s := strings.TrimSpace(scope)
+	if strings.HasPrefix(s, "{") {
+		var v struct {
+			Path        *string         `json:"path"`
+			ProjectRoot *string         `json:"project_root"`
+			Lookup      json.RawMessage `json:"lookup"`
+		}
+		if json.Unmarshal([]byte(s), &v) == nil && (v.Path != nil || v.ProjectRoot != nil || v.Lookup != nil) {
+			s = "."
+			if v.Path != nil && *v.Path != "" {
+				s = *v.Path
+			} else if v.ProjectRoot != nil && *v.ProjectRoot != "" {
+				s = *v.ProjectRoot
+			}
+		}
+	}
+	if s == "" {
+		s = "."
+	}
+	return shortPathText(s, root)
+}
+
+// shortFailure renders a backend failure without the paths that only say where
+// this checkout or its tools happen to live.
+func shortFailure(msg, root string) string {
+	s := failureMissing.ReplaceAllString(strings.TrimSpace(msg), "$1 not found")
+	s = shortPathText(s, root)
+	for _, rw := range failureKnown {
+		s = rw.re.ReplaceAllString(s, rw.to)
+	}
+	return short(strings.Join(strings.Fields(s), " "), 200)
+}
+
+// shortPathText replaces the checkout root, a home prefix and a temp prefix, so
+// the same path renders the same way on any machine.
+func shortPathText(s, root string) string {
+	if root != "" {
+		s = strings.ReplaceAll(s, root, "<repo>")
+	}
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		s = strings.ReplaceAll(s, home, "~")
+	}
+	return failureTemp.ReplaceAllString(s, "$1<tmp>")
 }
 
 func dossierSource(e *ctxEnv, path string, start, end int) evidenceRecord {
