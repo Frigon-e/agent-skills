@@ -586,8 +586,9 @@ Read-only mode never honors trust: it skips project `LocalDirs` (such as
 `node_modules/.bin` and `.venv/bin`) and does not select a TypeScript server
 from the checkout's pnpm store. It uses only env overrides or PATH servers
 whose real binary is outside the checkout, otherwise the declaration/rg tier.
-TypeScript PATH discovery uses `tsgo`; a native server named `tsc` needs an
-explicit `ORCH_TSLS` override because generic `tsc` is usually not an LSP.
+TypeScript PATH discovery uses `tsgo`, or a `tsc` whose `--version` reports 7
+or newer (checked once per process); a `tsc` of 5 or 6 is the JavaScript
+compiler and is ignored.
 A skipped TypeScript server adds the note `ts server in the repo not run in
 read-only mode`, once per response.
 

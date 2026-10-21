@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
@@ -565,10 +566,19 @@ func tsServerChoice(code string) (string, string) {
 	} else if ctxLocalTSExists(code) {
 		why = ctxServerSkip("ts")
 	}
-	// Generic tsc on PATH is usually the JavaScript compiler, not an LSP.
-	// Native tsc binaries can be selected explicitly with ORCH_TSLS.
-	if p, err := exec.LookPath("tsgo"); err == nil {
+	// Generic tsc on PATH is usually the JavaScript compiler, not an LSP, so
+	// tsc is accepted only when it reports TypeScript 7 or newer.
+	for _, name := range []string{"tsgo", "tsc"} {
+		p, err := exec.LookPath(name)
+		if err != nil || (name == "tsc" && !tscIsNative(p)) {
+			continue
+		}
 		if real, err := ctxServerBinary(code, p); err == nil {
+			if name == "tsc" {
+				// A shim such as vite-plus `vp` acts as tsc only under that
+				// name, so launch the PATH entry, not its resolved target.
+				return p, why
+			}
 			return real, why
 		}
 		if ctxPathInRoot(code, p) {
@@ -576,6 +586,31 @@ func tsServerChoice(code string) (string, string) {
 		}
 	}
 	return "", why
+}
+
+var tscVersionRe = regexp.MustCompile(`(?m)^Version (\d+)\.`)
+
+// tscNativeCache holds the version answer per binary path, so the check runs
+// once per process.
+var tscNativeCache sync.Map
+
+// tscIsNative reports whether the tsc at path is TypeScript 7 or newer, the
+// native server, and not the JavaScript compiler of 5 or 6.
+func tscIsNative(path string) bool {
+	if v, ok := tscNativeCache.Load(path); ok {
+		return v.(bool)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	native := false
+	if out, err := exec.CommandContext(ctx, path, "--version").Output(); err == nil {
+		if m := tscVersionRe.FindSubmatch(out); m != nil {
+			n, _ := strconv.Atoi(string(m[1]))
+			native = n >= 7
+		}
+	}
+	tscNativeCache.Store(path, native)
+	return native
 }
 
 // Presence checks are only for the skip note, never execution candidates.
@@ -626,7 +661,7 @@ func runTSServer(jobs []tsJob, facts map[tsJob]*symFact, cacheDir, code string, 
 		return why
 	}
 	if bin == "" {
-		return "no TypeScript facts: no native TypeScript 7 server found (typescript@7 in a node_modules/.pnpm store); set ORCH_TSLS to one"
+		return "no TypeScript facts: no native TypeScript 7 server found (typescript@7 in a node_modules/.pnpm store, or a TypeScript 7 tsc on PATH, is found automatically); set ORCH_TSLS to one"
 	}
 	if _, err := exec.LookPath(bin); err != nil {
 		return "no TypeScript facts: " + bin + " was not found"
