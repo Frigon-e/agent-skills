@@ -1,0 +1,129 @@
+{
+  "schema_version": 1,
+  "baseline": "orchestrate 8a062d2c2f8d15c0916e9bd87ba6cc58378e7c1b; current production code, not the old broken branch; pi OpenRouter ~deepseek/deepseek-flash-latest; dossier=code, ctx-tool=on, context-files=off, ctx-shell=open, ctx-profile=default, shadow=off; optional adjudicator and question classifier explicitly disabled in private experiment config",
+  "held_out_cases": [
+    {"id":"go-conflict", "subject":"8a062d2:skills/orchestrate/tool/testdata/fixtures/go/parser/parser.go; key: reuse Normalize for trim without case conversion; contradictory supported reuse/new claims must remain unresolved", "category":"contradictory_judgments"},
+    {"id":"go-insufficient", "subject":"8a062d2:skills/orchestrate/tool/testdata/fixtures/go/parser/parser.go; key: signature-only evidence cannot establish lowercasing or complete absence", "category":"insufficient_evidence"},
+    {"id":"go-owner", "subject":"8a062d2:skills/orchestrate/tool/testdata/fixtures/go/parser/parser.go; key: file-name case policy belongs to owner, no model delegation", "category":"authority_boundaries"},
+    {"id":"go-provider", "subject":"8a062d2:skills/orchestrate/tool/testdata/fixtures/go/parser/parser.go; key: failed backend plus zero displayed hits is unknown, not proof of new behavior", "category":"provider_failures"},
+    {"id":"py-partial", "subject":"8a062d2:skills/orchestrate/tool/testdata/fixtures/py/parser/reader.py; key: trim and lowercase requires extension because current body only trims", "category":"insufficient_evidence"},
+    {"id":"ts-complete", "subject":"8a062d2:skills/orchestrate/tool/testdata/fixtures/ts/parser/reader.ts; key: exact trim-without-case-change behavior is reuse, not new", "category":"contradictory_judgments"},
+    {"id":"go-wrong-name", "subject":"8a062d2:skills/orchestrate/tool/testdata/fixtures/go/other/parser.go; key: same-name identity implementation cannot satisfy trim behavior", "category":"insufficient_evidence"},
+    {"id":"go-new-control", "subject":"8a062d2:skills/orchestrate/tool/testdata/fixtures/go; key: a new requested checksum behavior needs successful exact full-scope lookup coverage before a new judgment is supported", "category":"provider_failures"},
+    {"id":"crm-render-seam", "subject":"crm commit a87b826d30db1c1d07a5adaab02f53a39475dec9; real spec sha256 b5811b75d2b7e626023014fdcb13eb02e65377e359019cff150a7aec927158f4; source blob 3531e14ca4d92c220b99ca0330a3116ffb13ddfb; key: private pages map is partial support, not proof of the requested exported rendering seam", "category":"insufficient_evidence"},
+    {"id":"crm-owner", "subject":"same CRM commit/spec/source as crm-render-seam; key: any new product policy question has owner authority, not reviewer authority", "category":"authority_boundaries"}
+  ],
+  "trial_count": 2,
+  "maximum_spend": {"currency":"USD", "micros":5000000},
+  "promotion_criteria": {
+    "deterministic_false_passes":0,
+    "max_false_approval_rate":0.0,
+    "max_false_blocker_rate":0.1,
+    "min_coverage":0.9,
+    "min_support_quality":0.95,
+    "max_cost_micros":100000,
+    "max_latency_millis":600000
+  },
+  "model_routes": [
+    {"role":"gate", "provider":"openrouter", "model":"~deepseek/deepseek-flash-latest"},
+    {"role":"gate-route-comparison", "provider":"openrouter", "model":"~z-ai/glm-latest"}
+  ],
+  "cache_settings": {"mode":"both", "settings":"Fresh sessions for every trial. Trial 1 and 2 use the same prefix to observe possible cache reuse; request short retention, record actual cache counters. No claim of cold/warm separation without provider evidence. No cache-warming calls."},
+  "mode":"shadow",
+  "paid":true,
+  "approval": {"state":"awaiting_manifest_decision", "decision_key":"manifest", "required_before_any_paid_request":true},
+  "experiments": [
+    {
+      "id":"E2-format-packets",
+      "plan_experiment":2,
+      "order":1,
+      "question":"Does equivalent representation change supported answers on fixed trust/reuse packets?",
+      "arms":["documented hybrid text with JSON fields", "TOON via the integrated serializer", "compact JSON"],
+      "projects":["non-CRM Go/Python/TypeScript fixture packet", "real CRM spec rendering-seam packet"],
+      "trials_per_cell":2,
+      "paid_runs":12,
+      "run_id_pattern":"E2-{fixture|crm}-{hybrid|toon|json}-t{1|2}",
+      "route":"pi openrouter/~deepseek/deepseek-flash-latest",
+      "expected_cost_per_run_usd":0.02,
+      "enforced_cost_ceiling_per_run_usd":0.08,
+      "expected_total_usd":0.24,
+      "maximum_total_usd":0.96,
+      "controls":"Same canonical evidence values, order, instructions, output schema, output cap and trust key for all arms. Round-trip TOON and JSON to the same value before calls. Hybrid must retain every field. No retrieval, dossier, prefix or excerpt changes. Disable tools for this isolated-reply comparison, not for gate controls. Do not label the constructed hybrid a byte-exact historical prompt.",
+      "scoring":"Use production answer/evidence validation and deterministic reducer replay from temporary test-only harnesses; snapshot resulting records into isolated bench store. Missing output is missing coverage, not a negative answer. Score the complete planned population. Retain native replies and distinguish reply-only latency from full workflows.",
+      "boundary":"This is an isolated representation test, not an end-to-end gate or full-workflow win. A single invocation gets exactly one upstream request and no schema repair. If its complete reliable request bound exceeds $0.08, make no call and report the limitation; do not raise ceilings or substitute routes."
+    },
+    {
+      "id":"E6-real-route-smoke",
+      "plan_experiment":6,
+      "order":2,
+      "question":"Do the current gate and evidence contracts work on two configured real-model routes and several project types?",
+      "arms":["default pi OpenRouter DeepSeek Flash", "configured pi OpenRouter GLM"],
+      "projects":["real CRM spec/current committed source, one declared group only", "Go parser fixture", "Python parser fixture", "TypeScript parser fixture"],
+      "trials_per_cell":2,
+      "paid_runs":16,
+      "run_id_pattern":"E6-{crm|go|py|ts}-{flash|glm}-t{1|2}",
+      "expected_cost_per_run_usd":{"flash":0.04,"glm":0.06},
+      "enforced_cost_ceiling_per_run_usd":0.15,
+      "expected_total_usd":0.80,
+      "maximum_total_usd":2.40,
+      "controls":"Use exact same frozen subject, spec, dossier selection, mandatory checks and tools within each project. Keep ctx-shell=open and ctx-profile=default. Fixture controls run the complete gate including both adversaries in isolated repositories. CRM uses --only on the group containing crm1-ui-shell and --experiment, with the exact real spec; this subset never authorizes planning. Determine and freeze its actual group key from a no-spend dry run. Do not compare CRM subset totals against complete fixture totals.",
+      "scoring":"Use existing gate compare and bench record/compare/report with ORCH_BENCH_DIR set to a private temporary store. Current supported-answer identity and visibility rules apply. Never join old historical keys to current CRM code without a validated mapping. CRM whole-group correctness beyond the frozen rendering-seam case is unknown; report coverage, support, cost, latency and findings without inventing a whole-group answer key.",
+      "boundary":"Two trials are smoke evidence only. The two routes share OpenRouter; this does not establish provider independence or model independence. Any output-cap or dollar-cap exhaustion is incomplete, not a false blocker unless the gate records an incorrect supported fail."
+    }
+  ],
+  "deferred_experiments": [
+    {"plan_experiment":3,"reason":"Separate excerpt/progressive-expansion causal test would need another controlled workflow; default versus lean also changes formatting and is not a clean excerpt-only experiment."},
+    {"plan_experiment":4,"reason":"Universal prefix requires additional controlled runs and cache-write/cold-warm accounting. Keep the current prefix classes."},
+    {"plan_experiment":5,"reason":"The legacy production question adapter grants no technical delegation. Do not enable adjudication or manufacture authority. Fixed native-decision versus conversational workflows need separately approved complete proposals and cost bounds."}
+  ],
+  "budget_plan": {
+    "currency":"USD",
+    "expected_total":1.04,
+    "sum_enforced_run_ceilings":3.36,
+    "hard_user_cap":5.00,
+    "admission_limit":4.50,
+    "stop_starting_experiments_at":4.00,
+    "automatic_retries":0,
+    "per_run_schema_repairs":1,
+    "fallbacks":0,
+    "concurrency":1,
+    "unallocated_budget_is_not_permission_to_add_runs":true,
+    "rule":"Every repair, failed attempt and fallback is charged inside the original run ceiling. No replacement experiment, route or extra trial without another decision. Refuse before each run unless known cumulative plus both expected cost and enforced run ceiling are <= $4.50. Stop starting experiments at $4.00."
+  },
+  "transport_safety_preflight": {
+    "status":"not_yet_implemented_or_verified; paid execution remains blocked even after manifest approval until these checks pass",
+    "location":"temporary directory only; no production or default configuration changes",
+    "method":"Keep actual pi/provider/model selection. An isolated model override caps output at 4096 and routes the existing OpenRouter protocol through a local accounting proxy. Capture requests against a fake upstream first. Proxy pins the allowed model IDs, rejects unsupported billable options, enforces an independently verified upper cost bound before every upstream request, serializes upstream calls, and has per-run and global reservations. Retain ctx-shell=open in real gate controls. Isolate extensions, MCP, credentials, sessions and config so no optional/background model work bypasses the meter.",
+    "price_snapshot_source":"https://openrouter.ai/api/v1/models (unpaid metadata fetch)",
+    "observed_flash_usd_per_million":{"input":0.07,"output":0.50,"cached_input":0.008},
+    "observed_glm_usd_per_million":{"input":0.079,"output":1.40,"cached_input":0.078},
+    "observed_context_tokens":1048576,
+    "conservative_flash_request_ceiling_usd":0.08,
+    "conservative_glm_request_ceiling_usd":0.10,
+    "bound_reason":"At full advertised context and capped output: Flash <= $0.07544832 and GLM <= $0.088572928 before any extra fee. Revalidate pricing/fees, context/output bounds and token semantics before dispatch. If a complete reliable bound is not established, make no paid call. Reserve $0.08 for Flash or $0.10 for GLM before each request; reconcile and release only after actual provider cost is known. A run's remaining ceiling must cover the next whole request, not merely its expected cost.",
+    "accounting":"Use provider-reported usage/cost and request identifiers, reconcile with provider generation usage where available, and retain Pi session totals and gate.json pass_tokens separately. Catalog-based estimates are not verified provider charges. Flush and sync request admission before upstream dispatch. A crash, network error or missing/inconsistent cost that cannot be reconciled stops every subsequent paid request and produces needs-decision; never record missing cost as zero."
+  },
+  "measurement_protocol": {
+    "false_approval":"Supported approval of a keyed unsafe/unsupported/owner-only/conflicting case divided by all keyed cases that must not approve. Also report actual gate pass on incomplete required checks separately.",
+    "false_blocker":"Supported fail/blocker on a keyed valid complete control divided by all keyed valid complete controls. Unresolved and budget failures remain separate coverage failures.",
+    "incorrect_absence":"New/absent claim without successful complete exact current-subject full-scope search divided by absence opportunities.",
+    "missed_reuse_or_extension":"Missed keyed reuse/extension divided by keyed reuse/extension opportunities.",
+    "support_quality":"Answers with valid subject, exact relevant evidence, truthful lookup completeness, matching/missing behavior and authorized support divided by all attempted substantive answers. Show supported and total keyed denominators.",
+    "coverage":"Present, valid and supported answers each divided by the full predeclared case population, including missing and unsupported replies.",
+    "cost_per_correct_decision":"All measured run cost including failures/repairs divided by supported correct keyed decisions; undefined with zero correct or incomplete costs.",
+    "latency":"Full command wall time and isolated response latency separately, plus per-pass time, calls/tokens/cache counters where measured. Do not sum parallel pass time and call it wall time.",
+    "variation":"Report both individual trials and ranges/count disagreements for each cell, no significance or safety claims from n=2. Unknown metrics remain unknown.",
+    "downstream_acceptance":"Only deterministic reducer/reply validation and bench verification are measured. No task spawn, integration, production mutation or product E2E acceptance is authorized."
+  },
+  "promotion_policy":"These numeric thresholds are necessary trial screens, not authority to promote. Zero deterministic false passes is mandatory. Any trust failure vetoes a positive aggregate result. A small clean sample does not prove safety. No default change is authorized even if screens pass; retain TOON direction, open ctx shell, existing prefixes and disabled adjudication/classifier unless a later decision explicitly changes them.",
+  "live_store_protection": {
+    "source":"~/.local/share/orchestrate/bench",
+    "source_policy":"read-only; all commands use an isolated copy or a new temporary store",
+    "baseline_entries":568,
+    "baseline_files":466,
+    "baseline_listing_sha256":"e2f6647ced1ea8ac251436b083d8374ef620580a608070b3f90a87a026c29f1c",
+    "listing_fields":["relative path","entry type","mode","size","mtime_ns","regular-file sha256"],
+    "listing_location":"private temporary work directory recorded in task checks/work-dir.txt; never commit private store contents",
+    "final_check":"Repeat the listing with identical fields. Require byte-identical listing and content hashes. Record any external change honestly; never restore or modify the live store."
+  }
+}
