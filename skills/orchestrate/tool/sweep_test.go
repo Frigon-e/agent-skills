@@ -285,9 +285,17 @@ func TestSweepAccountingRequired(t *testing.T) {
 func TestSweepRefusesBadInput(t *testing.T) {
 	h := setup(t)
 	topic := filepath.Join(h.tmp, "empty")
-	for _, args := range [][]string{{"sweep", topic}, {"sweep", topic, "--min-passes", "1"}, {"sweep", topic, "--roots", "polar"}} {
-		if code, _ := h.run(args...); code == 0 {
-			t.Errorf("orch %v succeeded", args)
+	for _, tc := range []struct {
+		args []string
+		code int
+		want string
+	}{
+		{[]string{"sweep", topic}, 1, "no cards in"},
+		{[]string{"sweep", topic, "--min-passes", "1"}, 2, "N>=2"},
+		{[]string{"sweep", topic, "--roots", "polar"}, 1, `--roots "polar" must be name=dir`},
+	} {
+		if code, out := h.run(tc.args...); code != tc.code || !strings.Contains(out, tc.want) {
+			t.Errorf("orch %v = %d %q, want %d with %q", tc.args, code, out, tc.code, tc.want)
 		}
 	}
 }

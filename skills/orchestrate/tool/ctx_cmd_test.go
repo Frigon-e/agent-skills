@@ -303,6 +303,9 @@ func TestCtxFindSymTextBatchAndBriefOutsideAnyRunState(t *testing.T) {
 	if err := json.Unmarshal([]byte(c.must("ctx", "brief", "-", "--json")), &js); err != nil {
 		t.Fatal(err)
 	}
+	if len(js.Result.Files) == 0 {
+		t.Error("JSON brief has no ranked files for StartCheckout")
+	}
 	if exists(runRoot(c.repo)) {
 		t.Error("ctx commands created run state")
 	}

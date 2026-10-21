@@ -16,6 +16,11 @@ func TestLastReplyIsTheLastAssistantMessagesText(t *testing.T) {
 	if err != nil || got != `{"findings":[]}!` {
 		t.Fatalf("lastReply = %q, %v", got, err)
 	}
+	// Stream events also work without a trailing newline and above Scanner's default line limit.
+	large := strings.Repeat("x", 128*1024)
+	if got, err := lastReply(strings.NewReader(strings.TrimSuffix(text(large), "\n"))); err != nil || got != large+"!" {
+		t.Fatalf("large final stream message: got %d characters, err %v", len(got), err)
+	}
 	toolsOnly := `{"type":"message_end","message":{"role":"assistant","content":[{"type":"toolCall","name":"read"}]}}` + "\n"
 	for name, in := range map[string]string{"tool calls only": text("earlier") + toolsOnly, "empty": "", "no assistant": user} {
 		if _, err := lastReply(strings.NewReader(in)); err == nil || !strings.Contains(err.Error(), "no reply") {

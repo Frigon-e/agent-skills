@@ -168,7 +168,7 @@ func TestIntegrationVerifyMergesAndIsIdempotent(t *testing.T) {
 	}
 }
 
-func TestIntegrationNoMergeFlagAndNonIntegrationTask(t *testing.T) {
+func TestIntegrationNoMergeFlag(t *testing.T) {
 	h := planInt(t)
 	wt := h.leadWork("alpha", map[string]string{"alpha/f": "a\n"})
 	writeFiles(t, wt, map[string]string{"alpha/untracked": "work in progress\n"})

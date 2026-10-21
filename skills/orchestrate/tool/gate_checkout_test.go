@@ -219,10 +219,43 @@ func TestCheckoutConcurrentPassesCancel(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("in-flight pass not canceled")
 	}
-	rec := &gateRecord{PassErrors: map[string]string{}}
+	rec := &gateRecord{PassErrors: map[string]string{}, Findings: []gateFinding{{Claim: "earlier result"}}}
 	g.finish(rec)
-	if strings.Join(rec.TreeChangedPasses, ",") != "waiting,writer" {
-		t.Fatal(rec.TreeChangedPasses)
+	if strings.Join(rec.TreeChangedPasses, ",") != "waiting,writer" || len(rec.Findings) != 1 || len(rec.TreeChanged) != 1 || rec.TreeChanged[0] != "new.txt" || !strings.Contains(rec.PassErrors["all"], "checkout changed") {
+		t.Fatalf("mutation did not withhold approval: %+v", rec)
+	}
+}
+
+func TestCheckoutGuardDiscardsWhenVerificationFails(t *testing.T) {
+	h := setup(t)
+	g, err := newCheckoutGuard(h.repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer g.cancel()
+	out, _, err := g.run("uncheckable", func() (string, string, error) {
+		if err := os.Rename(filepath.Join(h.repo, ".git"), filepath.Join(h.repo, "git-backup")); err != nil {
+			t.Fatal(err)
+		}
+		return "must be discarded", "", nil
+	})
+	if err == nil || out != "" || g.ctx.Err() == nil {
+		t.Fatalf("uncheckable result accepted: output %q, err %v", out, err)
+	}
+	_, _, err = g.run("queued", func() (string, string, error) {
+		t.Fatal("a queued pass ran after checkout verification failed")
+		return "", "", nil
+	})
+	if err == nil {
+		t.Fatal("queued pass accepted")
+	}
+	rec := &gateRecord{PassErrors: map[string]string{}, Findings: []gateFinding{{Claim: "earlier result"}}}
+	g.finish(rec)
+	if rec.TreeCheckError == "" || len(rec.Findings) != 1 || len(rec.TreeChanged) != 0 || !strings.Contains(rec.PassErrors["all"], "could not be checked") {
+		t.Fatalf("verification failure not recorded: %+v", rec)
+	}
+	if !strings.HasPrefix(treeWarning(rec), "UNVERIFIED: checkout could not be checked:") {
+		t.Fatal(treeWarning(rec))
 	}
 }
 

@@ -151,20 +151,6 @@ func TestMultipleQueriesUnionCandidatesWithoutSearchingProse(t *testing.T) {
 	}
 }
 
-func TestMissingBuildsOnlyWarnsAndScoutsAreExempt(t *testing.T) {
-	sp := parseSpec(planHeader + "### api: API\nkind: ship\nowns: api/\n\nBuild API.\n#### Acceptance\nTests.\n\n### look: Look\nkind: scout\n\nLook around.\n#### Acceptance\nNotes.\n" + planTail)
-	sp.validate()
-	if len(sp.problems) != 0 {
-		t.Fatal(sp.problems)
-	}
-	var cfg config
-	cfg.Check = "test"
-	got := gateDeterministic(t.TempDir(), cfg, sp, "")
-	if len(got) != 1 || hasError(got) || !strings.Contains(got[0], "reuse checklist is skipped for this package") {
-		t.Fatalf("%v", got)
-	}
-}
-
 func TestChecklistMetricsAndLegacyShadowLocations(t *testing.T) {
 	dir := t.TempDir()
 	writeTree(t, dir, map[string]string{"dossier/p.md": "### 3a. Reuse checklist\n- `p#1` Saves.\n  1. `store.go:10-20` func Save\n     | func Save() {}\n- `p#2` Lists.\n  candidate `store.go:10-20` shown above\n### 3. Existing things\n"})

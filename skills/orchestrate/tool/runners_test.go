@@ -332,6 +332,9 @@ func TestClaudePaneGateUsesClaudeKindAndTranscript(t *testing.T) {
 			}
 		}
 	}
+	if len(rec.PassRunners) != 3 {
+		t.Fatalf("pass runners: %v", rec.PassRunners)
+	}
 	for _, runner := range rec.PassRunners {
 		if runner != "claude haiku low" {
 			t.Fatal(runner)
@@ -348,6 +351,9 @@ func TestGateProviderFailureFallsBackToFakeClaude(t *testing.T) {
 	t.Setenv("ORCH_CLAUDE", fakeRunner(t, "claude", fmt.Sprintf("printf '%%s\\n' '%s'", reply)))
 	h.must("gate", "spec.md")
 	rec := readRecord(t, gdir)
+	if rec.State != "pass" || len(rec.PassRunners) != 3 {
+		t.Fatalf("fallback gate: state %s, runners %v, errors %v", rec.State, rec.PassRunners, rec.PassErrors)
+	}
 	for _, runner := range rec.PassRunners {
 		if runner != "claude haiku low" {
 			t.Fatal(runner)
@@ -392,9 +398,9 @@ func TestGateWithoutRunnersStillWritesDossier(t *testing.T) {
 	t.Setenv("ORCH_PI", filepath.Join(h.tmp, "missing-pi"))
 	t.Setenv("ORCH_CLAUDE", filepath.Join(h.tmp, "missing-claude"))
 	t.Setenv("HERDR_ENV", "")
-	_, out := h.run("gate", "spec.md")
+	code, out := h.run("gate", "spec.md")
 	rec := readRecord(t, gdir)
-	if rec.State != "incomplete" || !strings.Contains(rec.PassErrors["all"], "not available") {
+	if code != 1 || rec.State != "incomplete" || !strings.Contains(rec.PassErrors["all"], "not available") {
 		t.Fatalf("%s: %#v", out, rec)
 	}
 	if _, err := os.Stat(filepath.Join(gdir, "dossier", "api.md")); err != nil {

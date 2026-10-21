@@ -129,6 +129,14 @@ func TestGateRunsOneGroupPassForRelatedPackages(t *testing.T) {
 	if !strings.Contains(calls, "Packages in this pass: store, api, docs.") {
 		t.Errorf("the group pass does not name its packages:\n%s", calls)
 	}
+	for _, want := range []string{`Cite a spec line as "spec.md:<line>"`, "set answered_by to that spec line as `spec.md:<line>`", "Gaps in a contract that two packages share", "(3) reuse:", `"reuse":[{"builds":""`, "two packages of this spec building the same thing"} {
+		if !strings.Contains(calls, want) {
+			t.Errorf("no prompt holds %q", want)
+		}
+	}
+	if n := strings.Count(calls, "Gaps in a contract"); n != 1 {
+		t.Errorf("the contract sentence is in %d prompts, want only adversary-b", n)
+	}
 	hash := specHash(mustRead(t, filepath.Join(h.repo, "spec.md")))
 	var rec gateRecord
 	if err := json.Unmarshal(mustRead(t, filepath.Join(runRoot(h.repo), "gate", hash, "gate.json")), &rec); err != nil {
@@ -442,23 +450,6 @@ exec "`+bin+`.real" "$@"
 	}
 }
 
-func TestGatePromptsTellTheModelHowToCiteTheSpecAndWhatAdversaryBOwns(t *testing.T) {
-	h := setup(t)
-	h.commitSpec(threePkgSpec())
-	dir := h.fakePi(gatePasses(nil))
-	t.Setenv("HERDR_ENV", "")
-	h.must("gate", "spec.md")
-	calls := string(mustRead(t, filepath.Join(dir, "calls.log")))
-	for _, want := range []string{`Cite a spec line as "spec.md:<line>"`, "set answered_by to that spec line as `spec.md:<line>`", "Gaps in a contract that two packages share"} {
-		if !strings.Contains(calls, want) {
-			t.Errorf("no prompt holds %q", want)
-		}
-	}
-	if n := strings.Count(calls, "Gaps in a contract"); n != 1 {
-		t.Errorf("the contract sentence is in %d prompts, want only adversary-b", n)
-	}
-}
-
 func TestApplyGroupSalvagesRepliesThatAreNotValidJSON(t *testing.T) {
 	repo := t.TempDir()
 	os.MkdirAll(filepath.Join(repo, "internal"), 0o755)
@@ -601,20 +592,6 @@ func TestApplyGroupTurnsReuseIntoConcerns(t *testing.T) {
 	}
 }
 
-func TestGatePromptsAskForReuseAndDuplicateProducers(t *testing.T) {
-	h := setup(t)
-	h.commitSpec(threePkgSpec())
-	dir := h.fakePi(gatePasses(nil))
-	t.Setenv("HERDR_ENV", "")
-	h.must("gate", "spec.md")
-	calls := string(mustRead(t, filepath.Join(dir, "calls.log")))
-	for _, want := range []string{"(3) reuse:", `"reuse":[{"builds":""`, "two packages of this spec building the same thing"} {
-		if !strings.Contains(calls, want) {
-			t.Errorf("no prompt holds %q", want)
-		}
-	}
-}
-
 func TestGateDryRunListsThePassesAndCallsNothing(t *testing.T) {
 	h := setup(t)
 	h.commitSpec(threePkgSpec())
@@ -664,14 +641,24 @@ func TestGateGroupsKeepAFamilyOfUIPackagesTogetherAmongMixedBackends(t *testing.
 	sp := groupSpec(owns, deps, order...)
 	groups := gateGroups(sp, 4, 24000, 6)
 	uiGroups := map[int]bool{}
+	seen := map[string]bool{}
 	for i, g := range groups {
 		if len(g) > 4 {
 			t.Errorf("group %d has %d packages", i, len(g))
 		}
 		for _, p := range g {
+			if _, ok := owns[p.id]; !ok || seen[p.id] {
+				t.Errorf("unexpected or duplicate package %q in %s", p.id, groupIDs(groups))
+			}
+			seen[p.id] = true
 			if strings.HasPrefix(p.id, "crm1-ui-") {
 				uiGroups[i] = true
 			}
+		}
+	}
+	for _, id := range order {
+		if !seen[id] {
+			t.Errorf("package %s is missing from %s", id, groupIDs(groups))
 		}
 	}
 	if len(uiGroups) > 2 {

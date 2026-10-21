@@ -109,6 +109,10 @@ func TestSpawnPromptFailureLeavesRecoverableLead(t *testing.T) {
 	}
 	wantContains(t, out, "launch prompt failed", "orch peek t1", "orch close t1 --force")
 	wantContains(t, string(mustRead(t, filepath.Join(h.dir("t1"), "status.log"))), "agent prompt failed in pane w1:p1")
+	l := h.lead("t1")
+	if _, ok := h.fakeState().Panes[l.PaneID]; !ok || l.ClosedAt != 0 {
+		t.Fatalf("failed prompt left no recoverable open lead: %+v", l)
+	}
 }
 
 func TestRespawnRefusedLeavesLeadAndFilesAlone(t *testing.T) {
@@ -204,8 +208,8 @@ func TestSecondWatcherCannotRun(t *testing.T) {
 
 	// With the lock free, two watchers started together deliver the event once.
 	_, outs := h.runConcurrently(
-		[]string{"watch", "--timeout", "5", "--interval", "0.05"},
-		[]string{"watch", "--timeout", "5", "--interval", "0.05"})
+		[]string{"watch", "--once"},
+		[]string{"watch", "--once"})
 	if n := strings.Count(outs[0]+outs[1], "orch: t1 failed: tests do not build"); n != 1 {
 		t.Fatalf("event delivered %d times:\n%s\n%s", n, outs[0], outs[1])
 	}
@@ -254,6 +258,54 @@ func TestAutoApplyRefusedStaysRetryable(t *testing.T) {
 	}
 	if fm, _, _ := readTask(filepath.Join(h.dir("b"), "task.md")); fm["harness"] != "auto" {
 		t.Fatalf("apply under a hold left the profile %v", fm)
+	}
+}
+
+func TestAutoApplyKeepsTheProfileOfAnySurvivingLead(t *testing.T) {
+	for _, promptFails := range []bool{false, true} {
+		name := "pane creation fails"
+		cmds := []string{"pane split", "tab create"}
+		if promptFails {
+			name, cmds = "prompt fails after the lead opens", []string{"agent prompt"}
+		}
+		t.Run(name, func(t *testing.T) {
+			h := setup(t)
+			writeFiles(t, filepath.Dir(os.Getenv("ORCH_CONFIG")), map[string]string{filepath.Base(os.Getenv("ORCH_CONFIG")): autoConfig})
+			h.task("a", "--harness", "auto", "--model", "auto", "--effort", "auto")
+			flag := failHerdr(t, h, cmds...)
+			writeFiles(t, filepath.Dir(flag), map[string]string{filepath.Base(flag): ""})
+			code, out := h.run("spawn", "a", "--auto", "--apply")
+			if code != 1 || !strings.Contains(out, "using: pi flash") || !strings.Contains(out, "injected failure") {
+				t.Fatalf("auto launch failure = %d %s", code, out)
+			}
+			fm, _, err := readTask(filepath.Join(h.dir("a"), "task.md"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			l, err := loadLead(h.dir("a"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if promptFails {
+				if l == nil || l.ClosedAt != 0 || fm["harness"] != "pi" || fm["model"] != "flash" || fm["effort"] != "low" {
+					t.Fatalf("surviving lead lost its selected profile: lead %+v, task %v", l, fm)
+				}
+				if _, ok := h.fakeState().Panes[l.PaneID]; !ok {
+					t.Fatal("surviving lead points at no open pane")
+				}
+				return
+			}
+			if l != nil && l.ClosedAt == 0 {
+				t.Fatalf("pane creation failure left an open lead: %+v", l)
+			}
+			if fm["harness"] != "auto" || fm["model"] != "auto" || fm["effort"] != "auto" {
+				t.Fatalf("launch failure did not restore auto profile: %v", fm)
+			}
+			if err := os.Remove(flag); err != nil {
+				t.Fatal(err)
+			}
+			wantContains(t, h.must("spawn", "a", "--auto", "--apply"), "spawned lead-a (pi flash)")
+		})
 	}
 }
 

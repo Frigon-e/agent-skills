@@ -108,7 +108,7 @@ func TestGateHeadlessArgumentsAndEnv(t *testing.T) {
 // so the machine PATH is never typed into a pane.
 func TestGatePaneEnvPrependsToThePanesOwnPath(t *testing.T) {
 	h := setup(t)
-	gdir := h.gateRepo(1)
+	h.gateRepo(1)
 	h.fakePi(gatePasses(nil))
 	var dirs []string
 	for i := 0; i < 120; i++ {
@@ -133,38 +133,18 @@ func TestGatePaneEnvPrependsToThePanesOwnPath(t *testing.T) {
 	if exports == 0 {
 		t.Fatal("no PATH export reached the pane")
 	}
-	_ = gdir
-}
-
-// pi asks "Trust project folder?" in a folder it has not seen and waits for a
-// key: herdr then sees no agent, or an idle one that never answers. A gate pass
-// must never wait on that dialog, and read-only passes need no project files.
-func TestGatePanePiIgnoresProjectFilesInsteadOfAskingForTrust(t *testing.T) {
-	h := setup(t)
-	h.gateRepo(1)
-	h.fakePi(gatePasses(nil))
-	h.must("gate", "spec.md", "--runner", "pi:test")
-	starts := 0
-	for _, c := range h.gateCalls("agent", "start") {
-		starts++
-		if args := strings.Join(c.Args, " "); !strings.Contains(args, "--kind pi") || !strings.Contains(args, " -- --no-approve ") {
-			t.Fatalf("pi start can wait on the trust dialog: %s", args)
-		}
-	}
-	if starts == 0 {
-		t.Fatal("no pane start recorded")
-	}
 }
 
 func TestGatePaneCtxAndContextFlags(t *testing.T) {
 	for _, harness := range []string{"pi", "claude"} {
-		for _, on := range []bool{false, true} {
-			t.Run(fmt.Sprintf("%s/%v", harness, on), func(t *testing.T) {
+		for _, toggles := range []struct{ ctx, files bool }{{false, false}, {false, true}, {true, false}, {true, true}} {
+			on, filesOn := toggles.ctx, toggles.files
+			t.Run(fmt.Sprintf("%s/ctx-%v/files-%v", harness, on, filesOn), func(t *testing.T) {
 				h := setup(t)
 				gdir := h.gateRepo(1)
 				h.fakePi(gatePasses(nil))
 				t.Setenv("ORCH_FAKE_CLAUDE_REPO", h.repo)
-				h.must("gate", "spec.md", "--runner", harness+":test", "--ctx-tool", onOff(on), "--context-files", onOff(on))
+				h.must("gate", "spec.md", "--runner", harness+":test", "--ctx-tool", onOff(on), "--context-files", onOff(filesOn))
 				calls := h.gateCalls()
 				starts := 0
 				exports := 0
@@ -181,10 +161,15 @@ func TestGatePaneCtxAndContextFlags(t *testing.T) {
 					if strings.HasPrefix(prompt, "READ ONLY.") != on {
 						t.Fatal(prompt)
 					}
-					if harness == "pi" && strings.Contains(args, "--no-context-files") == on {
-						t.Fatal(args)
+					if harness == "pi" {
+						if flagValue(c.Args, "--kind") != "pi" || !strings.Contains(args, " -- --no-approve ") {
+							t.Fatalf("pi start can wait on the project trust dialog: %s", args)
+						}
+						if strings.Contains(args, "--no-context-files") == filesOn {
+							t.Fatal(args)
+						}
 					}
-					if harness == "claude" && strings.Contains(args, "claudeMdExcludes") == on {
+					if harness == "claude" && strings.Contains(args, "claudeMdExcludes") == filesOn {
 						t.Fatal(args)
 					}
 				}
@@ -192,7 +177,7 @@ func TestGatePaneCtxAndContextFlags(t *testing.T) {
 					t.Fatalf("starts %d exports %d", starts, exports)
 				}
 				rec := readRecord(t, gdir)
-				if rec.CtxTool != onOff(on) || rec.ContextFiles != onOff(on) {
+				if rec.CtxTool != onOff(on) || rec.ContextFiles != onOff(filesOn) {
 					t.Fatal(rec)
 				}
 			})

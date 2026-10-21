@@ -156,12 +156,12 @@ func TestBenchObjectsImmutableAndVerified(t *testing.T) {
 	}
 }
 func TestBenchCanonicalItemsAndDescription(t *testing.T) {
-	h := benchHarness(t)
-	h.gateRepo(1)
-	text := string(mustRead(t, filepath.Join(h.repo, "spec.md")))
-	v, a := benchSpecFromText(text, "spec.md", benchRepo{Name: "fixture"}, h.now)
-	_, b := benchSpecFromText(text, "spec.md", benchRepo{Name: "fixture"}, h.now.Add(time.Hour))
-	if a.ID != b.ID || len(a.Items) == 0 {
+	t.Setenv("ORCH_BENCH_DIR", t.TempDir())
+	text := planHeader + "### api: API\nkind: ship\nowns: api.go\n\nBuild API.\n#### Builds\n- Save a record.\n#### Acceptance\nTests pass.\n" + planTail
+	now := time.Unix(123, 0)
+	v, a := benchSpecFromText(text, "spec.md", benchRepo{Name: "fixture"}, now)
+	_, b := benchSpecFromText(text, "spec.md", benchRepo{Name: "fixture"}, now.Add(time.Hour))
+	if a.ID != b.ID || len(a.Items) != 1 || a.Items[0].ID != "api#1" || a.Items[0].Text != "Save a record." {
 		t.Fatalf("itemsets: %+v %+v", a, b)
 	}
 	if e := benchSaveSpec(v, a, text); e != nil {
@@ -574,8 +574,9 @@ func TestBenchVerifyCorruptionAndMigration(t *testing.T) {
 	if e := benchReadJSON(filepath.Join(r.dir, "run.json"), &raw); e != nil {
 		t.Fatal(e)
 	}
-	if string(raw["future_field"]) != "{\n    \"kept\": true\n  }" && !bytes.Contains(raw["future_field"], []byte("kept")) {
-		t.Fatal(raw)
+	var preserved map[string]any
+	if e := json.Unmarshal(raw["future_field"], &preserved); e != nil || !reflect.DeepEqual(preserved, map[string]any{"kept": true}) {
+		t.Fatalf("migration changed unknown field: %s (%v)", raw["future_field"], e)
 	}
 	before := mustRead(t, filepath.Join(r.dir, "run.json"))
 	h.must("bench", "migrate", "--suite", "fixture")
@@ -710,9 +711,19 @@ func TestBenchReportOnlyAndUnknownFlags(t *testing.T) {
 		t.Fatal("invented report-only findings: " + out)
 	}
 	h.must("bench", "verify", "--suite", "reports")
-	for _, args := range [][]string{{"bench", "list", "--sutie", "reports"}, {"bench", "import", dir, "--suite", "reports", "--label", "../bad"}, {"bench", "key", "add", "reports", "missing.json", "--blind", "maybe"}} {
-		if code, _ := h.run(args...); code == 0 {
-			t.Errorf("accepted %v", args)
+	key := filepath.Join(h.tmp, "key.json")
+	writeFiles(t, h.tmp, map[string]string{"key.json": `[{"package":"api","item":"api#1","verdict":"new"}]`})
+	for _, tc := range []struct {
+		args []string
+		want string
+	}{
+		{[]string{"bench", "list", "--sutie", "reports"}, "flag provided but not defined: -sutie"},
+		{[]string{"bench", "import", dir, "--suite", "reports", "--label", "../bad"}, "invalid benchmark name"},
+		{[]string{"bench", "key", "add", "reports", key}, "key add requires --note provenance"},
+		{[]string{"bench", "key", "add", "reports", key, "--note", "fixture", "--blind", "maybe"}, "--blind must be true, false or unknown"},
+	} {
+		if code, out := h.run(tc.args...); code == 0 || !strings.Contains(out, tc.want) {
+			t.Errorf("%v: code %d, want %q: %s", tc.args, code, tc.want, out)
 		}
 	}
 }
@@ -878,7 +889,7 @@ func TestBenchKeyBlindItemsAndMultiplePrompts(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
-	if len(k.PromptBlobs) != 2 {
+	if !reflect.DeepEqual(k.PromptBlobs, []string{benchHash([]byte("First exact prompt\n")), benchHash([]byte("Second exact prompt\n"))}) {
 		t.Fatal(k)
 	}
 	data, e := objectGet("itemset", k.Itemset)
@@ -886,9 +897,8 @@ func TestBenchKeyBlindItemsAndMultiplePrompts(t *testing.T) {
 		t.Fatal(e)
 	}
 	var set benchItemset
-	_ = json.Unmarshal(data, &set)
-	if set.Items[0].Text != "Save a record" || set.Items[0].Kind != "legacy" {
-		t.Fatal(set)
+	if e := json.Unmarshal(data, &set); e != nil || len(set.Items) != 1 || set.Items[0].Text != "Save a record" || set.Items[0].Kind != "legacy" {
+		t.Fatalf("blind items: %+v (%v)", set, e)
 	}
 	h.must("bench", "verify", "--suite", "fixture")
 }

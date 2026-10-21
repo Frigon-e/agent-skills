@@ -421,7 +421,8 @@ func fixtureQuestions() []gateQuestion {
 		{Package: "api", Question: "Should the refund endpoint return 404 or 410 when the order is already deleted?", Decisive: true},
 		{Package: "api", Question: "Which table holds the session rows? Is `sessions` in internal/store.go?", Decisive: true},
 		{Package: "api", Question: "Does the refund endpoint return 404 or 410 when an order was already deleted, and with which body?", Decisive: true},
-		{Package: "store", Question: "Where does the helper live for the lookup?", Decisive: true},
+		// Matching wording across packages must remain separate cards.
+		{Package: "store", Question: "Which table holds the session rows? Is `sessions` in internal/store.go? Please clarify.", Decisive: true},
 		{Package: "store", Question: "Minor thing about names?", Decisive: false},
 		{Package: "store", Question: "Answered one", Decisive: true, AnsweredBy: "internal/store.go:3"},
 	}
@@ -455,6 +456,9 @@ func TestEnrichRewritesCardsWithTagsHintsAndAnIndex(t *testing.T) {
 		t.Errorf("a spec hit or more than %d snippet lines leaked:\n%s", enrichSnippet, card)
 	}
 	wantContains(t, string(mustRead(t, filepath.Join(qdir, "q1-api.md"))), "Should the refund endpoint", "route: owner")
+	if c, err := parseCard(string(mustRead(t, filepath.Join(qdir, "q4-store.md")))); err != nil || c.question != fixtureQuestions()[3].Question {
+		t.Errorf("q4-store.md lost its package's question: %v %+v", err, c)
+	}
 	for _, f := range entries {
 		if filepath.Base(f) == "INDEX.md" {
 			continue

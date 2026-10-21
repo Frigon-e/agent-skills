@@ -291,7 +291,11 @@ func TestGateCacheRetentionReachesHeadlessAndPanePi(t *testing.T) {
 		h.sessionPi(gatePasses(nil))
 		os.Remove(h.fake + ".gate.log")
 		h.must("gate", "spec.md", "--cache", "short", "--ctx-tool", "off")
-		for _, r := range h.gateCalls("pane", "run") {
+		runs = h.gateCalls("pane", "run")
+		if len(runs) != 3 {
+			t.Fatalf("short cache reset reached %d panes, want 3", len(runs))
+		}
+		for _, r := range runs {
 			if r.Extra["cmd"] != "unset PI_CACHE_RETENTION" {
 				t.Errorf("pane run: %v", r.Extra)
 			}
@@ -542,9 +546,15 @@ func TestBenchToolRowsCountOrchCtxAgainstRawShell(t *testing.T) {
 	want := map[string]float64{"orch ctx calls": 4, "orch ctx lookups (a batch counts each -q)": 9, "orch ctx piped into another tool": 1, "Raw shell search (grep, rg, find, ls)": 2, "Native reads": 3, "Native reads with a range": 2}
 	for _, m := range benchToolRows {
 		got := benchToolSum(r, nil, m.count)
-		if w, ok := want[m.name]; ok && (got == nil || *got != w) {
-			t.Errorf("%s = %v, want %v", m.name, got, w)
+		if w, ok := want[m.name]; ok {
+			if got == nil || *got != w {
+				t.Errorf("%s = %v, want %v", m.name, got, w)
+			}
+			delete(want, m.name)
 		}
+	}
+	if len(want) != 0 {
+		t.Errorf("missing benchmark tool rows: %v", want)
 	}
 	// A profile recorded before shell calls were split cannot say what its bash calls were.
 	old := &benchRun{Groups: map[string]benchGroup{"g": {Exploration: &sessionProfile{Calls: map[string]int{"bash": 4}}}}}

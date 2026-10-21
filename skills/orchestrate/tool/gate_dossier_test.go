@@ -9,6 +9,8 @@ import (
 	"testing"
 )
 
+const dossierSpec = planHeader + "### api: Queue API\nkind: ship\nowns: internal/queue\n\nBuild the queue. It adds `SendTransfer`, a `transfer_rows` table and `Nonexistent`, and serves POST /api/transfers. See internal/queue/queue.go:4 and internal/gone.go:9.\n\n#### Builds\n- Code that queues a transfer and serves POST /api/transfers.\n\n#### Acceptance\nTests pass.\n\n" + planTail
+
 // dossierRepo is a committed repo with a queue package and a spec of one
 // package that owns it, names things that exist and things that do not.
 func dossierRepo(t *testing.T) (code, src string) {
@@ -37,7 +39,7 @@ func dossierRepo(t *testing.T) (code, src string) {
 			t.Fatalf("git %v: %v\n%s", args, err, out)
 		}
 	}
-	src = planHeader + "### api: Queue API\nkind: ship\nowns: internal/queue\n\nBuild the queue. It adds `SendTransfer`, a `transfer_rows` table and `Nonexistent`, and serves POST /api/transfers. See internal/queue/queue.go:4 and internal/gone.go:9.\n\n#### Builds\n- Code that queues a transfer and serves POST /api/transfers.\n\n#### Acceptance\nTests pass.\n\n" + planTail
+	src = dossierSpec
 	return code, src
 }
 
@@ -84,7 +86,7 @@ func TestDossierRanksFilesAndFindsWhatExistsAndWhatDoesNot(t *testing.T) {
 	if strings.Contains(text, "`internal/queue/queue.go:") {
 		t.Errorf("a hit inside the owns was listed as an existing thing:\n%s", text)
 	}
-	if strings.Contains(text, "`SendTransfer`\n") && strings.Contains(strings.SplitAfter(text, "### 4.")[1], "SendTransfer") {
+	if strings.Contains(strings.SplitAfter(text, "### 4.")[1], "SendTransfer") {
 		t.Errorf("a found name was listed as missing:\n%s", text)
 	}
 }
@@ -117,28 +119,21 @@ func TestDossierIsDeterministicCachedAndCapped(t *testing.T) {
 	if len(d.Files) != dossierFiles {
 		t.Errorf("ranked files = %d, want %d", len(d.Files), dossierFiles)
 	}
-	long := make([]string, 200)
-	for i := range long {
-		long[i] = fmt.Sprintf("- entry %03d with some text", i)
+	entries := []string{"- first\n  continuation", "- second", "- third"}
+	if got, want := capEntries(entries, len(entries[0])+1), entries[0]+"\n- ... 2 more omitted\n"; got != want {
+		t.Errorf("capEntries at the first entry's boundary = %q, want %q", got, want)
 	}
-	got := capEntries(long, 500)
-	if len(got) > 500+40 || !strings.HasSuffix(got, "more omitted\n") || strings.Contains(got, "entry 0") && !strings.Contains(got, "\n") {
-		t.Errorf("capEntries = %q", got)
-	}
-	for _, line := range strings.Split(strings.TrimSpace(got), "\n") {
-		if !strings.HasPrefix(line, "- entry ") && !strings.HasPrefix(line, "- ... ") {
-			t.Errorf("a line was cut: %q", line)
-		}
+	all := strings.Join(entries, "\n") + "\n"
+	if got := capEntries(entries, len(all)); got != all {
+		t.Errorf("capEntries with an exact fit = %q, want %q", got, all)
 	}
 	if capEntries(nil, 10) != "(none)\n" {
 		t.Error("an empty section is not marked")
 	}
 }
 
-func TestDossierSheetHasSignatureDocAndCallers(t *testing.T) {
-	d := &ctxEnv{Code: t.TempDir()}
-	os.WriteFile(filepath.Join(d.Code, "a.go"), []byte("package a\n\n// Enqueue adds a transfer.\n// More detail.\nfunc Enqueue() {}\n"), 0o644)
-	lines := d.Lines("a.go")
+func TestDocLineFindsFirstCommentLine(t *testing.T) {
+	lines := []string{"package a", "", "// Enqueue adds a transfer.", "// More detail.", "func Enqueue() {}"}
 	if got := docLine(lines, 5); got != "Enqueue adds a transfer." {
 		t.Errorf("docLine = %q", got)
 	}
@@ -212,7 +207,7 @@ func TestDossierNamesWhatOtherPackagesOwnAndHowTheyRelate(t *testing.T) {
 	for _, c := range []struct {
 		name, src, want string
 	}{
-		{"downstream", strings.Replace(web("depends: api\n"), "kind: ship\nowns: internal/queue", "kind: ship\nowns: internal/queue", 1), "- owned by web, which uses this package: internal/store.go"},
+		{"downstream", web("depends: api\n"), "- owned by web, which uses this package: internal/store.go"},
 		{"upstream", strings.Replace(web(""), "### api: Queue API\nkind: ship\n", "### api: Queue API\nkind: ship\ndepends: web\n", 1), "- owned by web, which this package uses: internal/store.go"},
 		{"unrelated", web(""), "- owned by web, unrelated to this package: internal/store.go"},
 		{"unowned", src, "- owned by no package (existing code): internal/store.go"},
@@ -226,7 +221,7 @@ func TestDossierNamesWhatOtherPackagesOwnAndHowTheyRelate(t *testing.T) {
 }
 
 func TestScopeFindingsKnowWhoOwnsTheFileAndStripRemarks(t *testing.T) {
-	_, src := dossierRepo(t)
+	src := dossierSpec
 	src = strings.Replace(src, planTail, "### web: Web\nkind: ship\ndepends: api\nowns: internal/web/\n\nWeb.\n\n#### Builds\n- Code that shows a transfer.\n\n#### Acceptance\nOk.\n\n### core: Core\nkind: ship\nowns: internal/core/\n\nCore.\n\n#### Builds\n- Code that stores a transfer.\n\n#### Acceptance\nOk.\n\n"+planTail, 1)
 	src = strings.Replace(src, "### api: Queue API\nkind: ship\n", "### api: Queue API\nkind: ship\ndepends: core\n", 1)
 	sp := parseSpec(src)
