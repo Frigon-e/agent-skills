@@ -1,0 +1,290 @@
+{
+  "baseline": "e2449497129604f2ee9b4ccb839e1e66eab67965",
+  "current": "2e120b9d84003916baea2b9a4fb88fbe22e2e021",
+  "generated_at": "2026-10-20T14:30:48.908947+00:00",
+  "baseline_build_seconds": 1.806,
+  "current_build_and_comparison_seconds": 50.655,
+  "go_test_seconds": 29.387,
+  "exit_code": 0,
+  "counts": {
+    "BEFORE": {
+      "pass": 31,
+      "skip": 9,
+      "fail": 0
+    },
+    "AFTER": {
+      "pass": 40,
+      "skip": 0,
+      "fail": 0
+    }
+  },
+  "after_only": {
+    "seconds": 19.061,
+    "counts": {
+      "BEFORE": {
+        "pass": 0,
+        "skip": 40,
+        "fail": 0
+      },
+      "AFTER": {
+        "pass": 40,
+        "skip": 0,
+        "fail": 0
+      }
+    },
+    "status": "pass"
+  },
+  "skipped_tests": [
+    "TestBeforeAfterAbsence/absence-python-failed/BEFORE",
+    "TestBeforeAfterAbsence/absence-python-partial/BEFORE",
+    "TestBeforeAfterAbsence/absence-python-capped/BEFORE",
+    "TestBeforeAfterAbsence/absence-python-unrelated-query/BEFORE",
+    "TestBeforeAfterAbsence/absence-typescript-failed/BEFORE",
+    "TestBeforeAfterAbsence/absence-typescript-partial/BEFORE",
+    "TestBeforeAfterAbsence/absence-typescript-capped/BEFORE",
+    "TestBeforeAfterAbsence/absence-typescript-unrelated-query/BEFORE",
+    "TestBeforeAfterTimeout/BEFORE"
+  ],
+  "rows": [
+    {
+      "scenario": "empty-adversary",
+      "evidence": "TestBeforeAfter/empty-adversary",
+      "before": "BAD: pass",
+      "after": "incomplete (legacy unverified); reason recorded"
+    },
+    {
+      "scenario": "id-only-adversary",
+      "evidence": "TestBeforeAfter/id-only-adversary",
+      "before": "BAD: pass",
+      "after": "incomplete (legacy unverified); reason recorded"
+    },
+    {
+      "scenario": "missing-verdict",
+      "evidence": "TestBeforeAfter/missing-verdict",
+      "before": "BAD: pass",
+      "after": "incomplete (legacy unverified); reason recorded"
+    },
+    {
+      "scenario": "unsupported-candidate",
+      "evidence": "TestBeforeAfter/unsupported-candidate",
+      "before": "BAD: pass",
+      "after": "incomplete (legacy unverified); reason recorded"
+    },
+    {
+      "scenario": "future-file-ownership",
+      "evidence": "TestBeforeAfter/future-file-ownership",
+      "before": "BAD: pass",
+      "after": "blocked: fail; verified structural blocker"
+    },
+    {
+      "scenario": "approval-py-body",
+      "evidence": "TestBeforeAfter/approval-py-body",
+      "before": "BAD: changed checkout authorized",
+      "after": "stale approval refused; no tasks created"
+    },
+    {
+      "scenario": "approval-py-second-worktree",
+      "evidence": "TestBeforeAfter/approval-py-second-worktree",
+      "before": "BAD: changed checkout authorized",
+      "after": "stale approval refused; no tasks created"
+    },
+    {
+      "scenario": "approval-py-untracked",
+      "evidence": "TestBeforeAfter/approval-py-untracked",
+      "before": "BAD: changed checkout authorized",
+      "after": "stale approval refused; no tasks created"
+    },
+    {
+      "scenario": "approval-py-delete",
+      "evidence": "TestBeforeAfter/approval-py-delete",
+      "before": "BAD: changed checkout authorized",
+      "after": "stale approval refused; no tasks created"
+    },
+    {
+      "scenario": "approval-py-mode",
+      "evidence": "TestBeforeAfter/approval-py-mode",
+      "before": "BAD: changed checkout authorized",
+      "after": "stale approval refused; no tasks created"
+    },
+    {
+      "scenario": "approval-ts-body",
+      "evidence": "TestBeforeAfter/approval-ts-body",
+      "before": "BAD: changed checkout authorized",
+      "after": "stale approval refused; no tasks created"
+    },
+    {
+      "scenario": "approval-ts-second-worktree",
+      "evidence": "TestBeforeAfter/approval-ts-second-worktree",
+      "before": "BAD: changed checkout authorized",
+      "after": "stale approval refused; no tasks created"
+    },
+    {
+      "scenario": "approval-ts-untracked",
+      "evidence": "TestBeforeAfter/approval-ts-untracked",
+      "before": "BAD: changed checkout authorized",
+      "after": "stale approval refused; no tasks created"
+    },
+    {
+      "scenario": "approval-ts-delete",
+      "evidence": "TestBeforeAfter/approval-ts-delete",
+      "before": "BAD: changed checkout authorized",
+      "after": "stale approval refused; no tasks created"
+    },
+    {
+      "scenario": "approval-ts-mode",
+      "evidence": "TestBeforeAfter/approval-ts-mode",
+      "before": "BAD: changed checkout authorized",
+      "after": "stale approval refused; no tasks created"
+    },
+    {
+      "scenario": "verify-mutates-source",
+      "evidence": "TestBeforeAfter/verify-mutates-source",
+      "before": "BAD: mutating check integrated",
+      "after": "refused; integration HEAD and marker unchanged"
+    },
+    {
+      "scenario": "verify-mutates-HEAD",
+      "evidence": "TestBeforeAfter/verify-mutates-HEAD",
+      "before": "BAD: mutating check integrated",
+      "after": "refused; integration HEAD and marker unchanged"
+    },
+    {
+      "scenario": "py-excluded-hits",
+      "evidence": "TestBeforeAfter/py-excluded-hits",
+      "before": "BAD: 2105 excluded hits hide production",
+      "after": "1 production hit retained after 2105 tests"
+    },
+    {
+      "scenario": "py-changed-body",
+      "evidence": "TestBeforeAfter/py-changed-body",
+      "before": "BAD: stale indexed body rendered",
+      "after": "current checkout body rendered"
+    },
+    {
+      "scenario": "py-wrong-receiver",
+      "evidence": "TestBeforeAfter/py-wrong-receiver",
+      "before": "BAD: 2 definitions for nonexistent receiver, no identity warning",
+      "after": "partial; candidate identity/counts explicit"
+    },
+    {
+      "scenario": "py-missing-server",
+      "evidence": "TestBeforeAfter/py-missing-server",
+      "before": "BAD: missing server has no partial status; by-name zero references",
+      "after": "partial; candidate identity/counts explicit"
+    },
+    {
+      "scenario": "py-failed-backend",
+      "evidence": "TestBeforeAfter/py-failed-backend",
+      "before": "BAD: failed rg returned exit 0",
+      "after": "exit 1; status failed, not zero"
+    },
+    {
+      "scenario": "py-fifth-definition",
+      "evidence": "TestBeforeAfter/py-fifth-definition",
+      "before": "BAD: scoped fifth definition hidden (shown 0)",
+      "after": "partial; candidate identity/counts explicit"
+    },
+    {
+      "scenario": "ts-excluded-hits",
+      "evidence": "TestBeforeAfter/ts-excluded-hits",
+      "before": "BAD: 2105 excluded hits hide production",
+      "after": "1 production hit retained after 2105 tests"
+    },
+    {
+      "scenario": "ts-changed-body",
+      "evidence": "TestBeforeAfter/ts-changed-body",
+      "before": "BAD: stale indexed body rendered",
+      "after": "current checkout body rendered"
+    },
+    {
+      "scenario": "ts-wrong-receiver",
+      "evidence": "TestBeforeAfter/ts-wrong-receiver",
+      "before": "BAD: 2 definitions for nonexistent receiver, no identity warning",
+      "after": "partial; candidate identity/counts explicit"
+    },
+    {
+      "scenario": "ts-missing-server",
+      "evidence": "TestBeforeAfter/ts-missing-server",
+      "before": "BAD: missing server has no partial status; by-name zero references",
+      "after": "partial; candidate identity/counts explicit"
+    },
+    {
+      "scenario": "ts-failed-backend",
+      "evidence": "TestBeforeAfter/ts-failed-backend",
+      "before": "BAD: failed rg returned exit 0",
+      "after": "exit 1; status failed, not zero"
+    },
+    {
+      "scenario": "ts-fifth-definition",
+      "evidence": "TestBeforeAfter/ts-fifth-definition",
+      "before": "BAD: scoped fifth definition hidden (shown 0)",
+      "after": "partial; candidate identity/counts explicit"
+    },
+    {
+      "scenario": "exact-duplicate-questions",
+      "evidence": "TestBeforeAfter/exact-duplicate-questions",
+      "before": "1 exact-duplicate card; owner retained",
+      "after": "1 exact-duplicate card; owner retained"
+    },
+    {
+      "scenario": "related-questions-and-authority",
+      "evidence": "TestBeforeAfter/related-questions-and-authority",
+      "before": "BAD: 2 related questions merged; longer lead route replaces owner",
+      "after": "2 independent cards; owner and lead routes retained"
+    },
+    {
+      "scenario": "absence-python-failed",
+      "evidence": "TestBeforeAfterAbsence/absence-python-failed",
+      "before": "n/a on baseline: v2 lookup provenance and ReduceReview absent",
+      "after": "incomplete; 0 completed; reason recorded (decoded v2 replay)"
+    },
+    {
+      "scenario": "absence-python-partial",
+      "evidence": "TestBeforeAfterAbsence/absence-python-partial",
+      "before": "n/a on baseline: v2 lookup provenance and ReduceReview absent",
+      "after": "incomplete; 0 completed; reason recorded (decoded v2 replay)"
+    },
+    {
+      "scenario": "absence-python-capped",
+      "evidence": "TestBeforeAfterAbsence/absence-python-capped",
+      "before": "n/a on baseline: v2 lookup provenance and ReduceReview absent",
+      "after": "incomplete; 0 completed; reason recorded (decoded v2 replay)"
+    },
+    {
+      "scenario": "absence-python-unrelated-query",
+      "evidence": "TestBeforeAfterAbsence/absence-python-unrelated-query",
+      "before": "n/a on baseline: v2 lookup provenance and ReduceReview absent",
+      "after": "incomplete; 0 completed; reason recorded (decoded v2 replay)"
+    },
+    {
+      "scenario": "absence-typescript-failed",
+      "evidence": "TestBeforeAfterAbsence/absence-typescript-failed",
+      "before": "n/a on baseline: v2 lookup provenance and ReduceReview absent",
+      "after": "incomplete; 0 completed; reason recorded (decoded v2 replay)"
+    },
+    {
+      "scenario": "absence-typescript-partial",
+      "evidence": "TestBeforeAfterAbsence/absence-typescript-partial",
+      "before": "n/a on baseline: v2 lookup provenance and ReduceReview absent",
+      "after": "incomplete; 0 completed; reason recorded (decoded v2 replay)"
+    },
+    {
+      "scenario": "absence-typescript-capped",
+      "evidence": "TestBeforeAfterAbsence/absence-typescript-capped",
+      "before": "n/a on baseline: v2 lookup provenance and ReduceReview absent",
+      "after": "incomplete; 0 completed; reason recorded (decoded v2 replay)"
+    },
+    {
+      "scenario": "absence-typescript-unrelated-query",
+      "evidence": "TestBeforeAfterAbsence/absence-typescript-unrelated-query",
+      "before": "n/a on baseline: v2 lookup provenance and ReduceReview absent",
+      "after": "incomplete; 0 completed; reason recorded (decoded v2 replay)"
+    },
+    {
+      "scenario": "gate-timeout-message",
+      "evidence": "TestBeforeAfterTimeout",
+      "before": "not measured on baseline: fixed 45-minute wall cap, no override; running it would take 45 minutes and a patched baseline would not be the original (approved omission)",
+      "after": "pass_errors.adversary-a = timed out after 3s; unverified"
+    }
+  ]
+}

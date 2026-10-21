@@ -1,0 +1,127 @@
+#!/bin/sh
+# Original baseline and current CLI, deterministic fake runners/backends only.
+set -eu
+# Fail rather than downloading modules or a toolchain during an offline proof.
+export GOPROXY=off GOSUMDB=off GOTOOLCHAIN=local
+usage() {
+    printf '%s\n' 'Usage: before-after [--report <markdown>] [--results <json>]' \
+        'Build the original wip/ctx-gate-base in a detached temporary worktree, then run only BeforeAfter tests.' \
+        'Requires git, Go, Python 3. No models, network backends, or live bench store.' \
+        'Examples:' \
+        '  skills/orchestrate/scripts/before-after' \
+        '  skills/orchestrate/scripts/before-after --report skills/orchestrate/references/before-after.md --results skills/orchestrate/tool/testdata/before-after/results.json'
+}
+report=
+results=
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --help|-h) usage; exit 0 ;;
+        --report|--results)
+            flag=$1
+            if [ "$#" -lt 2 ] || [ -z "$2" ]; then printf 'error: %s needs a path\n' "$flag"; usage; exit 2; fi
+            if [ "$flag" = --report ]; then report=$2; else results=$2; fi
+            shift 2 ;;
+        *) printf 'error: unknown argument %s\n' "$1"; usage; exit 2 ;;
+    esac
+done
+for tool in git go python3; do
+    if ! command -v "$tool" >/dev/null 2>&1; then printf 'error: required tool %s not found\n' "$tool"; exit 1; fi
+done
+here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+repo=$(git -C "$here" rev-parse --show-toplevel)
+sha=$(git -C "$repo" rev-parse --verify 'wip/ctx-gate-base^{commit}')
+case "$sha" in e244949*) ;; *) printf 'error: baseline moved: expected original e244949, got %s\n' "$sha"; exit 1 ;; esac
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/orch-before-after.XXXXXX")
+cleanup() {
+    git -C "$repo" worktree remove --force "$tmp/baseline" >/dev/null 2>&1 || :
+    rm -rf "$tmp"
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+printf 'Building original baseline %s in temporary detached worktree\n' "$sha" >&2
+start=$(python3 -c 'import time; print(time.monotonic())')
+git -C "$repo" -c core.hooksPath=/dev/null worktree add --detach "$tmp/baseline" "$sha" >&2
+(cd "$tmp/baseline/skills/orchestrate/tool" && go build -p 2 -o "$tmp/orch-baseline" .)
+git -C "$repo" worktree remove "$tmp/baseline" >&2
+build_end=$(python3 -c 'import time; print(time.monotonic())')
+printf 'Building current code and running only BeforeAfter tests (-p 2)\n' >&2
+(cd "$repo/skills/orchestrate/tool" && go build -p 2 ./...)
+set +e
+(cd "$repo/skills/orchestrate/tool" && unset ORCH_BASELINE_BIN && go test -p 2 -count=1 -run BeforeAfter -json .) > "$tmp/after.json"
+after_code=$?
+(cd "$repo/skills/orchestrate/tool" && ORCH_BASELINE_BIN="$tmp/orch-baseline" go test -p 2 -count=1 -run BeforeAfter -json .) > "$tmp/tests.json"
+code=$?
+set -e
+if [ "$after_code" -ne 0 ]; then code=$after_code; fi
+end=$(python3 -c 'import time; print(time.monotonic())')
+current=$(git -C "$repo" rev-parse HEAD)
+python3 - "$tmp/tests.json" "$report" "$results" "$sha" "$current" "$start" "$build_end" "$end" "$code" "$tmp/after.json" <<'PY'
+import datetime, json, pathlib, sys
+log, report, results, baseline, current, start, built, end, code, after_log = sys.argv[1:]
+events = [json.loads(line) for line in pathlib.Path(log).read_text().splitlines()]
+after_events = [json.loads(line) for line in pathlib.Path(after_log).read_text().splitlines()]
+after_counts = {side: {'pass': 0, 'skip': 0, 'fail': 0} for side in ('BEFORE', 'AFTER')}
+for e in after_events:
+    side = e.get('Test', '').rsplit('/', 1)[-1]
+    if side in after_counts and e['Action'] in after_counts[side]: after_counts[side][e['Action']] += 1
+    if int(code) != 0 and e['Action'] == 'output': print(e.get('Output', ''), end='', file=sys.stderr)
+after_package = next((e for e in reversed(after_events) if 'Test' not in e and e['Action'] in ('pass', 'fail')), {})
+rows, counts = {}, {side: {'pass': 0, 'skip': 0, 'fail': 0} for side in ('BEFORE', 'AFTER')}
+skips = []
+for e in events:
+    name = e.get('Test', '')
+    side = name.rsplit('/', 1)[-1]
+    if side in counts and e['Action'] in counts[side]:
+        counts[side][e['Action']] += 1
+        if e['Action'] == 'skip': skips.append(name)
+    text = e.get('Output', '')
+    if 'BEFORE_AFTER ' in text:
+        value = json.loads(text.split('BEFORE_AFTER ', 1)[1])
+        row = rows.setdefault(value['scenario'], {'scenario': value['scenario'], 'evidence': name.rsplit('/', 1)[0]})
+        row[value['side'].lower()] = value['result']
+    if e['Action'] == 'output' and int(code) != 0:
+        print(text, end='', file=sys.stderr)
+package = next((e for e in reversed(events) if 'Test' not in e and e['Action'] in ('pass', 'fail')), {})
+data = {'baseline': baseline, 'current': current, 'generated_at': datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        'baseline_build_seconds': round(float(built)-float(start), 3),
+        'current_build_and_comparison_seconds': round(float(end)-float(built), 3),
+        'go_test_seconds': package.get('Elapsed'), 'exit_code': int(code), 'counts': counts,
+        'after_only': {'seconds': after_package.get('Elapsed'), 'counts': after_counts, 'status': after_package.get('Action')},
+        'skipped_tests': skips, 'rows': list(rows.values())}
+def safe(s): return str(s).replace('|', '\\|').replace('\n', ' ')
+lines = ['# Deterministic before/after proof', '', '<!-- Generated by scripts/before-after from a real run. Do not hand-edit. -->', '',
+         '## Run', '', 'From the repository root:', '', '```sh',
+         'skills/orchestrate/scripts/before-after --report skills/orchestrate/references/before-after.md --results skills/orchestrate/tool/testdata/before-after/results.json',
+         '```', '', 'The script builds the original baseline from a temporary detached worktree and removes it. It runs the AFTER-only and paired selections, never the baseline test suite. Both binaries receive the same fixture bytes and fake model/search responses. Each scenario uses a fresh temporary Git repository, isolated ORCH_HOME/config/cache, and no live bench store. No installed model or search service is contacted.', '',
+         'AFTER-only acceptance, from `skills/orchestrate/tool`:', '', '```sh',
+         'go build ./... && go test -p 2 -run BeforeAfter .', '```', '',
+         'For a manually built baseline, from the same directory:', '', '```sh',
+         'ORCH_BASELINE_BIN=/absolute/path/to/original/orch go test -p 2 -count=1 -run BeforeAfter .',
+         '```', '', 'Without ORCH_BASELINE_BIN, each BEFORE assertion is explicitly skipped, not counted as passed. The script uses `go build -p 2 ./...` and `go test -p 2 -count=1 -run BeforeAfter -json .`; only the selected tests run.', '',
+         f'- Baseline: `{baseline}` (`wip/ctx-gate-base`, original code).',
+         f'- Current source parent: `{current}` plus this harness in the worktree. No production changes.',
+         f'- Recorded at: {data["generated_at"]}.',
+         f'- Baseline build/worktree setup: {data["baseline_build_seconds"]} s.',
+         f'- Current build and comparison: {data["current_build_and_comparison_seconds"]} s.',
+         f'- Go test package runtime: {data["go_test_seconds"]} s; exit {code}.',
+         f'- Paired leaf counts: BEFORE {counts["BEFORE"]}; AFTER {counts["AFTER"]}.',
+         f'- AFTER-only runtime: {data["after_only"]["seconds"]} s; status {data["after_only"]["status"]}; leaf counts {after_counts}.', '',
+         '## Results', '', '| Scenario | Before | After | Evidence |', '|---|---|---|---|']
+for r in rows.values():
+    lines.append('| ' + ' | '.join(safe(r.get(k, 'NOT RUN')) for k in ('scenario', 'before', 'after', 'evidence')) + ' |')
+lines += ['', '## Evidence and limitations', '',
+          '- `BAD` is an asserted original defect, not a failed comparison test. A `FINDING` is an unexpected baseline-good or current-bad result and is never silently converted into a regression success.',
+          '- Evidence names identify exact Go tests in `tool/before_after_test.go`. The machine-readable companion `tool/testdata/before-after/results.json` records rows, counts, skips, source IDs, and runtimes.',
+          '- Gate assertions decode persisted `gate.json`, because the original gate lacks `--json`. Current gate calls explicitly select `--json`. Retrieval uses `ctx ... --json`. Approval and integration assert exit codes plus Git state and persisted markers, not default gate prose. Question cards are parsed as records; legacy routing is read from their Tag section.',
+          '- The v2 absence reducer/provenance schema does not exist on the baseline. Its BEFORE cells are n/a and its tests skip explicitly. AFTER replays decoded v2 inputs, checks a complete-empty positive control, and rejects failed, partial, capped, or unrelated-query searches for both Python and TypeScript.',
+          '- The baseline timeout is not measured by explicit orchestrator decision: its fixed 45-minute wall cap has no override; running it would take 45 minutes, and a patched baseline would not be the original. AFTER invokes `TestGateTimedOutPassGetsCtrlCAndDoesNotStallTheOthers` with test-only 3-second timing and asserts the decoded pass error.',
+          '- Fake retrieval transcripts are adversarial inputs to real CLI decoders. These tests prove trust/retrieval contracts, not relevance quality, language-server quality, or production-model accuracy.', '']
+text = '\n'.join(lines)
+if report:
+    p=pathlib.Path(report); p.parent.mkdir(parents=True, exist_ok=True); p.write_text(text)
+if results:
+    p=pathlib.Path(results); p.parent.mkdir(parents=True, exist_ok=True); p.write_text(json.dumps(data, indent=2)+'\n')
+print(text)
+PY
+exit "$code"
