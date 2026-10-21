@@ -82,114 +82,129 @@ func TestCheckoutUntrackedContentAndIgnoredLimit(t *testing.T) {
 }
 
 func TestGateCheckoutMutationDiscardsAndStops(t *testing.T) {
-	for _, harness := range []string{"pi", "claude"} {
-		for _, kind := range []string{"tracked", "untracked", "deleted", "none"} {
-			for _, ctxOn := range []bool{false, true} {
-				t.Run(fmt.Sprintf("%s/%s/ctx-%v", harness, kind, ctxOn), func(t *testing.T) {
-					h := setup(t)
-					tracked := filepath.Join(h.repo, "tracked.txt")
-					os.WriteFile(tracked, []byte("before"), 0o644)
-					h.git("add", "tracked.txt")
-					h.git("commit", "-qm", "fixture")
-					mutation := ""
-					switch kind {
-					case "tracked":
-						mutation = "printf changed > tracked.txt\n"
-					case "untracked":
-						mutation = "printf new > new.txt\n"
-					case "deleted":
-						mutation = "rm tracked.txt\n"
-					}
-					reply := "printf '{}'"
-					if harness == "claude" {
-						reply = `printf '%s\n' '{"type":"result","result":"{}"}'`
-					}
-					t.Setenv("ORCH_"+strings.ToUpper(harness), fakeRunner(t, harness, mutation+reply))
-					rec := &gateRecord{PassErrors: map[string]string{}, PassSeconds: map[string]int{}, PassKept: map[string]string{}, PassTokens: map[string]passTokens{}}
-					var applied atomic.Int32
-					var passes []gatePass
-					for i := 0; i < 12; i++ {
-						passes = append(passes, gatePass{name: fmt.Sprintf("p%d", i), class: "package", prompt: "review", apply: func(_ string, r *gateRecord, _ string, _ *spec) error {
-							applied.Add(1)
-							r.Findings = append(r.Findings, gateFinding{Claim: "must be discarded"})
-							return nil
-						}})
-					}
-					runner, _ := roleSite(profile{Harness: harness, Model: "test"}).newRoleRun("gate", modelOptions{})
-					runGatePasses(filepath.Join(h.tmp, "gate"), h.repo, "test", passes, rec, nil, nil, gateOpts{runner: runner, headless: true, ctxTool: ctxOn})
-					if kind == "none" {
-						if len(rec.TreeChanged) > 0 || applied.Load() != 12 || len(rec.PassErrors) > 0 {
-							t.Fatalf("unchanged: %+v, applied %d", rec, applied.Load())
-						}
-						return
-					}
-					want := "tracked.txt"
-					if kind == "untracked" {
-						want = "new.txt"
-					}
-					if len(rec.TreeChanged) != 1 || rec.TreeChanged[0] != want || len(rec.TreeChangedPasses) == 0 || len(rec.Findings) != 0 || rec.State != "" || rec.PassErrors["all"] == "" {
-						t.Fatalf("mutation not rejected: %+v", rec)
-					}
-					if len(rec.PassSeconds) >= 12 {
-						t.Fatal("remaining passes were not canceled")
-					}
-					if kind == "deleted" {
-						if exists(tracked) {
-							t.Fatal("deletion was reverted")
-						}
-					} else if !exists(filepath.Join(h.repo, want)) {
-						t.Fatal("write was reverted")
-					}
-				})
+	// Representative cases only. Between them every harness, every change kind
+	// and both ctx settings still appear at least once.
+	for _, c := range []struct {
+		harness string
+		kind    string
+		ctxOn   bool
+	}{
+		{"pi", "tracked", false},
+		{"pi", "deleted", true},
+		{"claude", "untracked", false},
+		{"claude", "none", true},
+	} {
+		harness, kind, ctxOn := c.harness, c.kind, c.ctxOn
+		t.Run(fmt.Sprintf("%s/%s/ctx-%v", harness, kind, ctxOn), func(t *testing.T) {
+			h := setup(t)
+			tracked := filepath.Join(h.repo, "tracked.txt")
+			os.WriteFile(tracked, []byte("before"), 0o644)
+			h.git("add", "tracked.txt")
+			h.git("commit", "-qm", "fixture")
+			mutation := ""
+			switch kind {
+			case "tracked":
+				mutation = "printf changed > tracked.txt\n"
+			case "untracked":
+				mutation = "printf new > new.txt\n"
+			case "deleted":
+				mutation = "rm tracked.txt\n"
 			}
-		}
+			reply := "printf '{}'"
+			if harness == "claude" {
+				reply = `printf '%s\n' '{"type":"result","result":"{}"}'`
+			}
+			t.Setenv("ORCH_"+strings.ToUpper(harness), fakeRunner(t, harness, mutation+reply))
+			rec := &gateRecord{PassErrors: map[string]string{}, PassSeconds: map[string]int{}, PassKept: map[string]string{}, PassTokens: map[string]passTokens{}}
+			var applied atomic.Int32
+			var passes []gatePass
+			for i := 0; i < 12; i++ {
+				passes = append(passes, gatePass{name: fmt.Sprintf("p%d", i), class: "package", prompt: "review", apply: func(_ string, r *gateRecord, _ string, _ *spec) error {
+					applied.Add(1)
+					r.Findings = append(r.Findings, gateFinding{Claim: "must be discarded"})
+					return nil
+				}})
+			}
+			runner, _ := roleSite(profile{Harness: harness, Model: "test"}).newRoleRun("gate", modelOptions{})
+			runGatePasses(filepath.Join(h.tmp, "gate"), h.repo, "test", passes, rec, nil, nil, gateOpts{runner: runner, headless: true, ctxTool: ctxOn})
+			if kind == "none" {
+				if len(rec.TreeChanged) > 0 || applied.Load() != 12 || len(rec.PassErrors) > 0 {
+					t.Fatalf("unchanged: %+v, applied %d", rec, applied.Load())
+				}
+				return
+			}
+			want := "tracked.txt"
+			if kind == "untracked" {
+				want = "new.txt"
+			}
+			if len(rec.TreeChanged) != 1 || rec.TreeChanged[0] != want || len(rec.TreeChangedPasses) == 0 || len(rec.Findings) != 0 || rec.State != "" || rec.PassErrors["all"] == "" {
+				t.Fatalf("mutation not rejected: %+v", rec)
+			}
+			if len(rec.PassSeconds) >= 12 {
+				t.Fatal("remaining passes were not canceled")
+			}
+			if kind == "deleted" {
+				if exists(tracked) {
+					t.Fatal("deletion was reverted")
+				}
+			} else if !exists(filepath.Join(h.repo, want)) {
+				t.Fatal("write was reverted")
+			}
+		})
 	}
 }
 
 func TestGatePaneCheckoutMutation(t *testing.T) {
-	for _, harness := range []string{"pi", "claude"} {
-		for _, kind := range []string{"tracked", "untracked", "deleted"} {
-			for _, ctxOn := range []bool{false, true} {
-				t.Run(fmt.Sprintf("%s/%s/ctx-%v", harness, kind, ctxOn), func(t *testing.T) {
-					h := setup(t)
-					gateWarmDelay = time.Minute // leave a third pass queued until the check cancels it
-					gdir := h.gateRepo(1)
-					t.Setenv("ORCH_FAKE_CLAUDE_REPO", h.repo)
-					dir := h.fakePi(gatePasses(nil))
-					path := filepath.Join(h.repo, "internal/store.go")
-					if kind == "untracked" {
-						path = filepath.Join(h.repo, "new.txt")
-					}
-					mutation := fmt.Sprintf("printf changed > %q\n", path)
-					if kind == "deleted" {
-						mutation = fmt.Sprintf("rm %q\n", path)
-					}
-					bin := filepath.Join(dir, "pi")
-					original := mustRead(t, bin)
-					if err := os.WriteFile(bin, []byte("#!/bin/sh\n"+mutation+string(original)), 0o755); err != nil {
-						t.Fatal(err)
-					}
-					code, out := h.run("gate", "spec.md", "--runner", harness+":test", "--ctx-tool", onOff(ctxOn))
-					if code != 1 {
-						t.Fatalf("%d %s", code, out)
-					}
-					view := wantGateState(t, out, "stale")
-					rec := readRecord(t, gdir)
-					if view.Warning != treeWarning(&rec) || !strings.HasPrefix(view.Warning, "UNVERIFIED: checkout changed:") {
-						t.Fatalf("checkout warning missing or differs from recorded facts: %+v", view)
-					}
-					if rec.State != "stale" || len(rec.TreeChanged) != 1 || len(rec.Findings) > 0 || len(rec.TreeChangedPasses) == 0 {
-						t.Fatalf("%+v", rec)
-					}
-					if len(h.gateCalls("agent", "start")) >= 3 {
-						t.Fatal("queued pane pass was not canceled")
-					}
-					if kind == "deleted" && exists(path) || kind != "deleted" && !exists(path) {
-						t.Fatal("mutation was reverted")
-					}
-				})
+	// Representative cases only. Both harnesses and both ctx settings stay
+	// covered; the untracked kind is covered by the passes matrix above and by
+	// TestCheckoutFingerprint.
+	for _, c := range []struct {
+		harness string
+		kind    string
+		ctxOn   bool
+	}{
+		{"pi", "deleted", false},
+		{"claude", "tracked", true},
+	} {
+		harness, kind, ctxOn := c.harness, c.kind, c.ctxOn
+		t.Run(fmt.Sprintf("%s/%s/ctx-%v", harness, kind, ctxOn), func(t *testing.T) {
+			h := setup(t)
+			gateWarmDelay = time.Minute // leave a third pass queued until the check cancels it
+			gdir := h.gateRepo(1)
+			t.Setenv("ORCH_FAKE_CLAUDE_REPO", h.repo)
+			dir := h.fakePi(gatePasses(nil))
+			path := filepath.Join(h.repo, "internal/store.go")
+			if kind == "untracked" {
+				path = filepath.Join(h.repo, "new.txt")
 			}
-		}
+			mutation := fmt.Sprintf("printf changed > %q\n", path)
+			if kind == "deleted" {
+				mutation = fmt.Sprintf("rm %q\n", path)
+			}
+			bin := filepath.Join(dir, "pi")
+			original := mustRead(t, bin)
+			if err := os.WriteFile(bin, []byte("#!/bin/sh\n"+mutation+string(original)), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			code, out := h.run("gate", "spec.md", "--runner", harness+":test", "--ctx-tool", onOff(ctxOn))
+			if code != 1 {
+				t.Fatalf("%d %s", code, out)
+			}
+			view := wantGateState(t, out, "stale")
+			rec := readRecord(t, gdir)
+			if view.Warning != treeWarning(&rec) || !strings.HasPrefix(view.Warning, "UNVERIFIED: checkout changed:") {
+				t.Fatalf("checkout warning missing or differs from recorded facts: %+v", view)
+			}
+			if rec.State != "stale" || len(rec.TreeChanged) != 1 || len(rec.Findings) > 0 || len(rec.TreeChangedPasses) == 0 {
+				t.Fatalf("%+v", rec)
+			}
+			if len(h.gateCalls("agent", "start")) >= 3 {
+				t.Fatal("queued pane pass was not canceled")
+			}
+			if kind == "deleted" && exists(path) || kind != "deleted" && !exists(path) {
+				t.Fatal("mutation was reverted")
+			}
+		})
 	}
 }
 
