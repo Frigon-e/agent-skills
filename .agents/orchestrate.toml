@@ -1,6 +1,3 @@
 check = "cd skills/orchestrate/tool && go build ./... && go vet ./..."
 lead_skills = ["route-work"]
 stall_minutes = 25
-
-[locks]
-cpu = "around every full-suite run: go test ./..., go test -race, or a phase-boundary check. Take it: orch lock acquire cpu --wait 3600; focused go test -run exempt"
