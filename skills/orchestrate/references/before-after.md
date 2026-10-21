@@ -27,22 +27,22 @@ ORCH_BASELINE_BIN=/absolute/path/to/original/orch go test -p 2 -count=1 -run Bef
 Without ORCH_BASELINE_BIN, each BEFORE assertion is explicitly skipped, not counted as passed. The script uses `go build -p 2 ./...` and `go test -p 2 -count=1 -run BeforeAfter -json .`; only the selected tests run.
 
 - Baseline: `e2449497129604f2ee9b4ccb839e1e66eab67965` (`wip/ctx-gate-base`, original code).
-- Current source parent: `2e120b9d84003916baea2b9a4fb88fbe22e2e021` plus this harness in the worktree. No production changes.
-- Recorded at: 2026-10-20T14:30:48.908947+00:00.
-- Baseline build/worktree setup: 1.806 s.
-- Current build and comparison: 50.655 s.
-- Go test package runtime: 29.387 s; exit 0.
+- Current source: `d308ac7e4d772722292a9cd7d3ce4d03c89ef188` (integrated production code and comparison harness).
+- Recorded at: 2026-10-21T01:26:12.707043+00:00.
+- Baseline build/worktree setup: 1.548 s.
+- Current build and comparison: 71.928 s.
+- Go test package runtime: 37.701 s; exit 0.
 - Paired leaf counts: BEFORE {'pass': 31, 'skip': 9, 'fail': 0}; AFTER {'pass': 40, 'skip': 0, 'fail': 0}.
-- AFTER-only runtime: 19.061 s; status pass; leaf counts {'BEFORE': {'pass': 0, 'skip': 40, 'fail': 0}, 'AFTER': {'pass': 40, 'skip': 0, 'fail': 0}}.
+- AFTER-only runtime: 25.303 s; status pass; leaf counts {'BEFORE': {'pass': 0, 'skip': 40, 'fail': 0}, 'AFTER': {'pass': 40, 'skip': 0, 'fail': 0}}.
 
 ## Results
 
 | Scenario | Before | After | Evidence |
 |---|---|---|---|
-| empty-adversary | BAD: pass | incomplete (legacy unverified); reason recorded | TestBeforeAfter/empty-adversary |
-| id-only-adversary | BAD: pass | incomplete (legacy unverified); reason recorded | TestBeforeAfter/id-only-adversary |
-| missing-verdict | BAD: pass | incomplete (legacy unverified); reason recorded | TestBeforeAfter/missing-verdict |
-| unsupported-candidate | BAD: pass | incomplete (legacy unverified); reason recorded | TestBeforeAfter/unsupported-candidate |
+| empty-adversary | BAD: pass | incomplete; reason recorded | TestBeforeAfter/empty-adversary |
+| id-only-adversary | BAD: pass | incomplete; reason recorded | TestBeforeAfter/id-only-adversary |
+| missing-verdict | BAD: pass | incomplete; reason recorded | TestBeforeAfter/missing-verdict |
+| unsupported-candidate | BAD: pass | incomplete; reason recorded | TestBeforeAfter/unsupported-candidate |
 | future-file-ownership | BAD: pass | blocked: fail; verified structural blocker | TestBeforeAfter/future-file-ownership |
 | approval-py-body | BAD: changed checkout authorized | stale approval refused; no tasks created | TestBeforeAfter/approval-py-body |
 | approval-py-second-worktree | BAD: changed checkout authorized | stale approval refused; no tasks created | TestBeforeAfter/approval-py-second-worktree |
@@ -78,7 +78,7 @@ Without ORCH_BASELINE_BIN, each BEFORE assertion is explicitly skipped, not coun
 | absence-typescript-partial | n/a on baseline: v2 lookup provenance and ReduceReview absent | incomplete; 0 completed; reason recorded (decoded v2 replay) | TestBeforeAfterAbsence/absence-typescript-partial |
 | absence-typescript-capped | n/a on baseline: v2 lookup provenance and ReduceReview absent | incomplete; 0 completed; reason recorded (decoded v2 replay) | TestBeforeAfterAbsence/absence-typescript-capped |
 | absence-typescript-unrelated-query | n/a on baseline: v2 lookup provenance and ReduceReview absent | incomplete; 0 completed; reason recorded (decoded v2 replay) | TestBeforeAfterAbsence/absence-typescript-unrelated-query |
-| gate-timeout-message | not measured on baseline: fixed 45-minute wall cap, no override; running it would take 45 minutes and a patched baseline would not be the original (approved omission) | pass_errors.adversary-a = timed out after 3s; unverified | TestBeforeAfterTimeout |
+| gate-timeout-message | not measured on baseline: fixed 45-minute wall cap, no override; running it would take 45 minutes and a patched baseline would not be the original (approved omission) | pass_errors.adversary-a = timed out after 3s; incomplete | TestBeforeAfterTimeout |
 
 ## Evidence and limitations
 

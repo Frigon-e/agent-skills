@@ -1,10 +1,10 @@
 {
   "baseline": "e2449497129604f2ee9b4ccb839e1e66eab67965",
-  "current": "2e120b9d84003916baea2b9a4fb88fbe22e2e021",
-  "generated_at": "2026-10-20T14:30:48.908947+00:00",
-  "baseline_build_seconds": 1.806,
-  "current_build_and_comparison_seconds": 50.655,
-  "go_test_seconds": 29.387,
+  "current": "d308ac7e4d772722292a9cd7d3ce4d03c89ef188",
+  "generated_at": "2026-10-21T01:26:12.707043+00:00",
+  "baseline_build_seconds": 1.548,
+  "current_build_and_comparison_seconds": 71.928,
+  "go_test_seconds": 37.701,
   "exit_code": 0,
   "counts": {
     "BEFORE": {
@@ -19,7 +19,7 @@
     }
   },
   "after_only": {
-    "seconds": 19.061,
+    "seconds": 25.303,
     "counts": {
       "BEFORE": {
         "pass": 0,
@@ -50,25 +50,25 @@
       "scenario": "empty-adversary",
       "evidence": "TestBeforeAfter/empty-adversary",
       "before": "BAD: pass",
-      "after": "incomplete (legacy unverified); reason recorded"
+      "after": "incomplete; reason recorded"
     },
     {
       "scenario": "id-only-adversary",
       "evidence": "TestBeforeAfter/id-only-adversary",
       "before": "BAD: pass",
-      "after": "incomplete (legacy unverified); reason recorded"
+      "after": "incomplete; reason recorded"
     },
     {
       "scenario": "missing-verdict",
       "evidence": "TestBeforeAfter/missing-verdict",
       "before": "BAD: pass",
-      "after": "incomplete (legacy unverified); reason recorded"
+      "after": "incomplete; reason recorded"
     },
     {
       "scenario": "unsupported-candidate",
       "evidence": "TestBeforeAfter/unsupported-candidate",
       "before": "BAD: pass",
-      "after": "incomplete (legacy unverified); reason recorded"
+      "after": "incomplete; reason recorded"
     },
     {
       "scenario": "future-file-ownership",
@@ -284,7 +284,7 @@
       "scenario": "gate-timeout-message",
       "evidence": "TestBeforeAfterTimeout",
       "before": "not measured on baseline: fixed 45-minute wall cap, no override; running it would take 45 minutes and a patched baseline would not be the original (approved omission)",
-      "after": "pass_errors.adversary-a = timed out after 3s; unverified"
+      "after": "pass_errors.adversary-a = timed out after 3s; incomplete"
     }
   ]
 }
