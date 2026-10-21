@@ -737,17 +737,18 @@ func runPi(repo, model string, p gatePass, sessionDir, cache string) (string, er
 	ctx, cancel := context.WithTimeout(passContext(p), gateTimeout)
 	defer cancel()
 	stalled := make(chan struct{})
+	poll, stall := gatePoll, gateStall
 	go func() {
 		last, changed := sessionStamp(sessionDir), time.Now()
 		for {
 			select {
 			case <-ctx.Done():
 				return
-			case <-time.After(gatePoll):
+			case <-time.After(poll):
 			}
 			if now := sessionStamp(sessionDir); now != last {
 				last, changed = now, time.Now()
-			} else if time.Since(changed) >= gateStall {
+			} else if time.Since(changed) >= stall {
 				close(stalled)
 				cancel()
 				return
@@ -770,7 +771,7 @@ func runPi(repo, model string, p gatePass, sessionDir, cache string) (string, er
 	out, err := cmd.Output()
 	select {
 	case <-stalled:
-		return "", &passLimit{"stalled: no activity for " + gateStall.String()}
+		return "", &passLimit{"stalled: no activity for " + stall.String()}
 	default:
 	}
 	if passContext(p).Err() != nil {

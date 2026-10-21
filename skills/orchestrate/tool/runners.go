@@ -449,9 +449,10 @@ func runClaude(repo string, p profile, pass gatePass, session string) (string, e
 	var stderr strings.Builder
 	cmd.Stderr = &stderr
 	stalled := make(chan struct{})
+	poll, stall := gatePoll, gateStall
 	go func() {
 		last, changed := sessionStamp(session), time.Now()
-		ticker := time.NewTicker(gatePoll)
+		ticker := time.NewTicker(poll)
 		defer ticker.Stop()
 		for {
 			select {
@@ -460,7 +461,7 @@ func runClaude(repo string, p profile, pass gatePass, session string) (string, e
 			case <-ticker.C:
 				if stamp := sessionStamp(session); stamp != last {
 					last, changed = stamp, time.Now()
-				} else if time.Since(changed) >= gateStall {
+				} else if time.Since(changed) >= stall {
 					close(stalled)
 					cancel()
 					return
@@ -471,7 +472,7 @@ func runClaude(repo string, p profile, pass gatePass, session string) (string, e
 	err = cmd.Run()
 	select {
 	case <-stalled:
-		return "", &passLimit{"stalled: no activity for " + gateStall.String()}
+		return "", &passLimit{"stalled: no activity for " + stall.String()}
 	default:
 	}
 	if passContext(pass).Err() != nil {
