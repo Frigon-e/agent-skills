@@ -755,7 +755,7 @@ func TestGateStalledGroupPassIsRetriedOnceThenFails(t *testing.T) {
 			dir := filepath.Join(h.tmp, "fakepi")
 			os.WriteFile(filepath.Join(dir, "group.sleep"), nil, 0o644)
 			gateStall = 300 * time.Millisecond
-			code, out := h.run("gate", "spec.md")
+			code, out := h.run("gate", "spec.md", "--runner", "pi:"+gateModelDef)
 			if code != 1 {
 				t.Fatalf("exit %d: %s", code, out)
 			}
@@ -783,7 +783,7 @@ func TestGateStalledGroupPassSucceedsOnTheRetry(t *testing.T) {
 			dir := filepath.Join(h.tmp, "fakepi")
 			os.WriteFile(filepath.Join(dir, "group.sleep.once"), nil, 0o644)
 			gateStall = 300 * time.Millisecond
-			out := h.must("gate", "spec.md")
+			out := h.must("gate", "spec.md", "--runner", "pi:"+gateModelDef)
 			if view := wantGateState(t, out, "pass"); len(view.PassErrors) != 0 {
 				t.Fatalf("a retried pass was reported failed:\n%s", out)
 			}

@@ -25,7 +25,8 @@ type autoChoice struct {
 
 // autoPick resolves a task made with --harness auto. The task keeps a hand
 // chosen profile otherwise: auto applies only when it was asked for. It
-// writes nothing; cached says the record is an earlier one that needs no write.
+// records unavailable triage attempts; cached says a successful record is an
+// earlier one that needs no write.
 func (a *app) autoPick(s site, id string, allowDegraded bool, tierOverride ...string) (c *autoChoice, rec *triageRecord, cached bool, err error) {
 	dir, err := taskDir(s.root, id)
 	if err != nil {
@@ -46,11 +47,13 @@ func (a *app) autoPick(s site, id string, allowDegraded bool, tierOverride ...st
 		rec = &triageRecord{ID: id, TaskHash: hash, Tier: tierOverride[0], Reason: "user-selected tier", Mode: "manual"}
 	} else {
 		if reason := s.deciderOff(a.now()); reason != "" {
+			a.recordTriageSkip(s, id, reason)
 			return nil, nil, false, &triageOff{reason: reason, id: id}
 		}
 		rec, cached, err = a.triageScore(s, id, false)
 		if err != nil {
 			if off, ok := err.(*triageOff); ok {
+				a.recordTriageSkip(s, id, off.reason)
 				return nil, nil, false, off
 			}
 			return nil, nil, false, fail("cannot triage %s: %v", id, err)
