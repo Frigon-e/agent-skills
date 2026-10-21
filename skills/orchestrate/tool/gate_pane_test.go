@@ -33,7 +33,7 @@ func fakeGatePaneVerbs(path string, args []string) (int, bool) {
 	markF := filepath.Join(panes, args[2]+".gate")
 	pidF := filepath.Join(panes, args[2]+".pid")
 	switch verb {
-	case "agent start", "agent __run", "agent wait", "agent get", "agent send-keys", "agent prompt", "pane rename", "pane run", "pane close", "tab close":
+	case "agent start", "agent __run", "agent __late", "agent wait", "agent get", "agent send-keys", "agent prompt", "agent rename", "pane rename", "pane run", "pane close", "tab close":
 	default:
 		return 0, false
 	}
@@ -103,10 +103,6 @@ func fakeGatePaneVerbs(path string, args []string) (int, bool) {
 			return 1, true
 		}
 		os.WriteFile(pidF, []byte(strconv.Itoa(cmd.Process.Pid)), 0o644)
-		if exists(path + ".starttimeout") {
-			fmt.Fprintln(os.Stderr, `{"error":{"code":"timeout","message":"timed out waiting for agent startup"}}`)
-			return 1, true
-		}
 		for i := 0; i < 50 && status() == "working"; i++ {
 			time.Sleep(20 * time.Millisecond)
 		}
@@ -178,6 +174,11 @@ func fakeGatePaneVerbs(path string, args []string) (int, bool) {
 			os.WriteFile(statusF, []byte("idle"), 0o644)
 		}
 		return 0, true
+	case "agent __late": // args: pane, then the agent start to replay once pi's turn begins
+		time.Sleep(time.Second)
+		os.Remove(statusF) // the same agent, not a second one in a busy pane
+		fakeGatePaneVerbs(path, args[3:])
+		return 0, true
 	case "agent wait":
 		logCall(nil)
 		ms, _ := strconv.Atoi(flagValue(args, "--timeout"))
@@ -228,23 +229,19 @@ func fakeGatePaneVerbs(path string, args []string) (int, bool) {
 		logCall(nil)
 		fmt.Println("{}")
 		return 0, true
-	case "pane rename":
+	case "pane rename", "agent rename":
 		logCall(map[string]any{"label": strings.Join(args[3:], " ")})
 		fmt.Println("{}")
 		return 0, true
-	case "pane run": // the shell keeps an exported PI_CACHE_RETENTION
+	case "pane run":
 		cmd := strings.Join(args[3:], " ")
-		logCall(map[string]any{"cmd": cmd})
-		envF := filepath.Join(panes, args[2]+".env")
-		if v, ok := strings.CutPrefix(cmd, "export PI_CACHE_RETENTION="); ok {
-			os.WriteFile(envF, []byte(v), 0o644)
-		} else if cmd == "unset PI_CACHE_RETENTION" {
-			os.Remove(envF)
-		} else if v, ok := strings.CutPrefix(cmd, "export ORCH_CTX_ONLY_READY="); ok {
-			os.WriteFile(filepath.Join(panes, args[2]+".ready"), []byte(strings.Trim(v, "'")), 0o644)
+		file, ok := strings.CutPrefix(cmd, "sh ")
+		if !ok {
+			logCall(map[string]any{"cmd": cmd})
+			fmt.Println("{}")
+			return 0, true
 		}
-		fmt.Println("{}")
-		return 0, true
+		return fakePaneLaunch(path, args[2], cmd, strings.Trim(file, "'"), logCall)
 	case "agent prompt":
 		text := args[3]
 		logCall(map[string]any{"text": text, "wait": strings.Contains(strings.Join(args, " "), "--wait")})
@@ -282,6 +279,76 @@ func fakeGatePaneVerbs(path string, args []string) (int, bool) {
 		fmt.Println("{}")
 		return 0, true
 	}
+}
+
+var launchAgentRe = regexp.MustCompile(`herdr agent (\S+)`)
+
+// fakePaneLaunch plays a pane shell running `sh <launcher>`: the launcher runs
+// for real with stub pi and claude first on PATH, which record the argv and
+// environment they got. The capture then starts the fake agent through the
+// `agent start` verb, so a test reads a launch like any agent start; the
+// pane run call itself also records the command and the launcher text.
+func fakePaneLaunch(path, pane, cmd, file string, logCall func(map[string]any)) (int, bool) {
+	script, _ := os.ReadFile(file)
+	logCall(map[string]any{"cmd": cmd, "script": string(script)})
+	panes := path + ".panes"
+	stubs := path + ".stubs"
+	os.MkdirAll(stubs, 0o755)
+	for _, kind := range []string{"pi", "claude"} {
+		// Passes launch in parallel: write each stub once, atomically.
+		if exists(filepath.Join(stubs, kind)) {
+			continue
+		}
+		stub := "#!/bin/sh\necho " + kind + " > \"$FAKE_LAUNCH.kind\"\nprintf '%s\\0' \"$@\" > \"$FAKE_LAUNCH.args\"\nenv -0 > \"$FAKE_LAUNCH.env\"\n"
+		tmp := filepath.Join(stubs, fmt.Sprintf(".%s.%d", kind, os.Getpid()))
+		os.WriteFile(tmp, []byte(stub), 0o755)
+		os.Rename(tmp, filepath.Join(stubs, kind))
+	}
+	capture := filepath.Join(panes, pane+".launch")
+	sh := exec.Command("sh", file)
+	sh.Env = append(os.Environ(), "PATH="+stubs+string(os.PathListSeparator)+os.Getenv("PATH"), "FAKE_LAUNCH="+capture)
+	if out, err := sh.CombinedOutput(); err != nil {
+		fmt.Fprintf(os.Stderr, "launcher failed: %v %s\n", err, out)
+		return 1, true
+	}
+	if exists(path + ".nostart") { // the agent never shows up in the pane
+		os.WriteFile(filepath.Join(panes, pane+".gate"), nil, 0o644)
+		os.Remove(filepath.Join(panes, pane+".status"))
+		fmt.Println("{}")
+		return 0, true
+	}
+	kind, _ := os.ReadFile(capture + ".kind")
+	rawArgs, _ := os.ReadFile(capture + ".args")
+	rawEnv, _ := os.ReadFile(capture + ".env")
+	envF, readyF := filepath.Join(panes, pane+".env"), filepath.Join(panes, pane+".ready")
+	os.Remove(envF)
+	os.Remove(readyF)
+	for _, kv := range strings.Split(string(rawEnv), "\x00") {
+		if v, ok := strings.CutPrefix(kv, "PI_CACHE_RETENTION="); ok {
+			os.WriteFile(envF, []byte(v), 0o644)
+		} else if v, ok := strings.CutPrefix(kv, "ORCH_CTX_ONLY_READY="); ok {
+			os.WriteFile(readyF, []byte(v), 0o644)
+		}
+	}
+	name := ""
+	if m := launchAgentRe.FindStringSubmatch(string(script)); m != nil {
+		name = m[1]
+	}
+	start := []string{"agent", "start", name, "--kind", strings.TrimSpace(string(kind)), "--pane", pane, "--"}
+	start = append(start, strings.Split(strings.TrimSuffix(string(rawArgs), "\x00"), "\x00")...)
+	if exists(path + ".idlefirst") { // pi sits idle at its prompt before its turn begins
+		os.WriteFile(filepath.Join(panes, pane+".gate"), nil, 0o644)
+		os.WriteFile(filepath.Join(panes, pane+".status"), []byte("idle"), 0o644)
+		late := exec.Command(os.Args[0], append([]string{"agent", "__late", pane}, start...)...)
+		late.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+		if err := late.Start(); err != nil {
+			return 1, true
+		}
+		fmt.Println("{}")
+		return 0, true
+	}
+	fakeGatePaneVerbs(path, start)
+	return 0, true
 }
 
 type gateCall struct {
@@ -591,12 +658,65 @@ func TestGateAgentStartNamesAreValidAndPromptFilesShareTheirPrefix(t *testing.T)
 	}
 }
 
-func TestGateStartTimeoutWhileWorkingStillFinishesThePass(t *testing.T) {
+// Pane passes call orch ctx through the pane's own PATH, so a pane run with the
+// ctx tool stops before any pass when orch is not on PATH, and says how to fix it.
+func TestGatePaneRunNeedsOrchOnPath(t *testing.T) {
 	h := setup(t)
 	h.gateRepo(1)
 	h.sessionPi(gatePasses(nil))
-	os.WriteFile(h.fake+".starttimeout", nil, 0o644)
+	var keep []string
+	for _, d := range filepath.SplitList(os.Getenv("PATH")) {
+		if _, err := os.Stat(filepath.Join(d, "orch")); err != nil {
+			keep = append(keep, d)
+		}
+	}
+	t.Setenv("PATH", strings.Join(keep, string(os.PathListSeparator)))
+	code, out := h.run("gate", "spec.md")
+	if code == 0 {
+		t.Fatalf("exit %d: %s", code, out)
+	}
+	wantContains(t, out, "orch is not on PATH", "ln -s /skill/scripts/orch ~/.local/bin/orch")
+	if n := len(h.gateCalls("pane", "run")); n != 0 {
+		t.Fatalf("%d passes started without orch on PATH", n)
+	}
+	for _, args := range [][]string{{"--headless"}, {"--ctx-tool", "off"}, {"--dry-run"}} {
+		if code, out := h.run(append([]string{"gate", "spec.md"}, args...)...); strings.Contains(out, "orch is not on PATH") {
+			t.Errorf("%v needs no orch on PATH: exit %d %s", args, code, out)
+		}
+	}
+}
+
+// A launcher whose agent herdr never sees (pi died at once, a bad argument)
+// fails the pass after gateStartWait instead of waiting for the pass timeout.
+func TestGatePaneAgentThatNeverAppearsFailsThePass(t *testing.T) {
+	h := setup(t)
+	h.gateRepo(1)
+	h.sessionPi(gatePasses(nil))
+	old := gateStartWait
+	gateStartWait = 200 * time.Millisecond
+	t.Cleanup(func() { gateStartWait = old })
+	os.WriteFile(h.fake+".nostart", nil, 0o644)
+	code, out := h.run("gate", "spec.md")
+	if code != 1 {
+		t.Fatalf("exit %d: %s", code, out)
+	}
+	view := wantGateState(t, out, "incomplete")
+	wantContains(t, view.PassErrors["group:api"], "pi did not start: herdr saw no agent in pane", "within 200ms")
+}
+
+// pi is idle at its prompt for a moment after it starts (its extensions load
+// before it sends the prompt from its arguments). An idle agent with an empty
+// session is still starting, so the pass waits for its turn instead of ending
+// with no reply.
+func TestGatePaneWaitsForAnIdleAgentToBeginItsTurn(t *testing.T) {
+	h := setup(t)
+	h.gateRepo(1)
+	h.sessionPi(gatePasses(nil))
+	os.WriteFile(h.fake+".idlefirst", nil, 0o644)
 	wantGateState(t, h.must("gate", "spec.md"), "pass")
+	if starts, runs := len(h.gateCalls("agent", "start")), len(h.gateCalls("pane", "run")); starts != runs {
+		t.Fatalf("agent starts = %d for %d launches, want one each", starts, runs)
+	}
 }
 
 func TestGateStuckPaneIsReplacedByAFreshSplit(t *testing.T) {
@@ -870,7 +990,7 @@ func TestGatePiLoadsToolGuardOnlyInOpenShell(t *testing.T) {
 				}
 				exported := false
 				for _, call := range h.gateCalls("pane", "run") {
-					if strings.Contains(strings.Join(call.Args, " "), "export ORCH_TOOL_GUARD_HINT='pattern'") {
+					if strings.Contains(fmt.Sprint(call.Extra["script"]), "\nexport ORCH_TOOL_GUARD_HINT='pattern'\n") {
 						exported = true
 					}
 				}
@@ -883,7 +1003,7 @@ func TestGatePiLoadsToolGuardOnlyInOpenShell(t *testing.T) {
 }
 
 // A headless pi inherits orch's environment; a pane's pi gets the knobs through
-// paneAgentEnv. Both read them from the pass's CtxCLI env.
+// its launcher (paneLaunchScript). Both read them from the pass's CtxCLI env.
 func TestGuardKnobsReachBothPiPaths(t *testing.T) {
 	h := setup(t)
 	t.Setenv("ORCH_TOOL_GUARD", "off")

@@ -2,7 +2,6 @@ package main
 
 import (
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -104,34 +103,74 @@ func TestGateHeadlessArgumentsAndEnv(t *testing.T) {
 	}
 }
 
-// The pane's shell already has the user's PATH: only the shim dir is prepended,
-// so the machine PATH is never typed into a pane.
-func TestGatePaneEnvPrependsToThePanesOwnPath(t *testing.T) {
-	h := setup(t)
-	h.gateRepo(1)
-	h.fakePi(gatePasses(nil))
-	var dirs []string
-	for i := 0; i < 120; i++ {
-		dirs = append(dirs, fmt.Sprintf("/opt/long/path/entry-%03d/bin", i))
-	}
-	long := strings.Join(dirs, string(os.PathListSeparator))
-	t.Setenv("PATH", long+string(os.PathListSeparator)+os.Getenv("PATH"))
-	h.must("gate", "spec.md", "--runner", "pi:test", "--ctx-tool", "on")
-	exports := 0
-	for _, c := range h.gateCalls("pane", "run") {
-		cmd := strings.Join(c.Args[3:], " ")
-		if len(cmd) > 300 || strings.Contains(cmd, "entry-050") {
-			t.Fatalf("pane run typed the machine PATH (%d characters): %.80s...", len(cmd), cmd)
-		}
-		if strings.HasPrefix(cmd, "export PATH='") {
-			exports++
-			if !strings.HasSuffix(cmd, `:'"$PATH"`) {
-				t.Fatalf("PATH export does not extend the pane's own PATH: %s", cmd)
+// A fresh pane's shell may still be starting when a pass begins, and a macOS
+// terminal drops typed input past about 1 KB: typed exports plus the pi command
+// once merged into a garbled line and pi never started. So a pass types one
+// short line, whatever its env and arguments, and the launcher hands pi the
+// env and argv intact. PATH is the pane's own: orch never edits it.
+func TestGatePaneTypesOneShortLineAndKeepsThePanesPath(t *testing.T) {
+	for _, harness := range []string{"pi", "claude"} {
+		t.Run(harness, func(t *testing.T) {
+			h := setup(t)
+			h.gateRepo(1)
+			h.sessionPi(gatePasses(nil))
+			t.Setenv("ORCH_FAKE_CLAUDE_REPO", h.repo)
+			long := "/var/folders/" + strings.Repeat("deep/", 60) + "guard.jsonl"
+			t.Setenv("ORCH_TOOL_GUARD_LOG", long)
+			t.Setenv("ORCH_TOOL_GUARD_HINT", "it's \"quoted\" $HOME `x`")
+			t.Setenv("ORCH_TSLS", long+"-tsls")
+			runner := "pi:" + gateModelDef
+			if harness == "claude" {
+				t.Setenv("ORCH_CLAUDE", fakeRunner(t, "claude", "exit 0"))
+				runner = "claude:haiku:low"
 			}
-		}
-	}
-	if exports == 0 {
-		t.Fatal("no PATH export reached the pane")
+			h.must("gate", "spec.md", "--runner", runner, "--ctx-shell", "open", "--cache", "long")
+			runs := h.gateCalls("pane", "run")
+			if len(runs) != 3 {
+				t.Fatalf("pane run calls = %d, want one per pass", len(runs))
+			}
+			for _, c := range runs {
+				cmd := strings.Join(c.Args[3:], " ")
+				if len(cmd) > 300 || !strings.HasPrefix(cmd, "sh '") {
+					t.Fatalf("pane run typed %d characters, want one short sh line: %.120s", len(cmd), cmd)
+				}
+				script := fmt.Sprint(c.Extra["script"])
+				if strings.Contains(script, "PATH=") {
+					t.Errorf("launcher edits PATH:\n%s", script)
+				}
+				for _, want := range []string{"export ORCH_CTX_ROOT=", "export ORCH_CTX_READONLY='1'", "export ORCH_TSLS=", "export PI_CACHE_RETENTION=long", "\nexec '" + harness + "' "} {
+					if !strings.Contains(script, want) {
+						t.Errorf("launcher lacks %q:\n%s", want, script)
+					}
+				}
+			}
+			starts := h.gateCalls("agent", "start")
+			if len(starts) != 3 {
+				t.Fatalf("agents started = %d, want 3", len(starts))
+			}
+			renamed := map[string]bool{}
+			for _, c := range h.gateCalls("agent", "rename") {
+				renamed[fmt.Sprint(c.Extra["label"])] = true
+			}
+			for _, c := range starts {
+				if !agentNameRe.MatchString(c.Args[2]) || !renamed[c.Args[2]] {
+					t.Errorf("agent %q was not named after it started: %v", c.Args[2], renamed)
+				}
+				if harness == "claude" && !strings.Contains(fmt.Sprint(c.Extra["prompt"]), "\n\n") {
+					t.Errorf("the claude prompt lost its line breaks in the launcher")
+				}
+			}
+			// The env reached the agent byte for byte through the launcher's quoting.
+			env := string(mustRead(t, filepath.Join(h.fake+".panes", flagValue(starts[0].Args, "--pane")+".launch.env")))
+			for _, want := range []string{"ORCH_TOOL_GUARD_LOG=" + long + "\x00", "ORCH_TOOL_GUARD_HINT=it's \"quoted\" $HOME `x`\x00", "PI_CACHE_RETENTION=long\x00"} {
+				if harness == "claude" && strings.HasPrefix(want, "ORCH_TOOL_GUARD") {
+					continue // the pi tool guard's knobs are only for pi
+				}
+				if !strings.Contains(env, want) {
+					t.Errorf("agent env lacks %q", want)
+				}
+			}
+		})
 	}
 }
 
@@ -149,7 +188,7 @@ func TestGatePaneCtxAndContextFlags(t *testing.T) {
 				starts := 0
 				exports := 0
 				for _, c := range calls {
-					if len(c.Args) > 1 && c.Args[0] == "pane" && c.Args[1] == "run" && strings.Contains(strings.Join(c.Args, " "), "export ORCH_CTX_ROOT=") {
+					if script, _ := c.Extra["script"].(string); strings.Contains(script, "\nexport ORCH_CTX_ROOT=") {
 						exports++
 					}
 					if len(c.Args) < 2 || c.Args[0] != "agent" || c.Args[1] != "start" {

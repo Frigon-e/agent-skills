@@ -274,13 +274,21 @@ func TestGateCacheRetentionReachesHeadlessAndPanePi(t *testing.T) {
 		h.gateRepo(1)
 		h.sessionPi(gatePasses(nil))
 		h.must("gate", "spec.md", "--cache", "long", "--ctx-tool", "off")
-		runs := h.gateCalls("pane", "run")
+		// Each pass's launcher sets the setting for its own pi, not the pane's shell.
+		launchers := func() []string {
+			var out []string
+			for _, r := range h.gateCalls("pane", "run") {
+				out = append(out, fmt.Sprint(r.Extra["script"]))
+			}
+			return out
+		}
+		runs := launchers()
 		if len(runs) != 3 {
 			t.Fatalf("pane run calls = %d, want one per pass", len(runs))
 		}
 		for _, r := range runs {
-			if r.Extra["cmd"] != "export PI_CACHE_RETENTION=long" {
-				t.Errorf("pane run: %v", r.Extra)
+			if !strings.Contains(r, "\nexport PI_CACHE_RETENTION=long\n") {
+				t.Errorf("launcher: %s", r)
 			}
 		}
 		b, _ := os.ReadFile(filepath.Join(h.tmp, "fakepi", "cache.log"))
@@ -291,19 +299,21 @@ func TestGateCacheRetentionReachesHeadlessAndPanePi(t *testing.T) {
 		h.sessionPi(gatePasses(nil))
 		os.Remove(h.fake + ".gate.log")
 		h.must("gate", "spec.md", "--cache", "short", "--ctx-tool", "off")
-		runs = h.gateCalls("pane", "run")
+		runs = launchers()
 		if len(runs) != 3 {
 			t.Fatalf("short cache reset reached %d panes, want 3", len(runs))
 		}
 		for _, r := range runs {
-			if r.Extra["cmd"] != "unset PI_CACHE_RETENTION" {
-				t.Errorf("pane run: %v", r.Extra)
+			if !strings.Contains(r, "\nunset PI_CACHE_RETENTION\n") {
+				t.Errorf("launcher: %s", r)
 			}
 		}
 		os.Remove(h.fake + ".gate.log")
 		h.must("gate", "spec.md", "--ctx-tool", "off")
-		if n := len(h.gateCalls("pane", "run")); n != 0 {
-			t.Errorf("the default touched the pane environment %d times", n)
+		for _, r := range launchers() {
+			if strings.Contains(r, "PI_CACHE_RETENTION") {
+				t.Errorf("the default touched PI_CACHE_RETENTION: %s", r)
+			}
 		}
 	})
 }

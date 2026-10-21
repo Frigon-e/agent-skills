@@ -476,6 +476,17 @@ and put `Notice` at the very top of the shared read-only prompt. `Env` pins
 PATH. Its `orch` symlink targets the current binary's path (`os.Executable()`),
 not its inode: an atomic rebuild at that path still works without regenerating
 the shim. Shim creation is idempotent; a conflicting entry is an error.
+Only headless passes get that PATH. A gate pane pass never edits PATH: it
+finds `orch` on the pane shell's own PATH (link `scripts/orch` into a PATH
+directory such as `~/.local/bin`; the launcher follows symlinks), and a pane
+run with the ctx tool fails at once when `orch` is not on PATH. The pane types
+one short `sh <launcher>` line. The launcher, in the gate dir's `passes/`,
+exports the rest of `Env` and execs the agent, so typed input stays well
+under the terminal's input limit (about 1 KB on macOS) even while a fresh
+pane's shell is still starting. The pass then waits for the agent's turn to
+begin (Herdr reports it working, or its session holds an answer): pi is idle
+at its prompt while its extensions load, and that idle is not the end of the
+pass.
 
 Keep Claude's native `Read,Grep,Glob` in both the tool and allowed-tool lists,
 add `Bash` to the tool list, and add `Bash(orch ctx:*)` to `--allowedTools` with

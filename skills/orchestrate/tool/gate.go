@@ -1203,6 +1203,9 @@ func cmdGate(a *app, args []string) (retErr error) {
 		return fail("--experiment %q: use lowercase letters, digits, '.', '_' and '-'", *expF)
 	}
 	opts := gateOpts{ctxTool: *ctxTool == "on", ctxOnly: *ctxShell == "ctx-only" && *ctxTool == "on", ctxProfile: profileArg(*ctxProfile), contextFiles: *contextFiles == "on", dossier: *dossier, cache: *cacheF, keep: *keep || *expF != "", headless: *headless || os.Getenv("ORCH_HEADLESS") == "1", verdicts: *verdicts}
+	if err := paneOrchOnPath(opts, *dry); err != nil {
+		return fail("%v", err)
+	}
 	gs, err := loadGateSpec(a, pos[0])
 	if err != nil {
 		return err

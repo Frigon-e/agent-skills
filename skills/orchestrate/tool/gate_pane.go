@@ -1,9 +1,11 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -22,7 +24,20 @@ func gatePaneMode() bool {
 	return os.Getenv("HERDR_ENV") == "1" && os.Getenv("HERDR_WORKSPACE_ID") != ""
 }
 
-var unsafeFileRe = regexp.MustCompile(`[^A-Za-z0-9._+-]`)
+// paneOrchOnPath fails a pane run with the ctx tool when orch is not on PATH:
+// pane passes call orch ctx through the pane shell's own PATH, which orch never
+// edits. A dry run or a headless run starts no pane.
+func paneOrchOnPath(opts gateOpts, dry bool) error {
+	if !opts.ctxTool || opts.headless || dry || !gatePaneMode() {
+		return nil
+	}
+	if _, err := exec.LookPath("orch"); err != nil {
+		return fmt.Errorf("orch is not on PATH, so gate panes cannot run orch ctx: link it, for example ln -s %s ~/.local/bin/orch, or pass --headless", selfPath())
+	}
+	return nil
+}
+
+var unsafeFileRe =regexp.MustCompile(`[^A-Za-z0-9._+-]`)
 
 // passFile maps a pass name such as "package:api" to a safe file name.
 func passFile(name string) string { return unsafeFileRe.ReplaceAllString(name, "-") }
@@ -159,16 +174,84 @@ func leavePane(pane *string, repo string, interrupt bool) {
 }
 
 // gateLeaveWait bounds the wait for a pane to return to its shell after a pass;
-// gateLeavePoll is its poll step. Variables so tests can shorten them.
+// gateLeavePoll is its poll step. gateStartWait bounds the wait for the agent a
+// launcher started to begin its turn. Variables so tests can shorten them.
 var (
 	gateLeaveWait = 10 * time.Second
 	gateLeavePoll = 200 * time.Millisecond
+	gateStartWait = 60 * time.Second
 )
+
+// waitPaneTurn waits until the agent in pane has begun its turn: herdr reports
+// it working, blocked or done, or its session already holds an assistant
+// message. pi sits idle at its prompt while it loads its extensions and before
+// it sends the prompt from its launch arguments, so an idle agent with no
+// answer yet is still starting, not finished.
+func waitPaneTurn(ctx context.Context, pane, session, transcript string) error {
+	deadline := time.Now().Add(gateStartWait)
+	seen := false
+	for {
+		out, err := herdrCmdContext(ctx, herdrTimeout, "agent", "get", pane)
+		gone := err != nil && strings.Contains(err.Error(), "agent_not_found")
+		switch {
+		case err != nil && !gone:
+			return nil // herdr failed: the pass's wait loop reports it
+		case !gone:
+			seen = true
+			if st := agentStatus(out); st == "working" || st == "blocked" || st == "done" {
+				return nil
+			}
+		}
+		if paneAnswered(session, transcript) {
+			return nil
+		}
+		if gone && seen {
+			return fmt.Errorf("the agent left pane %s before it began its turn", pane)
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if time.Now().After(deadline) {
+			if !seen {
+				return fmt.Errorf("herdr saw no agent in pane %s within %s", pane, gateStartWait)
+			}
+			return fmt.Errorf("the agent in pane %s stayed idle for %s and never began its turn", pane, gateStartWait)
+		}
+		time.Sleep(gateLeavePoll)
+	}
+}
+
+// paneAnswered reports whether a pass's session already holds an assistant
+// message: the claude transcript when there is one, else the newest pi session
+// file under session.
+func paneAnswered(session, transcript string) bool {
+	path := transcript
+	if path == "" {
+		files, _ := filepath.Glob(filepath.Join(session, "*.jsonl"))
+		if len(files) == 0 {
+			return false
+		}
+		sort.Strings(files)
+		path = files[len(files)-1]
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	answered := false
+	eachPiEvent(f, func(e *piEvent) {
+		if e.Message.Role == "assistant" {
+			answered = true
+		}
+	})
+	return answered
+}
 
 // runPanePass runs one pass as a real pi agent in *pane and returns its reply:
 // the text of the last assistant message in pi's saved session. The shared and
-// task files are the prompt. The agent is addressed by pane id, because a
-// start that times out while pi is still working leaves it unnamed.
+// task files are the prompt. The agent is addressed by pane id; its name is
+// only a best-effort label.
 func runPanePass(pane *string, repo, model, gdir string, p gatePass, cache string) (reply, hit string, err error) {
 	return runPaneChoice(pane, repo, profile{Harness: "pi", Model: model}, gdir, p, cache)
 }
@@ -182,15 +265,14 @@ func runPaneChoice(pane *string, repo string, choice profile, gdir string, p gat
 	if err = writeSharedFile(gdir, p); err != nil {
 		return "", "", err
 	}
-	if err = paneAgentEnv(*pane, p.cli.Env); err != nil {
-		return "", "", err
-	}
 	herdrCmd := func(timeout time.Duration, args ...string) ([]byte, error) {
 		return herdrCmdContext(passContext(p), timeout, args...)
 	}
 	name := passFile(p.name)
 	task := filepath.Join(gdir, "passes", name+".md")
 	errF := filepath.Join(gdir, "passes", name+".err")
+	launcher := filepath.Join(gdir, "passes", name+".start.sh")
+	defer os.Remove(launcher)
 	session := p.sessionDir
 	if session == "" {
 		session = filepath.Join(gdir, "sessions", name)
@@ -208,48 +290,47 @@ func runPaneChoice(pane *string, repo string, choice profile, gdir string, p gat
 		return "", "", err
 	}
 	_, _ = herdrCmd(herdrTimeout, "pane", "rename", *pane, p.name) // best effort: label the pane
-	// The pane's shell hands the setting to pi: set it for long, clear it for an explicit short.
-	switch cache {
-	case "long":
-		_, _ = herdrCmd(herdrTimeout, "pane", "run", *pane, "export PI_CACHE_RETENTION=long")
-	case "short":
-		_, _ = herdrCmd(herdrTimeout, "pane", "run", *pane, "unset PI_CACHE_RETENTION")
-	}
-	args := []string{"agent", "start", agentName(gdir, *pane, p.name), "--kind", "pi", "--pane", *pane, "--timeout", "60000", "--", "--no-approve", "--no-extensions"}
+	argv := []string{"pi", "--no-approve", "--no-extensions"}
 	if f := expandHome(gatePiExtension); fileExists(f) {
-		args = append(args, "-e", f)
+		argv = append(argv, "-e", f)
 	}
-	args = append(args, piGuardArgs(p)...)
-	args = append(args, "--no-skills")
+	argv = append(argv, piGuardArgs(p)...)
+	argv = append(argv, "--no-skills")
 	if !p.contextFiles {
-		args = append(args, "--no-context-files")
+		argv = append(argv, "--no-context-files")
 	}
-	args = append(args, piPassTools(p)...)
+	argv = append(argv, piPassTools(p)...)
 	if choice.Effort != "" {
-		args = append(args, "--thinking", choice.Effort)
+		argv = append(argv, "--thinking", choice.Effort)
 	}
-	args = append(args, "--session-dir", session,
+	argv = append(argv, "--session-dir", session,
 		"--model", choice.Model, "@"+sharedFile(gdir, p), "@"+task)
 	transcript := ""
 	if choice.Harness == "claude" {
 		id := newClaudeSessionID()
 		transcript = claudeTranscript(repo, id)
-		args = []string{"agent", "start", agentName(gdir, *pane, p.name), "--kind", "claude", "--pane", *pane, "--timeout", "60000", "--"}
-		args = append(args, claudePassArgs(choice, p)...)
-		args = append(args, "--session-id", id, p.shared+"\n\n"+p.task)
+		argv = append([]string{"claude"}, claudePassArgs(choice, p)...)
+		argv = append(argv, "--session-id", id, p.shared+"\n\n"+p.task)
+	}
+	agent := agentName(gdir, *pane, p.name)
+	if err = os.WriteFile(launcher, []byte(paneLaunchScript(p.name+": herdr agent "+agent, p.cli.Env, cache, argv)), 0o600); err != nil {
+		return "", "", err
 	}
 	start := time.Now()
-	_, serr := herdrCmd(2*herdrTimeout, args...)
-	if passContext(p).Err() != nil {
+	// The pane's shell types one short line: the long command and its
+	// environment stay in the launcher (see paneLaunchScript).
+	if _, err = herdrCmd(herdrTimeout, "pane", "run", *pane, "sh "+shellQuote(launcher)); err != nil {
 		leavePane(pane, repo, true)
-		return "", "", passContext(p).Err()
+		return "", "", fmt.Errorf("%s did not start: %v", choice.Harness, err)
 	}
-	if serr != nil && agentGone(*pane) {
-		// A readiness timeout while pi is still working is not a failure; an
-		// agent herdr never saw is.
+	if serr := waitPaneTurn(passContext(p), *pane, session, transcript); serr != nil {
 		leavePane(pane, repo, true)
+		if passContext(p).Err() != nil {
+			return "", "", passContext(p).Err()
+		}
 		return "", "", fmt.Errorf("%s did not start: %v", choice.Harness, serr)
 	}
+	_, _ = herdrCmd(herdrTimeout, "agent", "rename", *pane, agent) // best effort: name the agent
 	// Wait in steps of gatePoll: between steps, a pass whose session files and
 	// agent status have not changed for gateStall is stalled, and one past the
 	// wall cap has timed out.

@@ -216,25 +216,36 @@ func claudePassArgs(choice profile, p gatePass) []string {
 	return args
 }
 
-// paneAgentEnv sets env in the pane's shell. The pane already has the user's
-// PATH, so a PATH built as "<dirs>:<orch's PATH>" only prepends <dirs> to the
-// pane's own: the machine PATH is never typed into the pane.
-func paneAgentEnv(pane string, env []string) error {
+// paneLaunchScript is the sh script a pane pass runs: it exports env, sets or
+// clears PI_CACHE_RETENTION for an explicit cache, and execs argv. The pane's
+// shell only types `sh <script>`. Typing the exports and the long agent
+// command instead overflowed the terminal's input queue (about 1 KB on macOS)
+// while a fresh pane's shell was still starting, which dropped bytes and
+// merged lines. The exports live only in the agent's process, never in the
+// pane's shell. PATH is not touched: the pane's own PATH must find orch.
+func paneLaunchScript(header string, env []string, cache string, argv []string) string {
+	var b strings.Builder
+	b.WriteString("# orch gate pass " + strings.ReplaceAll(header, "\n", " ") + "\n")
 	for _, entry := range env {
-		key, value, ok := strings.Cut(entry, "=")
-		if !ok {
-			return fmt.Errorf("invalid agent environment entry")
+		key, value, _ := strings.Cut(entry, "=")
+		if key == "PATH" || key == "" {
+			continue
 		}
 		// Env names come from CtxCLIFor; values remain literal shell strings.
-		line := "export " + key + "=" + shellQuote(value)
-		if prefix, ok := strings.CutSuffix(value, string(os.PathListSeparator)+os.Getenv("PATH")); key == "PATH" && ok {
-			line = "export PATH=" + shellQuote(prefix+string(os.PathListSeparator)) + `"$PATH"`
-		}
-		if _, err := herdrCmd(herdrTimeout, "pane", "run", pane, line); err != nil {
-			return err
-		}
+		b.WriteString("export " + key + "=" + shellQuote(value) + "\n")
 	}
-	return nil
+	switch cache {
+	case "long":
+		b.WriteString("export PI_CACHE_RETENTION=long\n")
+	case "short":
+		b.WriteString("unset PI_CACHE_RETENTION\n")
+	}
+	b.WriteString("exec")
+	for _, a := range argv {
+		b.WriteString(" " + shellQuote(a))
+	}
+	b.WriteString("\n")
+	return b.String()
 }
 
 func shellQuote(s string) string {

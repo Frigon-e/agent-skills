@@ -241,6 +241,15 @@ func setup(t *testing.T) *harness {
 	}
 	skill, _ := filepath.Abs("..")
 	gatePiExtension = filepath.Join(tmp, "no-extension.ts")
+	// Gate panes find orch on the pane's own PATH; a pane run checks it is there.
+	onPath := filepath.Join(tmp, "path-bin")
+	if err := os.MkdirAll(onPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(onPath, "orch"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", onPath+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("ORCH_JBCONTEXT", filepath.Join(tmp, "no-jbcontext"))
 	t.Setenv("ORCH_GOPLS", filepath.Join(tmp, "no-gopls"))
 	t.Setenv("ORCH_TSLS", filepath.Join(tmp, "no-tsls"))
