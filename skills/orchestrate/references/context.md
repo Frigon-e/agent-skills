@@ -517,7 +517,9 @@ pane) starts with `--no-extensions -e <cli-dir>/orch-ctx-reminder.ts`, the copy
 embedded in the binary and written next to the ctx shim, so a guarded gate run
 tests the code in the checkout. Ctx-only and ctx off do not load it. The
 `ORCH_TOOL_GUARD*` settings in orch's environment reach the headless pi by
-inheritance and the pane's pi through the pane shell exports. It carries five
+inheritance and the pane's pi through the pane shell exports. `ORCH_TSLS`, when
+set in orch's environment, reaches the pane's `orch ctx` the same way in any
+ctx-tool pass. The guard carries five
 small deny rules over shell commands, each a table entry with a name, a matcher
 and a reason, plus two more for pi's own `grep` and `find` tools:
 `deny-find-chains` (find `-exec`/`-delete`, and a search tool feeding a grep),

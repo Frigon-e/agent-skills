@@ -92,6 +92,11 @@ func gateAgentPass(repo, harness string, p gatePass) (gatePass, error) {
 	if p.ctxProfile != "" {
 		cli.Env = append(cli.Env, "ORCH_CTX_PROFILE="+p.ctxProfile)
 	}
+	if v, ok := os.LookupEnv("ORCH_TSLS"); ok {
+		// The pane shell does not inherit orch's environment, so name the user's
+		// TypeScript server override for paneAgentEnv. The value is never logged.
+		cli.Env = append(cli.Env, "ORCH_TSLS="+v)
+	}
 	if piGuardLoaded(harness, p) {
 		// A pane's shell, not orch, hands the environment to pi: name the guard
 		// knobs so paneAgentEnv exports them there too.

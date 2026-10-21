@@ -907,3 +907,32 @@ func TestGuardKnobsReachBothPiPaths(t *testing.T) {
 		t.Errorf("ctx-only pass exports guard env: %v", only.cli.Env)
 	}
 }
+
+// ORCH_TSLS is the user's TypeScript server override; the pane shell needs it
+// for orch ctx, and only when orch itself has it set.
+func TestTSLSReachesPaneEnv(t *testing.T) {
+	h := setup(t)
+	t.Setenv("ORCH_TOOL_GUARD", "off")
+	t.Setenv("ORCH_TSLS", "/opt/tsgo/bin/tsgo")
+	p, err := gateAgentPass(h.repo, "pi", gatePass{name: "a", shared: "s", task: "t", prompt: "st", ctxTool: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"ORCH_TSLS=/opt/tsgo/bin/tsgo", "ORCH_TOOL_GUARD=off"} {
+		if !slices.Contains(p.cli.Env, want) {
+			t.Errorf("%s missing from the pass env: %v", want, p.cli.Env)
+		}
+	}
+	// Unset: absent. t.Setenv restores the variable; Unsetenv makes it unset now.
+	t.Setenv("ORCH_TSLS", "")
+	os.Unsetenv("ORCH_TSLS")
+	p, err = gateAgentPass(h.repo, "pi", gatePass{name: "a", shared: "s", task: "t", prompt: "st", ctxTool: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, kv := range p.cli.Env {
+		if strings.HasPrefix(kv, "ORCH_TSLS=") {
+			t.Errorf("unset ORCH_TSLS exported: %q", kv)
+		}
+	}
+}
