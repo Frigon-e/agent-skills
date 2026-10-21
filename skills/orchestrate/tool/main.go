@@ -34,6 +34,7 @@ Orchestrator:
   orch gate <spec>
   orch bench record|import|list|show|compare|key|spec|report|verify|migrate|export|import-archive|readme
   orch spec queries <spec> [--package id | --item id#n] [--json] [--generate [--dry-run] [--all]]
+  orch test-changed [--base main] [--print] [--run-extra <regex>]   (build, vet and only the tests the branch changed)
   orch ctx status|refresh|watch|find|sym|text|batch|brief   (code facts for any git repo; see references/context.md)
   orch quick <id> --owns <file>[,<file>] <request...>
   orch models
@@ -100,6 +101,7 @@ var commands = map[string]func(*app, []string) error{
 	"gate":         cmdGate,
 	"bench":        cmdBench,
 	"ctx":          cmdCtx,
+	"test-changed": cmdTestChanged,
 	"models":       cmdModels,
 	"triage":       cmdTriage,
 	"quick":        cmdQuick,
