@@ -92,7 +92,12 @@ sources: rg
 - A reader sees only what carries information: `sources` names the tools and any
   staleness note, not the binary path; `omissions` and `notes` appear only when
   they have content; the `match` flag appears only when a row is a context line;
-  the excerpt byte counters are not printed. `--json` keeps all of them.
+  the excerpt byte counters are not printed.
+- Evidence ids are `ctx-` plus 8 hex characters. A plain session (not a read-only
+  gate agent) gets one per file, not per row; a repeated row says
+  `reference: path:line`. A batch whose lookups share `searched_scope` or
+  `excluded` prints each once at the top. `--json` keeps every field except
+  those two moves on each lookup.
 - Per-lookup options (`--glob`, `--word`, `-p`, ...) are flags of `text`, `sym`
   and `find`. A batch takes them inside the query, `-q "text:x glob=dir/**"`; a
   batch-level `--glob` is an error that shows the rewritten form.

@@ -316,6 +316,7 @@ func TestCtxSymbolOptionsShapeTheAnswer(t *testing.T) {
 
 func TestCtxBatchDedupesAcrossLookupsAndCrossReferences(t *testing.T) {
 	c := newCtxHarness(t)
+	t.Setenv("ORCH_CTX_ROOT", c.repo) // a gate agent: rows carry evidence ids
 	c.stdin.WriteString(`{"lookups":[
 {"kind":"text","query":"StartCheckout","tests":"include"},
 {"kind":"symbol","query":"StartCheckout"},

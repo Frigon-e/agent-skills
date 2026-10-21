@@ -59,6 +59,28 @@ func agentTrimmed(v any) any {
 		}
 		out["sources"] = strings.Join(parts, "; ")
 	}
+	// A batch prints the scope and exclusions its lookups share once.
+	if rows, ok := out["result"].([]any); ok {
+		for _, key := range []string{"searched_scope", "excluded"} {
+			var first any
+			count, same := 0, true
+			for _, r := range rows {
+				if v, ok := r.(map[string]any)[key]; ok && !reflect.DeepEqual(v, []any{}) && v != "" {
+					if count > 0 && !reflect.DeepEqual(v, first) {
+						same = false
+					}
+					first = v
+					count++
+				}
+			}
+			if same && count >= 2 {
+				out[key] = first
+				for _, r := range rows {
+					delete(r.(map[string]any), key)
+				}
+			}
+		}
+	}
 	var lines []map[string]any
 	var walk func(any)
 	walk = func(x any) {
@@ -507,7 +529,7 @@ func TestAgentOutputReferenceRelationships(t *testing.T) {
 	for _, audience := range []outputAudience{outputAgent, outputHuman, outputJSON} {
 		var b bytes.Buffer
 		a := &app{out: ctxV2Output{&b, audience}}
-		if err := a.ctxEmitV2(&ctxEnv{}, []*ctxView{first, second}, ctxFmt{SchemaVersion: 2}, 100); err != nil {
+		if err := a.ctxEmitV2(&ctxEnv{ReadOnly: true}, []*ctxView{first, second}, ctxFmt{SchemaVersion: 2}, 100); err != nil {
 			t.Fatal(err)
 		}
 		rows := decodedOutput(t, b.Bytes(), audience).(map[string]any)["result"].([]any)
@@ -623,4 +645,66 @@ func TestAgentOutputTrimsWhatAReaderCannotUse(t *testing.T) {
 func ctxTestObjectJSON(t *testing.T, out string) map[string]any {
 	t.Helper()
 	return decodedOutput(t, []byte(out), outputJSON).(map[string]any)
+}
+
+// A plain session cites no evidence ids, so rows carry none: the file keeps its
+// id and a repeated row names the place it was shown, as path:line.
+func TestAgentOutputPlainSessionDropsLineIDs(t *testing.T) {
+	first := &ctxView{Kind: "text", Query: "context", Unit: "matches", Total: 1, Shown: 1, Parts: []*ctxPart{{Files: []ctxFileHits{{Path: "a.py", Lines: []ctxLine{{N: 2, Text: "\treturn False"}}}}}}}
+	second := &ctxView{Kind: "text", Query: "False", Unit: "matches", Total: 1, Shown: 1, Parts: []*ctxPart{{Files: []ctxFileHits{{Path: "a.py", Lines: []ctxLine{{N: 2, Text: "\treturn False", Match: true, In: "def check"}}}}}}}
+	for _, audience := range []outputAudience{outputAgent, outputHuman, outputJSON} {
+		var b bytes.Buffer
+		a := &app{out: ctxV2Output{&b, audience}}
+		if err := a.ctxEmitV2(&ctxEnv{}, []*ctxView{first, second}, ctxFmt{SchemaVersion: 2}, 100); err != nil {
+			t.Fatal(err)
+		}
+		rows := decodedOutput(t, b.Bytes(), audience).(map[string]any)["result"].([]any)
+		file := func(i int) map[string]any {
+			return rows[i].(map[string]any)["parts"].([]any)[0].(map[string]any)["files"].([]any)[0].(map[string]any)
+		}
+		one, two := file(0)["lines"].([]any)[0].(map[string]any), file(1)["lines"].([]any)[0].(map[string]any)
+		if _, ok := one["id"]; ok || one["text"] != "\treturn False" {
+			t.Fatalf("plain row carries an id or lost its text: %#v", one)
+		}
+		if id, _ := file(0)["id"].(string); !strings.HasPrefix(id, "ctx-") || len(id) != len("ctx-")+8 {
+			t.Fatalf("file id=%q, want ctx- and 8 hex", id)
+		}
+		if two["reference"] != "a.py:2" || two["in"] != "def check" || two["match"] != true {
+			t.Fatalf("repeated row: %#v", two)
+		}
+		if _, ok := file(1)["references"]; ok {
+			t.Fatalf("plain file lists line ids: %#v", file(1))
+		}
+	}
+}
+
+func TestAgentOutputBatchPrintsSharedScopeOnce(t *testing.T) {
+	excl := []string{"gitignored and hidden files", "tests=none"}
+	mk := func(q, scope string, excluded []string) *ctxView {
+		return &ctxView{Kind: "text", Query: q, Unit: "matches", Total: 0, SearchedScope: scope, Excluded: excluded}
+	}
+	views := []*ctxView{mk("a", "checkout root /r", excl), mk("b", "checkout root /r", excl), mk("c", "checkout root /r; path pay", excl)}
+	var agent, full bytes.Buffer
+	if err := (&app{out: ctxV2Output{&agent, outputAgent}}).ctxEmitV2(&ctxEnv{}, views, ctxFmt{SchemaVersion: 2}, 100); err != nil {
+		t.Fatal(err)
+	}
+	if err := (&app{out: ctxV2Output{&full, outputJSON}}).ctxEmitV2(&ctxEnv{}, views, ctxFmt{SchemaVersion: 2}, 100); err != nil {
+		t.Fatal(err)
+	}
+	got := decodedOutput(t, agent.Bytes(), outputAgent).(map[string]any)
+	if _, ok := got["excluded"]; !ok || strings.Count(agent.String(), "tests=none") != 1 {
+		t.Errorf("shared exclusions not printed once:\n%s", agent.String())
+	}
+	if _, ok := got["searched_scope"]; ok {
+		t.Errorf("differing scopes must stay per lookup:\n%s", agent.String())
+	}
+	if strings.Count(agent.String(), "checkout root /r") != 3 {
+		t.Errorf("per-lookup scopes lost:\n%s", agent.String())
+	}
+	if strings.Count(full.String(), "tests=none") != 3 {
+		t.Errorf("--json must keep exclusions on every lookup:\n%s", full.String())
+	}
+	if want := agentTrimmed(decodedOutput(t, full.Bytes(), outputJSON)); !reflect.DeepEqual(got, want) {
+		t.Errorf("agent view differs from the trimmed JSON:\n%#v\n%#v", got, want)
+	}
 }
