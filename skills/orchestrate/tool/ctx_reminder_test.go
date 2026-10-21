@@ -362,7 +362,7 @@ func TestCtxReminderGuardDenySedInplace(t *testing.T) {
 
 // deny-cat-head-tail: one bare file read belongs to the read tool.
 func TestCtxReminderGuardDenyCatHeadTail(t *testing.T) {
-	read := []string{"read", "orch ctx sym"}
+	read := []string{"read", "offset and limit"}
 	cases := []reminderCase{
 		{Name: "cat one file", Tool: "bash", Input: bash(`cat notes.txt`), Blocks: "cat-head-tail", Needs: read},
 		{Name: "head -n 20", Tool: "bash", Input: bash(`head -n 20 notes.txt`), Blocks: "cat-head-tail", Needs: read},
@@ -388,6 +388,11 @@ func TestCtxReminderGuardDenyCatHeadTail(t *testing.T) {
 	}
 	got := runCtxReminder(t, nil, cases)
 	reminded, quiet, blocked := checkReminder(t, got, cases)
+	for name, out := range got.Out {
+		if strings.Contains(out.Block, "orch ctx") {
+			t.Errorf("%s: a file read points at orch ctx instead of the built-in read: %q", name, out.Block)
+		}
+	}
 	t.Logf("deny-cat-head-tail: %d blocked, %d allowed, %d reminded", blocked, quiet, reminded)
 }
 
@@ -565,4 +570,73 @@ func TestCtxReminderFallbackBlocksOnceThenAllowsRetry(t *testing.T) {
 		}
 	}
 	t.Logf("fallback: %d blocked, 4 allowed", blocked)
+}
+
+// sharedToolguardFile is one decision table for both harness guards. The Claude
+// hooks in hooks/claude run every case through their own test; this runs the
+// same file through the pi extension so the two implementations cannot drift.
+// Rule names and replacement tools differ by harness, so only blocked vs
+// allowed and the rule that blocks are compared.
+type sharedToolguardFile struct {
+	PathSituations map[string]struct {
+		Tools []string `json:"tools"`
+	} `json:"pathSituations"`
+	Cases []struct {
+		Name      string `json:"name"`
+		Situation string `json:"situation"`
+		Rule      string `json:"rule"`
+		Command   string `json:"command"`
+	} `json:"cases"`
+}
+
+func TestCtxReminderSharedToolguardCases(t *testing.T) {
+	path := filepath.Join("..", "..", "..", "hooks", "claude", "toolguard_cases.json")
+	var file sharedToolguardFile
+	if err := json.Unmarshal(mustRead(t, path), &file); err != nil {
+		t.Fatalf("%s: %v", path, err)
+	}
+	if len(file.Cases) == 0 || len(file.PathSituations) == 0 {
+		t.Fatalf("%s has no cases or no PATH situations", path)
+	}
+	for situation, spec := range file.PathSituations {
+		t.Run(situation, func(t *testing.T) {
+			var cases []reminderCase
+			for _, c := range file.Cases {
+				if c.Situation != situation {
+					continue
+				}
+				cases = append(cases, reminderCase{Name: c.Name, Tool: "bash", Input: bash(c.Command)})
+			}
+			if len(cases) == 0 {
+				t.Fatalf("no cases for PATH situation %q", situation)
+			}
+			got := runCtxReminderWith(t, spec.Tools, nil, cases)
+			blocked := 0
+			for _, c := range file.Cases {
+				if c.Situation != situation {
+					continue
+				}
+				reason := got.Out[c.Name].Block
+				if c.Rule == "" {
+					if reason != "" {
+						t.Errorf("%q is allowed in the shared cases but pi blocked it: %s", c.Name, reason)
+					}
+					continue
+				}
+				blocked++
+				// The parens keep deny-find from matching deny-find-chains.
+				if want := "(deny-" + c.Rule + ")"; !strings.Contains(reason, want) {
+					t.Errorf("%q must be blocked by %s in pi: %s", c.Name, want, reason)
+				}
+				// Reading a file points at the built-in read, never orch ctx,
+				// whatever is installed.
+				if c.Rule == "cat-head-tail" {
+					if !strings.Contains(reason, "built-in read") || strings.Contains(reason, "orch ctx") {
+						t.Errorf("%q must name the built-in read only: %s", c.Name, reason)
+					}
+				}
+			}
+			t.Logf("shared cases, %s PATH: %d cases, %d must block", situation, len(cases), blocked)
+		})
+	}
 }
