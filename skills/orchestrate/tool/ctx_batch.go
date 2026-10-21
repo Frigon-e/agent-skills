@@ -2,9 +2,13 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"path/filepath"
+	"regexp"
+	"sort"
 	"strings"
+	"unicode"
 )
 
 // A batch is many lookups in one call: a plan of concept, symbol, text and
@@ -225,6 +229,9 @@ func (e *ctxEnv) Batch(lks []ctxLookup, rootOf func(i int) string, capChars int)
 func (e *ctxEnv) lookupConcept(q, pathFilter string) string {
 	q = short(flat(q), 300)
 	hits, err := e.Concept(q, pathFilter, 3)
+	if errors.Is(err, errJBRateLimited) {
+		return e.conceptFromRg(q, pathFilter, err)
+	}
 	if err != nil {
 		return "error: " + err.Error()
 	}
@@ -240,6 +247,58 @@ func (e *ctxEnv) lookupConcept(q, pathFilter string) string {
 	}
 	return b.String()
 }
+
+// conceptFromRg answers a concept lookup that jbcontext refused with a rate
+// limit: the longer words of the query searched with rg, the hits that match the
+// most distinct words first. The answer says jbcontext was skipped.
+func (e *ctxEnv) conceptFromRg(q, pathFilter string, cause error) string {
+	var words []string
+	seen := map[string]bool{}
+	for _, w := range strings.FieldsFunc(strings.ToLower(q), func(r rune) bool { return !unicode.IsLetter(r) && !unicode.IsDigit(r) && r != '_' }) {
+		if len(w) >= 4 && !conceptStopwords[w] && !seen[w] && len(words) < 6 {
+			seen[w] = true
+			words = append(words, w)
+		}
+	}
+	head := "jbcontext skipped: rate limited (429); " + cause.Error() + "\n"
+	if len(words) == 0 {
+		return head + "rg fallback: no searchable word in the query"
+	}
+	quoted := make([]string, len(words))
+	for i, w := range words {
+		quoted[i] = regexp.QuoteMeta(w)
+	}
+	var path string
+	if p, ok := repoPath(pathFilter); ok && pathFilter != "" {
+		path = p
+	}
+	res, err := e.Text(rgQuery{Pattern: strings.Join(quoted, "|"), Path: path, IgnoreCase: true, PerFile: 3})
+	if err != nil {
+		return head + "rg fallback failed: " + err.Error()
+	}
+	score := func(h rgHit) int {
+		n, t := 0, strings.ToLower(h.Text)
+		for _, w := range words {
+			if strings.Contains(t, w) {
+				n++
+			}
+		}
+		return n
+	}
+	hits := append([]rgHit(nil), res.Hits...)
+	sort.SliceStable(hits, func(i, j int) bool { return score(hits[i]) > score(hits[j]) })
+	var b strings.Builder
+	b.WriteString(head + "rg fallback on words: " + strings.Join(words, ", ") + "\n")
+	if len(hits) == 0 {
+		b.WriteString("no matches")
+	}
+	for _, h := range hits[:min(10, len(hits))] {
+		fmt.Fprintf(&b, "%s:%d: %s\n", h.Path, h.Line, short(h.Text, 160))
+	}
+	return b.String()
+}
+
+var conceptStopwords = map[string]bool{"code": true, "that": true, "when": true, "with": true, "from": true, "into": true, "this": true, "where": true, "what": true, "which": true, "producing": true, "trigger": true, "result": true, "does": true, "while": true}
 
 func (e *ctxEnv) lookupText(q, path string) string {
 	q = strings.TrimSpace(q)

@@ -434,6 +434,13 @@ symbol coverage still depends on server readiness and the selected tier.
 Results are cached per HEAD and working-tree fingerprint under
 `~/.cache/orchestrate/ctx/`; incomplete/error results are not cached as
 successful search facts. This is not a guarantee of exhaustive server coverage.
+The JetBrains service rate limits (HTTP 429), so jbcontext searches are
+throttled: identical searches in one process share one call, at most 2 run at
+once machine-wide (flock slots under `~/.cache/orchestrate/jb-slots/`), and a
+429 is retried 3 times with backoff. After that the lookup fails with
+`jbcontext rate limited (429)` and the query it skipped, jbcontext is skipped for
+20 s, and a `find` answers from rg words with `jbcontext skipped: rate limited
+(429)` in its first line.
 `orch ctx status` shows the index, the watch daemon and
 the tools; `orch ctx refresh` makes the index current. `orch ctx watch add`
 keeps an overlay for uncommitted changes (the daemon is never started by orch).
