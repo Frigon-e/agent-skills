@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 )
@@ -587,16 +588,223 @@ type sharedToolguardFile struct {
 		Rule      string `json:"rule"`
 		Command   string `json:"command"`
 	} `json:"cases"`
+	// PatternKinds is the classifier table: the kind deny-grep-rg must give a
+	// pattern, shared with the Claude guard so the tailored hint cannot drift.
+	PatternKinds []struct {
+		Pattern string `json:"pattern"`
+		Kind    string `json:"kind"`
+	} `json:"patternKinds"`
 }
 
-func TestCtxReminderSharedToolguardCases(t *testing.T) {
+func sharedGuardFile(t *testing.T) sharedToolguardFile {
+	t.Helper()
 	path := filepath.Join("..", "..", "..", "hooks", "claude", "toolguard_cases.json")
 	var file sharedToolguardFile
 	if err := json.Unmarshal(mustRead(t, path), &file); err != nil {
 		t.Fatalf("%s: %v", path, err)
 	}
+	return file
+}
+
+// kindLines is the one tailored line each kind adds, and the generic reason
+// each one replaces.
+var kindLines = map[string]string{
+	"symbol":  "orch ctx sym",
+	"text":    "orch ctx text",
+	"concept": "orch ctx find",
+}
+
+// oldGrepReason is deny-grep-rg's reason today, which generic and unset must
+// keep byte for byte.
+const oldGrepReason = "orch tool guard (deny-grep-rg): a plain grep, rg, ag or git grep over files is blocked.\n" +
+	`One orch ctx batch replaces it: orch ctx batch -q "text:pattern glob=dir/**" -q "symbol:Name refs=3" (a concept: find:...).`
+
+// The pattern hint: the shared classifier table, and the one line
+// ORCH_TOOL_GUARD_HINT=pattern adds to a deny-grep-rg block. Generic and unset
+// keep today's text byte for byte, and without orch nothing is added.
+func TestCtxReminderPatternHint(t *testing.T) {
+	file := sharedGuardFile(t)
+	if len(file.PatternKinds) == 0 {
+		t.Fatal("the shared case file has no patternKinds")
+	}
+	// The examples the task names, whole line: the shared table already fixes
+	// their kind, so this pins the wording too.
+	examples := []struct{ command, line string }{
+		{`grep -rn "refund.*failed" src`, `Use orch ctx find "Code that refund failed" (a broader search; use it when no name or string is known).`},
+		{`grep -rn Normalize src`, `Use orch ctx sym Normalize --refs 3.`},
+		{`rg "cannot find user" internal/`, `Use orch ctx text 'cannot find user' --glob 'internal/**'.`},
+	}
+	var cases []reminderCase
+	kinds := map[string]string{}
+	for _, c := range file.PatternKinds {
+		if _, seen := kinds[c.Pattern]; seen {
+			t.Fatalf("the shared case file lists %q twice", c.Pattern)
+		}
+		kinds[c.Pattern] = c.Kind
+		cases = append(cases, reminderCase{Name: c.Pattern, Tool: "bash", Input: bash("grep -rn '" + c.Pattern + "' src")})
+	}
+	for _, example := range examples {
+		if _, seen := kinds[example.command]; seen {
+			t.Fatalf("duplicate case %q", example.command)
+		}
+		cases = append(cases, reminderCase{Name: example.command, Tool: "bash", Input: bash(example.command)})
+	}
+	tuned := runCtxReminder(t, []string{"ORCH_TOOL_GUARD_HINT=pattern"}, cases)
+	generic := runCtxReminder(t, []string{"ORCH_TOOL_GUARD_HINT=generic"}, cases)
+	counts := map[string]int{}
+	for _, c := range file.PatternKinds {
+		marker, ok := kindLines[c.Kind]
+		if !ok {
+			t.Fatalf("%q has an unknown kind %q", c.Pattern, c.Kind)
+		}
+		counts[c.Kind]++
+		reason := tuned.Out[c.Pattern].Block
+		if !strings.Contains(reason, "(deny-grep-rg)") {
+			t.Fatalf("%q must be blocked by deny-grep-rg: %s", c.Pattern, reason)
+		}
+		for kind, other := range kindLines {
+			if strings.Contains(reason, other) != (kind == c.Kind) {
+				t.Errorf("%q must render the %s line and no other: %s", c.Pattern, c.Kind, reason)
+			}
+		}
+		// The tailored line is exactly one extra line, never a rewrite.
+		plain := generic.Out[c.Pattern].Block
+		extra := undrop(strings.Split(reason, "\n"), strings.Split(plain, "\n"))
+		if extra == "" {
+			t.Errorf("%q: the pattern hint is not the generic reason plus one line: %s", c.Pattern, reason)
+		} else if !strings.Contains(extra, marker) {
+			t.Errorf("%q: the extra line is not the %s line: %q", c.Pattern, c.Kind, extra)
+		}
+		if strings.Contains(generic.Out[c.Pattern].Block, marker) {
+			t.Errorf("%q: generic mode rendered the tailored line: %s", c.Pattern, generic.Out[c.Pattern].Block)
+		}
+	}
+	for kind, count := range counts {
+		if count < 8 {
+			t.Errorf("only %d shared cases for %s, want at least 8", count, kind)
+		}
+	}
+	for _, example := range examples {
+		var found bool
+		for _, line := range strings.Split(tuned.Out[example.command].Block, "\n") {
+			if line == example.line {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("%s: missing the tailored line %q: %s", example.command, example.line, tuned.Out[example.command].Block)
+		}
+	}
+	// Unset is generic, byte for byte.
+	sample := []reminderCase{{Name: "grep", Tool: "bash", Input: bash(`grep -rn Normalize src`), Blocks: "grep-rg"}}
+	unset := runCtxReminder(t, nil, sample)
+	plainGeneric := runCtxReminder(t, []string{"ORCH_TOOL_GUARD_HINT=generic"}, sample)
+	if got := unset.Out["grep"].Block; got != oldGrepReason {
+		t.Errorf("unset mode changed the reason: %q", got)
+	}
+	if got := plainGeneric.Out["grep"].Block; got != oldGrepReason {
+		t.Errorf("generic mode changed the reason: %q", got)
+	}
+	t.Logf("pattern kinds: symbol %d, text %d, concept %d", counts["symbol"], counts["text"], counts["concept"])
+}
+
+// undrop removes one line from tuned and reports it, or "" when tuned is not
+// generic plus exactly one line.
+func undrop(tuned, generic []string) string {
+	for at := range tuned {
+		rest := append(append([]string{}, tuned[:at]...), tuned[at+1:]...)
+		if strings.Join(rest, "\n") == strings.Join(generic, "\n") {
+			return tuned[at]
+		}
+	}
+	return ""
+}
+
+// lines counts the non-empty lines of a reason.
+func lines(reason string) int {
+	count := 0
+	for _, line := range strings.Split(reason, "\n") {
+		if strings.TrimSpace(line) != "" {
+			count++
+		}
+	}
+	return count
+}
+
+// Without orch there is nothing to name, so the pattern hint adds no line.
+func TestCtxReminderPatternHintNeedsOrch(t *testing.T) {
+	cases := []reminderCase{{
+		Name:   "grep",
+		Tool:   "bash",
+		Input:  bash(`grep -rn Normalize src`),
+		Blocks: "grep-rg",
+	}}
+	for _, onPath := range [][]string{{"fd", "rg"}, nil} {
+		for _, mode := range []string{"ORCH_TOOL_GUARD_HINT=pattern", "ORCH_TOOL_GUARD_HINT=generic"} {
+			got := runCtxReminderWith(t, onPath, []string{mode}, cases)
+			reason := got.Out["grep"].Block
+			if count := lines(reason); count != 2 {
+				t.Errorf("%s with %v: %d lines, want 2: %s", mode, onPath, count, reason)
+			}
+			for kind, marker := range kindLines {
+				if strings.Contains(reason, marker) {
+					t.Errorf("%s with %v: the %s line appeared without orch: %s", mode, onPath, kind, reason)
+				}
+			}
+		}
+	}
+}
+
+// ORCH_TOOL_GUARD_LOG appends one JSON line per block for the A/B count, and
+// writes nothing for a call that runs.
+func TestCtxReminderGuardLog(t *testing.T) {
+	log := filepath.Join(t.TempDir(), "guard.log")
+	long := "grep -rn " + strings.Repeat("A", 300) + " src"
+	cases := []reminderCase{
+		{Name: "symbol", Tool: "bash", Input: bash(`grep -rn Normalize src`), Blocks: "grep-rg"},
+		{Name: "long", Tool: "bash", Input: bash(long), Blocks: "grep-rg"},
+		{Name: "allowed", Tool: "bash", Input: bash(`orch ctx text Normalize`)},
+	}
+	env := []string{"ORCH_TOOL_GUARD_HINT=pattern", "ORCH_TOOL_GUARD_LOG=" + log}
+	got := runCtxReminder(t, env, cases)
+	if got.Out["allowed"].Block != "" {
+		t.Fatalf("the allowed call was blocked: %s", got.Out["allowed"].Block)
+	}
+	raw, err := os.ReadFile(log)
+	if err != nil {
+		t.Fatalf("the log was not written: %v", err)
+	}
+	entries := strings.Split(strings.TrimSpace(string(raw)), "\n")
+	if len(entries) != 2 {
+		t.Fatalf("the log must hold one line per block, got %d: %q", len(entries), raw)
+	}
+	for _, entry := range entries {
+		var record map[string]any
+		if err := json.Unmarshal([]byte(entry), &record); err != nil {
+			t.Fatalf("the log line is not JSON: %v %q", err, entry)
+		}
+		want := []string{"command", "harness", "hint", "kind", "rule", "ts"}
+		actual := make([]string, 0, len(record))
+		for key := range record {
+			actual = append(actual, key)
+		}
+		sort.Strings(actual)
+		if strings.Join(actual, ",") != strings.Join(want, ",") {
+			t.Errorf("the log line has the wrong fields: %v", actual)
+		}
+		if record["harness"] != "pi" || record["rule"] != "grep-rg" || record["hint"] != "pattern" || record["kind"] != "symbol" {
+			t.Errorf("the log line names the wrong block: %v", record)
+		}
+		if command, ok := record["command"].(string); !ok || len(command) > 200 {
+			t.Errorf("the log command is not a string cut at 200 chars: %v", record["command"])
+		}
+	}
+}
+
+func TestCtxReminderSharedToolguardCases(t *testing.T) {
+	file := sharedGuardFile(t)
 	if len(file.Cases) == 0 || len(file.PathSituations) == 0 {
-		t.Fatalf("%s has no cases or no PATH situations", path)
+		t.Fatal("the shared case file has no cases or no PATH situations")
 	}
 	for situation, spec := range file.PathSituations {
 		t.Run(situation, func(t *testing.T) {
