@@ -116,10 +116,10 @@ func jbRateBurst(t *testing.T, n int, sleep string) string {
 	return dir
 }
 
-func TestJbcontextRunsAtMostEightProcessesAtOnce(t *testing.T) {
-	dir := jbRateBurst(t, 12, "0.4")
-	if m := jbRateMax(dir); m > 8 || m < 6 {
-		t.Errorf("%d jbcontext processes ran at once, want 6 to 8", m)
+func TestJbcontextRunsAtMostSixteenProcessesAtOnce(t *testing.T) {
+	dir := jbRateBurst(t, 20, "0.4")
+	if m := jbRateMax(dir); m > 16 || m < 12 {
+		t.Errorf("%d jbcontext processes ran at once, want 12 to 16", m)
 	}
 }
 
@@ -131,11 +131,11 @@ func TestJbcontextSlotsEnvOneSerializes(t *testing.T) {
 	}
 }
 
-func TestJbcontextSlotsEnvInvalidFallsBackToEight(t *testing.T) {
+func TestJbcontextSlotsEnvInvalidFallsBackToSixteen(t *testing.T) {
 	for _, v := range []string{"", "0", "33", "-1", "many"} {
 		t.Setenv("ORCH_JB_SLOTS", v)
-		if n := jbSlotCount(); n != 8 {
-			t.Errorf("ORCH_JB_SLOTS=%q gives %d slots, want 8", v, n)
+		if n := jbSlotCount(); n != 16 {
+			t.Errorf("ORCH_JB_SLOTS=%q gives %d slots, want 16", v, n)
 		}
 	}
 	t.Setenv("ORCH_JB_SLOTS", "32")
