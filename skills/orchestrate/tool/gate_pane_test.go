@@ -84,9 +84,11 @@ func fakeGatePaneVerbs(path string, args []string) (int, bool) {
 		}
 		statusF, markF, pidF = filepath.Join(panes, pane+".status"), filepath.Join(panes, pane+".gate"), filepath.Join(panes, pane+".pid")
 		extra := map[string]any{}
-		if status() != "" {
+		lateF := filepath.Join(panes, pane+".late")
+		if status() != "" && !exists(lateF) {
 			extra["overlap"] = true // a second agent started in a busy pane
 		}
+		os.Remove(lateF)
 		extra["prompt"] = prompt.String()
 		extra["name"] = args[2]
 		logCall(extra)
@@ -176,7 +178,9 @@ func fakeGatePaneVerbs(path string, args []string) (int, bool) {
 		return 0, true
 	case "agent __late": // args: pane, then the agent start to replay once pi's turn begins
 		time.Sleep(time.Second)
-		os.Remove(statusF) // the same agent, not a second one in a busy pane
+		// The same agent, not a second one in a busy pane. Its idle status stays
+		// until the replay sets it working, so herdr never loses sight of it.
+		os.WriteFile(filepath.Join(panes, args[2]+".late"), nil, 0o644)
 		fakeGatePaneVerbs(path, args[3:])
 		return 0, true
 	case "agent wait":
