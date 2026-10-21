@@ -4,13 +4,15 @@
 // grep), deny-find (a find over a tree), deny-sed-inplace (sed -i, perl -pi),
 // deny-cat-head-tail (a bare cat, head, tail or sed -n on one file) and
 // deny-grep-rg (a plain grep, egrep, fgrep, ag or git grep over files or a
-// directory, and rg too while orch is installed). A block names orch ctx first
-// when `orch` is on PATH, then fd for a file search and rg for a content
-// search, and the pi built-in tool last.
+// directory, and rg too while orch is healthy). A block names orch ctx first
+// when `orch` answers `--version`, then fd for a file search and rg for a
+// content search, and the pi built-in tool last. An `orch` that is on PATH but
+// cannot answer is treated as absent, and the block says it is broken.
 // A grep filtering another command's output and plain fd are not blocked; the
 // note is appended to their result instead, and to pi's built-in grep/find/ls,
 // which are never blocked.
 import type { ExtensionAPI, ToolCallEvent, ToolResultEvent } from "@earendil-works/pi-coding-agent";
+import { spawnSync } from "node:child_process";
 import { accessSync, appendFileSync, constants, statSync } from "node:fs";
 import { delimiter, join } from "node:path";
 
@@ -38,7 +40,9 @@ type segment = {
 
 // The replacements, in the order a block names them: our ctx system first,
 // then the standalone search tools the user prefers, then pi's built-ins.
-type tools = { orch: boolean; fd: boolean; rg: boolean };
+// `broken` carries the probe's error when orch is on PATH but does not answer,
+// so a block can say why it stopped naming it.
+type tools = { orch: boolean; fd: boolean; rg: boolean; broken: string };
 
 type rule = {
 	// The full name, and the short name ORCH_TOOL_GUARD_SKIP takes.
@@ -74,6 +78,55 @@ function guardLog(harness: string, rule: string, hint: hintMode, kind: string, l
 	}
 }
 
+// The probe's timeout in milliseconds. `orch --version` prints a fingerprint
+// and starts nothing else, so a healthy wrapper answers at once; one that
+// cannot find its tool directory fails at once too.
+const probeTimeout = 3000;
+
+// The first line of the probe's error, cut at 120 characters, so it fits in one
+// line of a block.
+function firstLine(text: string): string {
+	for (const part of String(text).split("\n")) {
+		const line = part.trim();
+		if (line) return line.slice(0, 120);
+	}
+	return "";
+}
+
+// True when `orch --version` exits 0 within the timeout. A wrapper that is on
+// PATH and cannot answer is not a replacement, and a block that points at it
+// teaches the model to go around the guard instead.
+function orchAnswers(): { ok: boolean; detail: string } {
+	try {
+		const done = spawnSync("orch", ["--version"], {
+			timeout: probeTimeout,
+			encoding: "utf8",
+			killSignal: "SIGKILL",
+		});
+		if (done.error) return { ok: false, detail: firstLine(done.error.message) || "probe failed" };
+		if (done.status === 0) return { ok: true, detail: "" };
+		const detail =
+			firstLine(done.stderr ?? "") || firstLine(done.stdout ?? "") || `orch --version exited ${done.status ?? "unknown"}`;
+		return { ok: false, detail };
+	} catch (error) {
+		return { ok: false, detail: firstLine(String(error)) || "probe failed" };
+	}
+}
+
+// ORCH_TOOL_GUARD_LOG also records a probe that found a broken orch, once per
+// probe, so a session where the guard could not name its tool is visible next
+// to the blocks.
+function healthLog(detail: string): void {
+	const path = process.env.ORCH_TOOL_GUARD_LOG;
+	if (!path) return;
+	const entry = { ts: new Date().toISOString(), harness: "pi", event: "orch-unhealthy", detail };
+	try {
+		appendFileSync(path, `${JSON.stringify(entry)}\n`);
+	} catch {
+		// Not writable: the block still has to happen.
+	}
+}
+
 // True when an executable of this name is on PATH, so the reminder is harmless
 // in repos and sessions that never installed the skill or the search tools.
 function onPath(name: string): boolean {
@@ -91,9 +144,35 @@ function onPath(name: string): boolean {
 	return false;
 }
 
-// Computed once: PATH does not change under a running session.
+// Computed once: PATH does not change under a running session, and one probe
+// per session is enough for a wrapper whose content does not change either.
 function installed(): tools {
-	return { orch: onPath("orch"), fd: onPath("fd"), rg: onPath("rg") };
+	const present = onPath("orch");
+	let healthy = false;
+	let detail = "";
+	if (present) {
+		const probe = orchAnswers();
+		healthy = probe.ok;
+		if (!healthy) {
+			detail = probe.detail;
+			healthLog(detail);
+		}
+	}
+	return { orch: healthy, fd: onPath("fd"), rg: onPath("rg"), broken: detail };
+}
+
+// The one line a search block adds when orch is installed but cannot answer:
+// the model is told the replacement it cannot use, instead of hunting for a
+// loophole around the block.
+function brokenLine(detail: string): string {
+	return `orch ctx is installed but broken here (${detail}); use the tools above and tell the user.`;
+}
+
+// The three rules that name a search replacement add that line. The two that
+// always name a built-in tool (edit, read) never do, because orch does not back
+// them and a file edit or read still works.
+function withBroken(reason: string, broken: string): string {
+	return broken ? `${reason}\n${brokenLine(broken)}` : reason;
 }
 
 // Split a command line on unquoted separators, dropping quoted text, so an
@@ -526,31 +605,39 @@ function denyCatHeadTail(line: string): boolean {
 	});
 }
 
-// Two or three short lines: what is blocked, and the tool that replaces it.
+// Two or three short lines: what is blocked, and the tool that replaces it. A
+// search rule adds one more line while orch is broken, and the 3rd block in a
+// row one more again.
 const rules: rule[] = [
 	{
 		name: "deny-find-chains",
 		id: "find-chains",
 		match: denyFindChains,
-		reason: ({ orch, fd }) =>
-			`${guardMarker} (deny-find-chains): find -exec, -delete and find | grep chains are blocked.\n` +
-			(orch
-				? `One orch ctx batch replaces them: orch ctx batch -q "find:Code that ..." -q "symbol:Name refs=3" -q "text:pattern glob=dir/**" (--compact shortens it).`
-				: fd
-					? `Use fd instead (e.g. fd -e ts pattern dir, and fd -x cmd replaces find -exec).`
-					: `Use the built-in grep and find tools; orch ctx and fd are not installed.`),
+		reason: ({ orch, fd, broken }) =>
+			withBroken(
+				`${guardMarker} (deny-find-chains): find -exec, -delete and find | grep chains are blocked.\n` +
+					(orch
+						? `One orch ctx batch replaces them: orch ctx batch -q "find:Code that ..." -q "symbol:Name refs=3" -q "text:pattern glob=dir/**" (--compact shortens it).`
+						: fd
+							? `Use fd instead (e.g. fd -e ts pattern dir, and fd -x cmd replaces find -exec).`
+							: `Use the built-in grep and find tools; orch ctx and fd are not installed.`),
+				broken,
+			),
 	},
 	{
 		name: "deny-find",
 		id: "find",
 		match: denyFind,
-		reason: ({ orch, fd }) =>
-			`${guardMarker} (deny-find): find over a tree is blocked.\n` +
-			(orch
-				? `One orch ctx batch replaces it: orch ctx batch -q "find:Code that ..." -q "text:pattern glob=dir/**" (--compact shortens it).`
-				: fd
-					? `Use fd instead (e.g. fd -e ts pattern dir, and fd -x cmd replaces find -exec).`
-					: `Use the built-in find tool; orch ctx and fd are not installed.`),
+		reason: ({ orch, fd, broken }) =>
+			withBroken(
+				`${guardMarker} (deny-find): find over a tree is blocked.\n` +
+					(orch
+						? `One orch ctx batch replaces it: orch ctx batch -q "find:Code that ..." -q "text:pattern glob=dir/**" (--compact shortens it).`
+						: fd
+							? `Use fd instead (e.g. fd -e ts pattern dir, and fd -x cmd replaces find -exec).`
+							: `Use the built-in find tool; orch ctx and fd are not installed.`),
+				broken,
+			),
 	},
 	{
 		name: "deny-sed-inplace",
@@ -564,13 +651,16 @@ const rules: rule[] = [
 		name: "deny-grep-rg",
 		id: "grep-rg",
 		match: denyGrepRg,
-		reason: ({ orch, rg }) =>
-			`${guardMarker} (deny-grep-rg): a plain grep${orch ? ", rg" : ""}, ag or git grep over files is blocked.\n` +
-			(orch
-				? `One orch ctx batch replaces it: orch ctx batch -q "text:pattern glob=dir/**" -q "symbol:Name refs=3" (a concept: find:...).`
-				: rg
-					? `Use rg instead (e.g. rg -n pattern dir).`
-					: `Use the built-in grep tool; orch ctx and rg are not installed.`),
+		reason: ({ orch, rg, broken }) =>
+			withBroken(
+				`${guardMarker} (deny-grep-rg): a plain grep${orch ? ", rg" : ""}, ag or git grep over files is blocked.\n` +
+					(orch
+						? `One orch ctx batch replaces it: orch ctx batch -q "text:pattern glob=dir/**" -q "symbol:Name refs=3" (a concept: find:...).`
+						: rg
+							? `Use rg instead (e.g. rg -n pattern dir).`
+							: `Use the built-in grep tool; orch ctx and rg are not installed.`),
+				broken,
+			),
 		tuned: (line, tools) => {
 			const segment = grepSegment(line, tools);
 			return segment ? patternHint(segment) : "";

@@ -40,6 +40,16 @@ const (
 	// repeatedBlock is the one extra line a reason carries from the 3rd block
 	// in a row on.
 	repeatedBlock = "Blocked 3 times: use the replacement above; this guard does not give way."
+	// brokenDetail is what the broken orch stub writes to stderr: what a wrapper
+	// with no tool directory next to it prints.
+	brokenDetail = "cd: /nonexistent/tool: No such file or directory"
+	// brokenLine is the one line a search block adds when orch is installed but
+	// cannot answer.
+	brokenLine = "orch ctx is installed but broken here (" + brokenDetail + "); use the tools above and tell the user."
+	// brokenStub is an orch on PATH that exits 1, recording each probe in
+	// ORCH_PROBE_LOG when the test sets it.
+	brokenStub = "#!/bin/sh\nif [ -n \"$ORCH_PROBE_LOG\" ]; then echo probe >> \"$ORCH_PROBE_LOG\"; fi\n" +
+		"echo \"" + brokenDetail + "\" >&2\nexit 1\n"
 )
 
 // runCtxReminder runs a case group with only an `orch` stand-in on PATH.
@@ -48,11 +58,28 @@ func runCtxReminder(t *testing.T, env []string, cases []reminderCase) reminderRu
 	return runCtxReminderWith(t, []string{"orch"}, env, cases)
 }
 
-// runCtxReminderWith copies the real extension into a temp dir, puts a stub for
-// each named tool on PATH and runs the cases through the loaded extension in
-// node. PATH is only that temp dir, so the real system tools never leak in and
-// the case group decides which replacements the guard can name.
 func runCtxReminderWith(t *testing.T, onPath []string, env []string, cases []reminderCase) reminderRun {
+	t.Helper()
+	return runCtxReminderStubbed(t, onPath, nil, env, cases)
+}
+
+// runCtxReminderWithBroken is runCtxReminderWith, but the named tools are stubs
+// that exit 1, so the guard sees an orch that is on PATH and cannot answer.
+func runCtxReminderWithBroken(t *testing.T, onPath, broken, env []string, cases []reminderCase) reminderRun {
+	t.Helper()
+	stubs := map[string]string{}
+	for _, name := range broken {
+		stubs[name] = brokenStub
+	}
+	return runCtxReminderStubbed(t, onPath, stubs, env, cases)
+}
+
+// runCtxReminderStubbed copies the real extension into a temp dir, puts a stub
+// for each named tool on PATH and runs the cases through the loaded extension in
+// node. A tool named in stubs gets that script instead of the healthy stand-in.
+// PATH is only that temp dir, so the real system tools never leak in and the case
+// group decides which replacements the guard can name.
+func runCtxReminderStubbed(t *testing.T, onPath []string, stubs map[string]string, env []string, cases []reminderCase) reminderRun {
 	t.Helper()
 	node, err := exec.LookPath("node")
 	if err != nil {
@@ -68,7 +95,11 @@ func runCtxReminderWith(t *testing.T, onPath []string, env []string, cases []rem
 		t.Fatal(err)
 	}
 	for _, name := range onPath {
-		if err := os.WriteFile(filepath.Join(bin, name), []byte("#!/bin/sh\n"), 0o755); err != nil {
+		body, ok := stubs[name]
+		if !ok {
+			body = "#!/bin/sh\n"
+		}
+		if err := os.WriteFile(filepath.Join(bin, name), []byte(body), 0o755); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -581,6 +612,9 @@ func TestCtxReminderFallbackBlocksOnceThenAllowsRetry(t *testing.T) {
 type sharedToolguardFile struct {
 	PathSituations map[string]struct {
 		Tools []string `json:"tools"`
+		// Broken names the tools whose stub exits 1, e.g. an `orch` wrapper that
+		// cannot find its tool directory.
+		Broken []string `json:"broken"`
 	} `json:"pathSituations"`
 	Cases []struct {
 		Name      string `json:"name"`
@@ -732,6 +766,8 @@ func lines(reason string) int {
 }
 
 // Without orch there is nothing to name, so the pattern hint adds no line.
+// An orch that is on PATH but cannot answer counts as absent, and the block says
+// so instead of pointing at it.
 func TestCtxReminderPatternHintNeedsOrch(t *testing.T) {
 	cases := []reminderCase{{
 		Name:   "grep",
@@ -753,6 +789,121 @@ func TestCtxReminderPatternHintNeedsOrch(t *testing.T) {
 			}
 		}
 	}
+}
+
+// An orch that is on PATH but cannot answer is not a replacement: the search
+// rules stop naming it, say it is broken here, and a plain rg is allowed, so a
+// block never points at a tool that cannot run its own command.
+func TestCtxReminderOrchHealth(t *testing.T) {
+	t.Run("broken orch blocks and says why", func(t *testing.T) {
+		probes := filepath.Join(t.TempDir(), "probes.log")
+		cases := []reminderCase{
+			{Name: "grep recursive", Tool: "bash", Input: bash(`grep -rn x src`), Blocks: "grep-rg"},
+			{Name: "rg tree", Tool: "bash", Input: bash(`rg Foo internal/`)},
+			{Name: "find by name", Tool: "bash", Input: bash(`find . -name "*.ts"`), Blocks: "find"},
+			{Name: "find -exec", Tool: "bash", Input: bash(`find . -name x -exec ls {} \;`), Blocks: "find-chains"},
+			{Name: "cat one file", Tool: "bash", Input: bash(`cat notes.txt`), Blocks: "cat-head-tail"},
+			{Name: "sed -i", Tool: "bash", Input: bash(`sed -i 's/a/b/' file.go`), Blocks: "sed-inplace"},
+			{Name: "builtin grep", Tool: "grep", Input: map[string]any{"pattern": "Gateway"}},
+		}
+		got := runCtxReminderWithBroken(t, []string{"orch", "fd", "rg"}, []string{"orch"}, []string{"ORCH_PROBE_LOG=" + probes}, cases)
+		// The reminder hook is not registered, so a search that runs stays quiet
+		// instead of pointing at a tool that cannot answer.
+		if len(got.Handlers) != 1 || got.Handlers[0] != "tool_call" {
+			t.Fatalf("a broken orch must leave only the guard hook, got %v", got.Handlers)
+		}
+		// One probe per session covers every case in the group.
+		if raw, err := os.ReadFile(probes); err != nil || lines(string(raw)) != 1 {
+			t.Errorf("the probe ran more than once: %v %q", err, raw)
+		}
+		for _, name := range []string{"grep recursive", "find by name", "find -exec"} {
+			reason := got.Out[name].Block
+			if !strings.Contains(reason, "deny-") {
+				t.Fatalf("%q was not blocked: %q", name, reason)
+			}
+			if !strings.Contains(reason, brokenLine) {
+				t.Errorf("%q must say orch is broken, with the probe's first line: %q", name, reason)
+			}
+			if strings.Contains(reason, "orch ctx batch") || strings.Contains(reason, "orch ctx sym") {
+				t.Errorf("%q named orch ctx although orch cannot answer: %q", name, reason)
+			}
+			if count := lines(reason); count != 3 {
+				t.Errorf("%q: %d lines, want 3: %q", name, count, reason)
+			}
+		}
+		// rg is the preferred grep with no usable orch, so it is not blocked and
+		// the built-in grep gets no reminder.
+		for _, name := range []string{"rg tree", "builtin grep"} {
+			if reason := got.Out[name].Block; reason != "" {
+				t.Errorf("%q was blocked although orch cannot answer: %s", name, reason)
+			}
+			if added := got.Out[name].Added; added != "" {
+				t.Errorf("%q got a reminder although orch cannot answer: %q", name, added)
+			}
+		}
+		// The two rules that always name a built-in tool stay unchanged: no
+		// broken line, and a file read never points at orch ctx.
+		if reason := got.Out["cat one file"].Block; strings.Contains(reason, "orch ctx") || strings.Contains(reason, "broken here") {
+			t.Errorf("a file read must name the built-in read only: %q", reason)
+		}
+		if reason := got.Out["sed -i"].Block; strings.Contains(reason, "broken here") {
+			t.Errorf("an in-place edit must name the built-in edit only: %q", reason)
+		}
+	})
+
+	t.Run("healthy orch keeps today's text", func(t *testing.T) {
+		cases := []reminderCase{
+			{Name: "grep recursive", Tool: "bash", Input: bash(`grep -rn Normalize src`), Blocks: "grep-rg"},
+			{Name: "rg tree", Tool: "bash", Input: bash(`rg Foo internal/`), Blocks: "grep-rg"},
+		}
+		got := runCtxReminderWith(t, []string{"orch", "fd", "rg"}, nil, cases)
+		if reason := got.Out["grep recursive"].Block; reason != oldGrepReason {
+			t.Errorf("a healthy orch changed the grep reason: %q", reason)
+		}
+		if reason := got.Out["rg tree"].Block; strings.Contains(reason, "broken here") {
+			t.Errorf("a healthy orch said it is broken: %q", reason)
+		}
+	})
+
+	t.Run("one log line per probe", func(t *testing.T) {
+		log := filepath.Join(t.TempDir(), "guard.log")
+		cases := []reminderCase{{Name: "orch ctx text", Tool: "bash", Input: bash(`orch ctx text Gateway`)}}
+		runCtxReminderWithBroken(t, []string{"orch"}, []string{"orch"}, []string{"ORCH_TOOL_GUARD_LOG=" + log}, cases)
+		raw, err := os.ReadFile(log)
+		if err != nil {
+			t.Fatalf("the broken probe was not logged: %v", err)
+		}
+		var record map[string]any
+		if err := json.Unmarshal([]byte(strings.TrimSpace(string(raw))), &record); err != nil {
+			t.Fatalf("the log line is not JSON: %v %q", err, raw)
+		}
+		want := []string{"detail", "event", "harness", "ts"}
+		actual := make([]string, 0, len(record))
+		for key := range record {
+			actual = append(actual, key)
+		}
+		sort.Strings(actual)
+		if strings.Join(actual, ",") != strings.Join(want, ",") {
+			t.Errorf("the health log line has the wrong fields: %v", actual)
+		}
+		if record["harness"] != "pi" || record["event"] != "orch-unhealthy" || record["detail"] != brokenDetail {
+			t.Errorf("the health log line names the wrong probe: %v", record)
+		}
+	})
+
+	t.Run("detail is the first line cut at 120 characters", func(t *testing.T) {
+		long := strings.Repeat("x", 200)
+		stub := "#!/bin/sh\necho \"" + long + "\" >&2\necho \"second line\" >&2\nexit 1\n"
+		cases := []reminderCase{{Name: "grep recursive", Tool: "bash", Input: bash(`grep -rn x src`), Blocks: "grep-rg"}}
+		got := runCtxReminderStubbed(t, []string{"orch", "rg"}, map[string]string{"orch": stub}, nil, cases)
+		reason := got.Out["grep recursive"].Block
+		if !strings.Contains(reason, "("+long[:120]+");") {
+			t.Errorf("the detail is not the first line cut at 120 characters: %q", reason)
+		}
+		if strings.Contains(reason, "second line") {
+			t.Errorf("the detail is more than the first line: %q", reason)
+		}
+	})
 }
 
 // ORCH_TOOL_GUARD_LOG appends one JSON line per block for the A/B count, and
@@ -818,7 +969,7 @@ func TestCtxReminderSharedToolguardCases(t *testing.T) {
 			if len(cases) == 0 {
 				t.Fatalf("no cases for PATH situation %q", situation)
 			}
-			got := runCtxReminderWith(t, spec.Tools, nil, cases)
+			got := runCtxReminderWithBroken(t, spec.Tools, spec.Broken, nil, cases)
 			blocked := 0
 			for _, c := range file.Cases {
 				if c.Situation != situation {

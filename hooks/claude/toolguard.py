@@ -13,17 +13,39 @@ on stdin, and a block is exit 2 with the reason on stderr, which is how Claude
 Code's PreToolUse hooks hand a refusal back to the model.
 
 The replacement text names a tool in the same order as pi: `orch ctx` first
-when `orch` is on PATH, then fd for a file search and rg for a content search,
-then the built-in Claude tools.
+when `orch` answers `--version`, then fd for a file search and rg for a content
+search, then the built-in Claude tools. An `orch` that is on PATH but cannot
+answer is treated as absent, and a search block says it is broken.
 """
 
 import json
 import os
 import re
+import subprocess
 import sys
+import time
 from datetime import datetime, timezone
 
 GUARD_MARKER = "orch tool guard"
+
+# `orch --version` prints a fingerprint and starts nothing else, so a healthy
+# wrapper answers at once and one that cannot find its tool directory fails at
+# once. A second is plenty; three leaves room for a cold binary cache.
+PROBE_TIMEOUT = 3
+
+# The first line of a probe error is cut at this many characters so it fits in
+# one line of a block.
+DETAIL_MAX = 120
+
+# Every hook call is a fresh process, so a probe would run on every Bash call.
+# The result lives in a small cache for a minute instead.
+HEALTH_TTL = 60
+HEALTH_FILE = "toolguard-health.json"
+
+# The rules that name a search replacement, and so say when orch is broken. The
+# two rules that always name a built-in tool (Edit, Read) never do, because
+# orch does not back them and an edit or a read still works.
+SEARCH_RULES = frozenset({"find-chains", "find", "grep-rg"})
 
 # The rule order matters: a find chain is the sharper name for a plain find.
 SHELL_SEARCHES = frozenset({"rg", "grep", "egrep", "fgrep", "ag", "fd", "find"})
@@ -92,8 +114,130 @@ def on_path(name):
 
 
 def installed():
-    """The replacements a block may name, computed once per hook run."""
-    return {"orch": on_path("orch"), "fd": on_path("fd"), "rg": on_path("rg")}
+    """The replacements a block may name, computed once per hook run.
+
+    `orch` counts only when it answers `--version`; `broken` carries the probe's
+    first error line so a block can say why it stopped naming it.
+    """
+    present = on_path("orch")
+    healthy = False
+    broken = ""
+    if present:
+        health = orch_health()
+        healthy = health["ok"]
+        if not healthy:
+            broken = health["detail"]
+    return {"orch": healthy, "fd": on_path("fd"), "rg": on_path("rg"), "broken": broken}
+
+
+def first_line(text):
+    """The first non-empty line of a probe's error, cut at DETAIL_MAX."""
+    for line in str(text).splitlines():
+        line = line.strip()
+        if line:
+            return line[:DETAIL_MAX]
+    return ""
+
+
+def probe_orch():
+    """Run `orch --version` once and report whether it answered.
+
+    A wrapper on PATH that fails is not a replacement, and a block that points
+    at it teaches the model to go around the guard instead.
+    """
+    try:
+        done = subprocess.run(
+            ["orch", "--version"],
+            capture_output=True,
+            text=True,
+            timeout=PROBE_TIMEOUT,
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        return {"ok": False, "detail": first_line(error) or "probe failed"}
+    if done.returncode == 0:
+        return {"ok": True, "detail": ""}
+    detail = (
+        first_line(done.stderr)
+        or first_line(done.stdout)
+        or f"orch --version exited {done.returncode}"
+    )
+    return {"ok": False, "detail": detail}
+
+
+def health_path():
+    """The probe cache, under ORCH_TOOL_GUARD_STATE_DIR when it is set."""
+    directory = os.environ.get("ORCH_TOOL_GUARD_STATE_DIR")
+    if not directory:
+        directory = os.path.join(os.path.expanduser("~"), ".local", "state", "orchestrate")
+    return os.path.join(directory, HEALTH_FILE)
+
+
+def read_health(path):
+    """The cached probe when it is fresh and well formed, else None."""
+    try:
+        with open(path, encoding="utf-8") as handle:
+            cached = json.load(handle)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(cached, dict) or not isinstance(cached.get("ok"), bool):
+        return None
+    try:
+        age = time.time() - float(cached.get("ts", 0))
+    except (TypeError, ValueError):
+        return None
+    if not 0 <= age < HEALTH_TTL:
+        return None
+    return {"ok": cached["ok"], "detail": str(cached.get("detail") or "")[:DETAIL_MAX]}
+
+
+def write_health(path, health):
+    """Best effort: a guard never fails a call because it could not cache."""
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump({"ts": time.time(), "ok": health["ok"], "detail": health["detail"]}, handle)
+    except OSError:
+        pass
+
+
+def health_log(detail):
+    """ORCH_TOOL_GUARD_LOG records a broken orch once per probe, so a session
+    where the guard could not name its tool is visible next to the blocks."""
+    path = os.environ.get("ORCH_TOOL_GUARD_LOG")
+    if not path:
+        return
+    entry = {
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "harness": "claude",
+        "event": "orch-unhealthy",
+        "detail": detail,
+    }
+    try:
+        with open(path, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps(entry) + "\n")
+    except OSError:
+        pass
+
+
+def orch_health():
+    """The probe result, cached for HEALTH_TTL seconds across hook calls."""
+    path = health_path()
+    cached = read_health(path)
+    if cached is not None:
+        return cached
+    health = probe_orch()
+    write_health(path, health)
+    if not health["ok"]:
+        health_log(health["detail"])
+    return health
+
+
+def broken_line(detail):
+    """The one line a search block adds when orch is installed but broken."""
+    return (
+        f"orch ctx is installed but broken here ({detail}); "
+        "use the tools above and tell the user."
+    )
 
 
 def segments(command):
@@ -673,7 +817,11 @@ def main(argv):
                 tuned = rule["tuned"](line, tools)
             kind = grep_kind(line, tools) if rule["id"] == "grep-rg" else ""
             guard_log(rule["id"], mode, kind, line)
-            reason = rule["reason"](tools) + ("\n" + tuned if tuned else "")
+            reason = rule["reason"](tools)
+            if tools["broken"] and rule["id"] in SEARCH_RULES:
+                reason += "\n" + broken_line(tools["broken"])
+            if tuned:
+                reason += "\n" + tuned
             sys.stderr.write(reason + "\n")
             return 2
     return 0

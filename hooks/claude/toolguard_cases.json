@@ -1,9 +1,10 @@
 {
   "schema": 1,
   "guard": "orch tool guard",
-  "note": "One decision table for both harness guards. rule is the rule that must block the call, or empty when the call is allowed. situation names the PATH the hook runs with: orch on PATH, no orch but fd and rg installed, or neither. hooks/claude/toolguard_test.py runs every case through the real Claude hooks; TestCtxReminderSharedToolguardCases in skills/orchestrate/tool runs the same file through the pi extension and compares blocked vs allowed and the rule name only. patternKinds is the second table: the kind deny-grep-rg must classify a pattern into, run through both implementations so the tailored hint cannot drift.",
+  "note": "One decision table for both harness guards. rule is the rule that must block the call, or empty when the call is allowed. situation names the PATH the hook runs with: orch on PATH, orch on PATH but broken (a stub that exits 1), no orch but fd and rg installed, or neither. A situation's optional broken list names the tools whose stub exits 1 instead of 0. hooks/claude/toolguard_test.py runs every case through the real Claude hooks; TestCtxReminderSharedToolguardCases in skills/orchestrate/tool runs the same file through the pi extension and compares blocked vs allowed and the rule name only. patternKinds is the second table: the kind deny-grep-rg must classify a pattern into, run through both implementations so the tailored hint cannot drift.",
   "pathSituations": {
     "orch": { "tools": ["orch"] },
+    "orch broken": { "tools": ["orch", "fd", "rg"], "broken": ["orch"] },
     "fd-rg": { "tools": ["fd", "rg"] },
     "none": { "tools": [] }
   },
@@ -135,6 +136,19 @@
     { "name": "none sed to stdout", "situation": "none", "rule": "", "command": "sed 's/a/b/' file.txt" },
     { "name": "none head pipe wc", "situation": "none", "rule": "", "command": "head -n 5 file | wc -l" },
     { "name": "none cat two files", "situation": "none", "rule": "", "command": "cat file1 file2" },
-    { "name": "none tail -f", "situation": "none", "rule": "", "command": "tail -f app.log" }
+    { "name": "none tail -f", "situation": "none", "rule": "", "command": "tail -f app.log" },
+
+    { "name": "broken grep recursive", "situation": "orch broken", "rule": "grep-rg", "command": "grep -rn x src" },
+    { "name": "broken grep quoted pattern", "situation": "orch broken", "rule": "grep-rg", "command": "grep -rn \"findUser\" src" },
+    { "name": "broken ag dir", "situation": "orch broken", "rule": "grep-rg", "command": "ag Gateway internal" },
+    { "name": "broken git grep", "situation": "orch broken", "rule": "grep-rg", "command": "git grep -n Gateway" },
+    { "name": "broken find by name", "situation": "orch broken", "rule": "find", "command": "find . -name '*.ts'" },
+    { "name": "broken find -exec", "situation": "orch broken", "rule": "find-chains", "command": "find . -name x -exec ls {} \\;" },
+    { "name": "broken cat notes", "situation": "orch broken", "rule": "cat-head-tail", "command": "cat notes.txt" },
+    { "name": "broken sed -i", "situation": "orch broken", "rule": "sed-inplace", "command": "sed -i 's/a/b/' file.txt" },
+    { "name": "broken rg dir", "situation": "orch broken", "rule": "", "command": "rg Foo internal/" },
+    { "name": "broken orch ctx text", "situation": "orch broken", "rule": "", "command": "orch ctx text Gateway" },
+    { "name": "broken go test pipe grep", "situation": "orch broken", "rule": "", "command": "go test ./... | grep FAIL" },
+    { "name": "broken fd alone", "situation": "orch broken", "rule": "", "command": "fd gateway" }
   ]
 }

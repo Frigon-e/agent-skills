@@ -43,6 +43,18 @@ a question, or a regex character class. Take the kind it names rather than
 widening the same grep: `find` is for the case where no single name or string
 is known yet, and `text` answers faster when one is.
 
+The guard names `orch ctx` only when `orch --version` answers (exit 0 within
+three seconds). When `orch` is on PATH and fails that probe, for example a
+wrapper that cannot find the `tool` directory next to it, the guard treats it
+as not installed: it names `fd`, `rg` or the built-in tools instead, does not
+block a plain `rg`, and ends each search block with
+`orch ctx is installed but broken here (<first line of the probe error>); use
+the tools above and tell the user.` Pi probes once at startup; each Claude hook
+probes at most once a minute through
+`~/.local/state/orchestrate/toolguard-health.json`, which
+`ORCH_TOOL_GUARD_STATE_DIR` moves. If you see that line, do not look for another
+search tool: say the tool is broken and use the replacement the block names.
+
 | You need | Command | Why this one |
 |---|---|---|
 | String matches within a stated scope | `orch ctx text <pattern> [--glob G] [--word] [--fixed] [--type T] [-l] [-c] [-C n]` | ripgrep: smart-case, skips lockfiles, minified, generated and vendored files; hits grouped by file, each with its enclosing function and configurable context (default 6 lines) |
