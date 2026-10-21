@@ -92,6 +92,11 @@ func gateAgentPass(repo, harness string, p gatePass) (gatePass, error) {
 	if p.ctxProfile != "" {
 		cli.Env = append(cli.Env, "ORCH_CTX_PROFILE="+p.ctxProfile)
 	}
+	if piGuardLoaded(harness, p) {
+		// A pane's shell, not orch, hands the environment to pi: name the guard
+		// knobs so paneAgentEnv exports them there too.
+		cli.Env = append(cli.Env, guardEnv(os.Environ())...)
+	}
 	p.cli = cli
 	if !strings.HasPrefix(p.shared, cli.Notice+"\n\n") {
 		p.shared = cli.Notice + "\n\n" + p.shared
@@ -130,6 +135,32 @@ func agentEnv(base, extra []string) []string {
 		env = append(kept, value)
 	}
 	return env
+}
+
+// piGuardLoaded reports whether a pass starts pi with the tool guard: pi with the
+// ctx tool in open shell mode and a shell. Ctx-only mode restricts the shell
+// itself and the guard is silent there; ctx off has no orch ctx to point to.
+func piGuardLoaded(harness string, p gatePass) bool {
+	return harness == "pi" && p.ctxTool && !p.ctxOnly && !p.noTools
+}
+
+// piGuardArgs is the guard's -e argument for a pi pass, or nil.
+func piGuardArgs(p gatePass) []string {
+	if piGuardLoaded("pi", p) && p.cli.Guard != "" {
+		return []string{"-e", p.cli.Guard}
+	}
+	return nil
+}
+
+// guardEnv picks the guard's ORCH_TOOL_GUARD* settings out of env.
+func guardEnv(env []string) []string {
+	var out []string
+	for _, kv := range env {
+		if strings.HasPrefix(kv, "ORCH_TOOL_GUARD") {
+			out = append(out, kv)
+		}
+	}
+	return out
 }
 
 func piPassTools(p gatePass) []string {

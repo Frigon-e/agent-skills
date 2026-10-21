@@ -381,7 +381,8 @@ per-pass task. Pi defaults to `--ctx-shell ctx-only`: native read plus bash
 limited to one `orch ctx` command. It starts with read alone; the guard activates
 bash only after loading. Missing activation or extension-write failure fails the
 pass, never falling back to an open shell. Use `--ctx-shell open` to opt into
-native read/search tools and unrestricted bash. Claude ignores `--ctx-shell`
+native read/search tools and unrestricted bash; that mode also loads the tool
+guard (`orch-ctx-reminder.ts`) with `-e`, in headless and pane passes. Claude ignores `--ctx-shell`
 and exposes Bash with the ctx command permission pattern supplied by `CtxCLIFor`.
 Task A's installed-harness probe also allowed `cat file` as a safe read, so the
 pattern is not an exclusive
