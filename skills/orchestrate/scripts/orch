@@ -2,7 +2,15 @@
 # Content-address the build inputs, including every go:embed asset. Agents and
 # hooks call this wrapper so ORCH_SELF and ORCH_SKILL_DIR point at the skill.
 set -eo pipefail
-here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+# Follow symlinks to the real launcher (a PATH entry such as ~/.local/bin/orch
+# may link here). No readlink -f: macOS readlink has no -f before 12.3.
+self="${BASH_SOURCE[0]}"
+while [ -L "$self" ]; do
+  dir="$(cd -P "$(dirname "$self")" && pwd)"
+  self="$(readlink "$self")"
+  case "$self" in /*) ;; *) self="$dir/$self" ;; esac
+done
+here="$(cd "$(dirname "$self")" && pwd -P)"
 skill="$(dirname "$here")"
 src="$skill/tool"
 command -v go >/dev/null || { echo "orch: building/checking $src needs Go (https://go.dev/dl/)" >&2; exit 1; }
