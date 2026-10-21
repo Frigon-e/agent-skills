@@ -1,13 +1,28 @@
 {
   "schema": 1,
   "guard": "orch tool guard",
-  "note": "One decision table for both harness guards. rule is the rule that must block the call, or empty when the call is allowed. situation names the PATH the hook runs with: orch on PATH, orch on PATH but broken (a stub that exits 1), no orch but fd and rg installed, or neither. A situation's optional broken list names the tools whose stub exits 1 instead of 0. hooks/claude/toolguard_test.py runs every case through the real Claude hooks; TestCtxReminderSharedToolguardCases in skills/orchestrate/tool runs the same file through the pi extension and compares blocked vs allowed and the rule name only. patternKinds is the second table: the kind deny-grep-rg must classify a pattern into, run through both implementations so the tailored hint cannot drift.",
+  "note": "One decision table for both harness guards. rule is the rule that must block the call, or empty when the call is allowed. situation names the PATH the hook runs with: orch on PATH, orch on PATH but broken (a stub that exits 1), no orch but fd and rg installed, or neither. A situation's optional broken list names the tools whose stub exits 1 instead of 0. hooks/claude/toolguard_test.py runs every case through the real Claude hooks; TestCtxReminderSharedToolguardCases in skills/orchestrate/tool runs the same file through the pi extension and compares blocked vs allowed and the rule name only. patternKinds is the second table: the kind deny-grep-rg must classify a pattern into, run through both implementations so the tailored hint cannot drift. builtinCases is the third table: the built-in search tools, where tool names and rule ids differ by harness, so it names a harness-neutral tool (content-search for pi grep and Claude Grep, file-search for pi find and Claude Glob) and the rule each harness must block with (empty for allowed). path names the target directory; an absolute path outside the repository must be allowed, because orch ctx is pinned to a git repository root and has no answer there.",
   "pathSituations": {
     "orch": { "tools": ["orch"] },
     "orch broken": { "tools": ["orch", "fd", "rg"], "broken": ["orch"] },
     "fd-rg": { "tools": ["fd", "rg"] },
     "none": { "tools": [] }
   },
+  "builtinCases": [
+    { "name": "grep a directory inside the repo", "situation": "orch", "tool": "content-search", "pattern": "Gateway", "path": "internal", "rule": { "pi": "builtin-grep", "claude": "builtin-grep" } },
+    { "name": "grep the whole repo", "situation": "orch", "tool": "content-search", "pattern": "Gateway", "path": "", "rule": { "pi": "builtin-grep", "claude": "builtin-grep" } },
+    { "name": "grep one file inside the repo", "situation": "orch", "tool": "content-search", "pattern": "Gateway|Foo", "path": "internal/gateway.go", "rule": { "pi": "builtin-grep", "claude": "builtin-grep" } },
+    { "name": "grep a var folder outside the repo", "situation": "orch", "tool": "content-search", "pattern": "Gateway", "path": "/private/var/folders/xy/T/orchestrate/notes.md", "rule": { "pi": "", "claude": "" } },
+    { "name": "grep tmp outside the repo", "situation": "orch", "tool": "content-search", "pattern": "Gateway", "path": "/tmp/orchestrate/notes.md", "rule": { "pi": "", "claude": "" } },
+    { "name": "glob a directory inside the repo", "situation": "orch", "tool": "file-search", "pattern": "*.go", "path": "internal", "rule": { "pi": "builtin-find", "claude": "builtin-glob" } },
+    { "name": "glob the whole repo", "situation": "orch", "tool": "file-search", "pattern": "*.go", "path": "", "rule": { "pi": "builtin-find", "claude": "builtin-glob" } },
+    { "name": "glob a var folder outside the repo", "situation": "orch", "tool": "file-search", "pattern": "*.log", "path": "/private/var/folders/xy/T/orchestrate/logs", "rule": { "pi": "", "claude": "" } },
+    { "name": "glob tmp outside the repo", "situation": "orch", "tool": "file-search", "pattern": "*.md", "path": "/tmp/orchestrate/reports", "rule": { "pi": "", "claude": "" } },
+    { "name": "broken grep inside the repo", "situation": "orch broken", "tool": "content-search", "pattern": "Gateway", "path": "internal", "rule": { "pi": "", "claude": "" } },
+    { "name": "broken glob inside the repo", "situation": "orch broken", "tool": "file-search", "pattern": "*.go", "path": "internal", "rule": { "pi": "", "claude": "" } },
+    { "name": "fd-rg grep inside the repo", "situation": "fd-rg", "tool": "content-search", "pattern": "Gateway", "path": "internal", "rule": { "pi": "", "claude": "" } },
+    { "name": "none glob inside the repo", "situation": "none", "tool": "file-search", "pattern": "*.go", "path": "internal", "rule": { "pi": "", "claude": "" } }
+  ],
   "patternKinds": [
     { "pattern": "Normalize", "kind": "symbol" },
     { "pattern": "render_user", "kind": "symbol" },

@@ -34,16 +34,55 @@ SCRIPTS = [
     "deny-sed-inplace.sh",
     "deny-cat-head-tail.sh",
     "deny-grep-rg.sh",
+    "deny-builtin-search.sh",
 ]
 
-# Which script owns a rule. Plain find shares deny-find-chains.sh.
+# Which script owns a rule. Plain find shares deny-find-chains.sh, and the two
+# rules for Claude's own search tools share deny-builtin-search.sh.
 HOOK_FOR_RULE = {
     "find-chains": "deny-find-chains.sh",
     "find": "deny-find-chains.sh",
     "sed-inplace": "deny-sed-inplace.sh",
     "cat-head-tail": "deny-cat-head-tail.sh",
     "grep-rg": "deny-grep-rg.sh",
+    "builtin-grep": "deny-builtin-search.sh",
+    "builtin-glob": "deny-builtin-search.sh",
 }
+
+# The built-in search hook: a PreToolUse event for one of Claude's own search
+# tools, with the harness-neutral tool name of the shared table.
+BUILTIN_HOOK = "deny-builtin-search.sh"
+BUILTIN_HOOK_TOOL = {"content-search": "Grep", "file-search": "Glob"}
+BUILTIN_REPLACEMENT = {"builtin-grep": "orch ctx batch", "builtin-glob": "orch ctx batch"}
+
+# The two generic reasons, byte for byte, and the line each pattern mode adds.
+GENERIC_BUILTIN = {
+    "Grep": (
+        "orch tool guard (deny-builtin-grep): the built-in Grep tool is blocked; "
+        "orch ctx answers searches here.\n"
+        'One orch ctx batch replaces it: orch ctx batch -q "text:pattern glob=dir/**" '
+        '-q "symbol:Name refs=3" (a concept: find:...).'
+    ),
+    "Glob": (
+        "orch tool guard (deny-builtin-glob): the built-in Glob tool is blocked; "
+        "orch ctx answers file searches here.\n"
+        'One orch ctx batch replaces it: orch ctx batch -q "find:Code that ..." '
+        '-q "text:pattern glob=dir/**" (--compact shortens it).'
+    ),
+}
+BUILTIN_TAILORED = [
+    ("Grep", "Normalize", "internal", 'Use orch ctx batch -q "symbol:Normalize refs=3".'),
+    (
+        "Grep",
+        "cannot find user",
+        "internal",
+        "Use orch ctx batch -q \"text:'cannot find user' glob=internal/**\".",
+    ),
+    ("Grep", "/api/users", "", "Use orch ctx batch -q \"text:'/api/users'\"."),
+    ("Grep", "refund.*failed", "src", 'Use orch ctx batch -q "find:Code that refund failed".'),
+    ("Glob", "*.go", "internal", "Use orch ctx batch -q \"text:'*.go' glob=internal/**\"."),
+    ("Glob", "refund.*failed", "src", 'Use orch ctx batch -q "find:Code that refund failed".'),
+]
 
 # The replacement a block must name, given the PATH situation and the rule.
 REPLACEMENT = {
@@ -130,6 +169,42 @@ TAILORED = [
         "Use orch ctx text 'cannot find user' --glob 'internal/**'.",
     ),
 ]
+
+
+def repository_root(start):
+    """The git repository a path is in, by walking up, or ""."""
+    path = os.path.abspath(start)
+    while True:
+        if os.path.exists(os.path.join(path, ".git")):
+            return path
+        parent = os.path.dirname(path)
+        if parent == path:
+            return ""
+        path = parent
+
+
+# The hook decides whether a path is inside the repository from its working
+# directory, which Claude Code sets to the project. The tests say so explicitly
+# so the absolute-path cases do not depend on where they were started from.
+REPO_ROOT = repository_root(ROOT)
+
+
+def builtin_hook(checker, tool, pattern, path, situation, extra=None):
+    """One deny-builtin-search hook run, the way Claude Code drives it."""
+    tool_input = {"pattern": pattern}
+    if path:
+        tool_input["path"] = path
+    payload = json.dumps(
+        {"hook_event_name": "PreToolUse", "tool_name": tool, "tool_input": tool_input}
+    )
+    return subprocess.run(
+        [os.path.join(ROOT, BUILTIN_HOOK)],
+        input=payload,
+        text=True,
+        capture_output=True,
+        env=checker.env(situation, extra),
+        cwd=REPO_ROOT or ROOT,
+    )
 
 
 def grep_hook(checker, command, situation, extra):
@@ -234,6 +309,150 @@ def check_pattern_hints(checker, kinds, workdir):
         if len(entry.get("command", "")) > 200:
             failures.append("the log command is not cut at 200 chars")
     return failures, counts
+
+
+def check_builtin_search(checker, workdir, cases):
+    """The built-in search hook: the shared table, the two generic reasons byte
+    for byte, the pattern hint, the log, the switches, the repository boundary and
+    the fail-open cases. Returns the failures and the shared table's counts."""
+    failures = []
+    blocked = allowed = 0
+    pattern = {"ORCH_TOOL_GUARD_HINT": "pattern"}
+
+    # The shared table: blocked while orch answers and the path is inside the
+    # repository, allowed otherwise, and no retry escape on a block.
+    for case in cases:
+        tool = BUILTIN_HOOK_TOOL.get(case["tool"])
+        if tool is None:
+            failures.append(f"{case['name']}: unknown tool {case['tool']!r}")
+            continue
+        rule = (case.get("rule") or {}).get("claude", "")
+        if not rule:
+            allowed += 1
+            done = builtin_hook(checker, tool, case["pattern"], case["path"], case["situation"])
+            if done.returncode != 0 or done.stderr.strip():
+                failures.append(f"{case['name']}: exit {done.returncode}, want 0: {done.stderr.strip()}")
+            continue
+        blocked += 1
+        for attempt in ("first", "retry"):
+            done = builtin_hook(checker, tool, case["pattern"], case["path"], case["situation"])
+            label = case["name"] + (" (retry)" if attempt == "retry" else "")
+            if done.returncode != 2:
+                failures.append(f"{label}: exit {done.returncode}, want 2: {done.stderr.strip()}")
+                continue
+            reason = done.stderr.strip()
+            if f"(deny-{rule})" not in reason:
+                failures.append(f"{label}: reason does not name deny-{rule}: {reason}")
+            if GUARD_MARKER not in reason:
+                failures.append(f"{label}: reason does not name the guard: {reason}")
+            if BUILTIN_REPLACEMENT[rule] not in reason:
+                failures.append(f"{label}: reason must name {BUILTIN_REPLACEMENT[rule]!r}: {reason}")
+            entries = [entry for entry in reason.splitlines() if entry.strip()]
+            if not 2 <= len(entries) <= 3:
+                failures.append(f"{label}: reason is {len(entries)} lines, want 2 or 3: {reason}")
+            if done.stdout:
+                failures.append(f"{label}: block wrote to stdout: {done.stdout.strip()}")
+
+    # Generic and unset keep the fixed text byte for byte.
+    for tool, sample in (("Grep", "Gateway"), ("Glob", "*.go")):
+        for extra, label in (({"ORCH_TOOL_GUARD_HINT": "generic"}, "generic"), ({}, "unset")):
+            done = builtin_hook(checker, tool, sample, "internal", "orch", extra)
+            if done.returncode != 2 or done.stderr.strip() != GENERIC_BUILTIN[tool]:
+                failures.append(
+                    f"{tool} {label}: the reason is not the fixed text byte for byte: "
+                    f"{done.stderr.strip()!r}"
+                )
+
+    # The pattern hint is exactly one extra line, the one that fits the pattern.
+    for tool, pattern_text, path, line in BUILTIN_TAILORED:
+        done = builtin_hook(checker, tool, pattern_text, path, "orch", pattern)
+        reason = done.stderr.strip()
+        if done.returncode != 2:
+            failures.append(f"{tool} {pattern_text!r}: exit {done.returncode}, want 2: {reason}")
+            continue
+        entries = [entry for entry in reason.splitlines() if entry.strip()]
+        if len(entries) != 3 or entries[2] != line:
+            failures.append(f"{tool} {pattern_text!r}: the tailored line is not {line!r}: {reason}")
+
+    # The A/B log names the built-in rule and the arguments the model typed, and
+    # a call the guard lets through writes nothing.
+    log = os.path.join(workdir, "builtin.log")
+    log_env = dict(pattern, ORCH_TOOL_GUARD_LOG=log)
+    builtin_hook(checker, "Grep", "Normalize", "internal", "orch", log_env)
+    builtin_hook(checker, "Glob", "*.go", "", "orch", log_env)
+    builtin_hook(checker, "Grep", "Normalize", "internal", "orch", dict(log_env, ORCH_TOOL_GUARD="off"))
+    try:
+        with open(log, encoding="utf-8") as handle:
+            entries = [json.loads(line) for line in handle if line.strip()]
+    except (OSError, ValueError) as error:
+        failures.append(f"the built-in log was not written: {error}")
+        entries = []
+    want_log = [
+        ("builtin-grep", "symbol", "Grep pattern=Normalize path=internal"),
+        ("builtin-glob", "text", "Glob pattern=*.go"),
+    ]
+    if len(entries) != len(want_log):
+        failures.append(f"the log must hold one line per block, got {len(entries)}")
+    for entry, want in zip(entries, want_log, strict=False):
+        if sorted(entry) != ["command", "harness", "hint", "kind", "rule", "ts"]:
+            failures.append(f"the log line has the wrong fields: {sorted(entry)}")
+            continue
+        if entry.get("harness") != "claude" or entry.get("hint") != "pattern":
+            failures.append(f"the log line names the wrong harness or hint: {entry}")
+        if (entry.get("rule"), entry.get("kind"), entry.get("command")) != want:
+            failures.append(f"the log line names the wrong block: {entry}, want {want}")
+
+    # The switches: ORCH_TOOL_GUARD=off, the group name, and one rule's name.
+    for extra, label in (
+        ({"ORCH_TOOL_GUARD": "off"}, "ORCH_TOOL_GUARD=off"),
+        ({"ORCH_TOOL_GUARD_SKIP": "builtin-search"}, "the builtin-search skip"),
+    ):
+        for tool, sample in (("Grep", "Gateway"), ("Glob", "*.go")):
+            done = builtin_hook(checker, tool, sample, "internal", "orch", extra)
+            if done.returncode != 0 or done.stderr.strip():
+                failures.append(f"{label} did not disable {tool}: {done.stderr.strip()}")
+    done = builtin_hook(checker, "Grep", "Gateway", "internal", "orch", {"ORCH_TOOL_GUARD_SKIP": "builtin-grep"})
+    if done.returncode != 0:
+        failures.append(f"skipping builtin-grep by short name did not work: {done.stderr.strip()}")
+    done = builtin_hook(checker, "Glob", "*.go", "internal", "orch", {"ORCH_TOOL_GUARD_SKIP": "builtin-grep"})
+    if done.returncode != 2 or "(deny-builtin-glob)" not in done.stderr:
+        failures.append("skipping builtin-grep also disabled the glob rule")
+
+    # The repository boundary: absolute inside is blocked, absolute outside is
+    # allowed. The shared table carries the outside paths; this adds the inside
+    # one, which needs this checkout's own root.
+    if REPO_ROOT:
+        inside = os.path.join(REPO_ROOT, "notes.md")
+        for tool, sample in (("Grep", "Gateway"), ("Glob", "*.go")):
+            done = builtin_hook(checker, tool, sample, inside, "orch")
+            if done.returncode != 2:
+                failures.append(f"{tool} {inside}: inside the repository but allowed: {done.stderr.strip()}")
+    for outside in ("/private/var/folders/xy/T/orchestrate/notes.md", "/opt/orchestrate/notes.md"):
+        for tool, sample in (("Grep", "Gateway"), ("Glob", "*.go")):
+            done = builtin_hook(checker, tool, sample, outside, "orch")
+            if done.returncode != 0 or done.stderr.strip():
+                failures.append(f"{tool} {outside}: outside the repository but blocked: {done.stderr.strip()}")
+
+    # Fail open on anything but a Grep or Glob call that carries a pattern.
+    payloads = [
+        ("no pattern", {"tool_name": "Grep", "tool_input": {"path": "internal"}}),
+        ("empty pattern", {"tool_name": "Glob", "tool_input": {"pattern": "  "}}),
+        ("another tool", {"tool_name": "Read", "tool_input": {"pattern": "Gateway"}}),
+        ("a Bash call", {"tool_name": "Bash", "tool_input": {"command": "grep -rn Gateway internal"}}),
+        ("a broken tool_input", {"tool_name": "Grep", "tool_input": "Gateway"}),
+    ]
+    for name, payload in payloads:
+        done = subprocess.run(
+            [os.path.join(ROOT, BUILTIN_HOOK)],
+            input=json.dumps(payload),
+            text=True,
+            capture_output=True,
+            env=checker.env("orch"),
+            cwd=REPO_ROOT or ROOT,
+        )
+        if done.returncode != 0 or done.stderr.strip():
+            failures.append(f"{name}: did not allow cleanly: {done.stderr.strip()}")
+    return failures, blocked, allowed
 
 
 class Checker:
@@ -620,6 +839,10 @@ def main():
         failures.extend(check_switches(checker))
         failures.extend(check_non_bash(checker))
         failures.extend(check_orch_health(checker, workdir))
+        builtin_failures, builtin_blocked, builtin_allowed = check_builtin_search(
+            checker, workdir, data["builtinCases"]
+        )
+        failures.extend(builtin_failures)
         kind_failures, kind_counts = check_pattern_hints(checker, data["patternKinds"], workdir)
         failures.extend(kind_failures)
     finally:
@@ -629,6 +852,8 @@ def main():
         print(f"FAIL {failure}", file=sys.stderr)
     print(
         f"{len(cases)} cases: {checker.blocked} blocked, {checker.allowed} allowed; "
+        f"{builtin_blocked + builtin_allowed} built-in cases: {builtin_blocked} blocked, "
+        f"{builtin_allowed} allowed; "
         f"{len(SCRIPTS)} scripts checked with bash -n"
         + (" and shellcheck" if shutil.which("shellcheck") else "")
         + "; pattern kinds: "

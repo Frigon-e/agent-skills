@@ -13,6 +13,12 @@ Scripts here run only once registered in `~/.claude/settings.json` (not tracked 
         { "type": "command", "command": "\"$HOME/.agents/hooks/claude/deny-cat-head-tail.sh\"" },
         { "type": "command", "command": "\"$HOME/.agents/hooks/claude/deny-grep-rg.sh\"" }
       ]
+    },
+    {
+      "matcher": "Grep|Glob",
+      "hooks": [
+        { "type": "command", "command": "\"$HOME/.agents/hooks/claude/deny-builtin-search.sh\"" }
+      ]
     }
   ]
 }
@@ -24,7 +30,7 @@ Scripts here run only once registered in `~/.claude/settings.json` (not tracked 
 
 ## Tool guard
 
-These are the Claude side of the pi guard in `skills/orchestrate/tool/pi_ctx_reminder.ts`, which stays the source of truth. `toolguard.py` is a line for line port of its five rules; each shell script below is a thin wrapper that names the rule group it enforces, so a script is one file to read and one block list to change.
+These are the Claude side of the pi guard in `skills/orchestrate/tool/pi_ctx_reminder.ts`, which stays the source of truth. `toolguard.py` is a line for line port of its five shell rules and its two built-in rules; each shell script below is a thin wrapper that names the rule group it enforces, so a script is one file to read and one block list to change.
 
 | Script | Rule | Blocks | Does not touch |
 |---|---|---|---|
@@ -32,8 +38,15 @@ These are the Claude side of the pi guard in `skills/orchestrate/tool/pi_ctx_rem
 | `deny-sed-inplace.sh` | `deny-sed-inplace` | `sed`/`gsed` with `-i`, `-i.bak`, `-i ''` or `--in-place`; `perl` with `-i` or `-pi` | `sed` that prints to stdout, a piped transform (`git diff \| sed 's/^/  /'`), `grep -i` |
 | `deny-cat-head-tail.sh` | `deny-cat-head-tail` | a bare `cat`, `head`, `tail` or `sed -n` over exactly one file | `tail -f`/`--follow`, several files, a pipe on either side, a redirect, `cat` reading stdin |
 | `deny-grep-rg.sh` | `deny-grep-rg` | `grep`, `egrep`, `fgrep`, `ag`, `git grep` over files or a directory, and `rg` too while `orch` is healthy | a `grep` filtering another command's output (`go test ./... \| grep FAIL`), `grep -q` as a condition, `grep` reading stdin, a quoted word, `orch ctx` itself, and `rg` when `orch` is not usable |
+| `deny-builtin-search.sh` | `deny-builtin-grep`, `deny-builtin-glob` | Claude's own `Grep` and `Glob` tools while `orch` is healthy, because they reach the tree without a shell | an `ls` or a `Read`, a search whose path is absolute and outside the session's git repository, a payload with no pattern, and any other tool |
 
 The replacement is the same order as pi: one `orch ctx` call first when `orch` is healthy, then `fd` for a file search and `rg` for a content search, then the built-in Claude tools (`Glob`, `Grep`, `Edit`). Two rules name one fixed tool whichever tools are installed: `sed -i` always names `Edit`, because `orch ctx` is read-only, and `deny-cat-head-tail` always names `Read` with offset and limit (a section or the whole file), never `orch ctx`.
+
+### The built-in tools and the repository boundary
+
+`Grep` and `Glob` are how a session escapes the shell rules without touching a shell, so while `orch` is healthy they are blocked too, and both name one `orch ctx batch` first. With no usable `orch` they are the fallback pi's rules point at, so the hook allows them, and `Read`, `Bash` and every other tool are untouched.
+
+`orch ctx` is pinned to a git repository root, so a search outside the session's repository has no replacement. The hook walks up from its working directory to the nearest `.git` entry (a worktree root has a file, not a directory) and blocks a built-in search only when its path is inside that root. A relative path, or none at all, counts as inside; an absolute path outside it (`/private/var/folders/...`, `/tmp/...`, `~/.claude/...`) is allowed, and so is any absolute path when the working directory is in no repository at all. A payload without a tool name, a tool input or a pattern is allowed as well.
 
 ### A broken `orch` is not a replacement
 
@@ -49,22 +62,22 @@ Every hook call is a fresh process, so the probe result is cached for 60 seconds
 
 A blocked command stays blocked on every retry. Two switches are the human escapes, same as pi:
 
-- `ORCH_TOOL_GUARD=off` disables all four scripts.
-- `ORCH_TOOL_GUARD_SKIP=find-chains,sed-inplace,cat-head-tail,grep-rg` disables rules by short name or full name. Plain `find` has its own id, `find` (or `deny-find`), inside `deny-find-chains.sh`.
+- `ORCH_TOOL_GUARD=off` disables all five scripts.
+- `ORCH_TOOL_GUARD_SKIP=find-chains,sed-inplace,cat-head-tail,grep-rg` disables rules by short name or full name. Plain `find` has its own id, `find` (or `deny-find`), inside `deny-find-chains.sh`. Built-in searches answer to the group name `builtin-search`, or to one rule's own name (`builtin-grep`, `builtin-glob`, `deny-builtin-grep`, `deny-builtin-glob`).
 
 Two more switches are for the message, not for what is blocked:
 
-- `ORCH_TOOL_GUARD_HINT=pattern` makes a `deny-grep-rg` block end with one line built from the pattern that was typed, instead of leaving the model to pick the kind itself: `orch ctx sym <Name> --refs 3` for one identifier, `orch ctx text '<pattern>' --glob '<dir>/**'` for a string, a route or a path, and `orch ctx find "Code that <words>"` for a broad pattern (an alternation of three or more, a `.*` gap, four or more words, a question, or a regex character class). Unset or `generic` keeps the text above, so the two can be A/B tested. Without `orch` on PATH nothing is added, and no other rule changes.
+- `ORCH_TOOL_GUARD_HINT=pattern` makes a `deny-grep-rg`, `deny-builtin-grep` or `deny-builtin-glob` block end with one line built from the pattern that was typed, instead of leaving the model to pick the kind itself: `orch ctx sym <Name> --refs 3` for one identifier, `orch ctx text '<pattern>' --glob '<dir>/**'` for a string, a route or a path, and `orch ctx find "Code that <words>"` for a broad pattern (an alternation of three or more, a `.*` gap, four or more words, a question, or a regex character class). A built-in search renders the same three kinds in the batch syntax the other hints use, `orch ctx batch -q "symbol:... refs=3"`, `-q "text:'<pattern>' glob=<dir>/**"` and `-q "find:Code that ..."`; a `Glob` name pattern is a file name, so it goes on the glob with a text query unless the pattern is broad enough to be a concept. Unset or `generic` keeps the text above, so the two can be A/B tested. Without `orch` on PATH nothing is added, a built-in search is not blocked at all, and no other rule changes.
 - `ORCH_TOOL_GUARD_LOG=<path>` appends one JSON line per block: `ts`, `harness` (`claude`), `rule`, `hint` (`generic` or `pattern`), `kind` (`symbol`, `text`, `concept`, or empty for a rule with no pattern) and `command` cut at 200 characters. A probe that found a broken `orch` appends `ts`, `harness` and `event: "orch-unhealthy"` with the probe's detail instead, once per probe. Off by default, and it is the only thing the guard writes.
 
 `prefer-read-tool.sh` stays. It is a non-blocking reminder for the wider reader set (`less`, `more`, `bat`, `nl`, and `sed` without `-n` as well), so it complements `deny-cat-head-tail.sh`; it is not replaced by it. Register both if you want the block and the reminder.
 
 ## Tests
 
-`toolguard_cases.json` is one decision table shared with the pi guard: every case names the command, the PATH situation (`orch` on PATH, `orch` on PATH but a stub that exits 1, `fd` and `rg` but no `orch`, or neither; a situation's optional `broken` list names the tools whose stub exits 1) and the rule that must block it, or no rule when it is allowed. Its `patternKinds` table is the second half: each pattern and the kind `deny-grep-rg` must give it, at least eight per kind, run through both implementations so the tailored hint cannot drift. `toolguard_test.py` runs every case through the real shell scripts with only stub tools on PATH, plus `bash -n`/`shellcheck`, the two switches, the non-Bash and broken-stdin paths, the broken-`orch` block, the rg exception, the 60-second cache (one probe for two calls, a stale cache re-probed, a fresh one trusted), the health log line and the 120-character detail, the pattern hint in both modes (including the generic reason byte for byte and the A/B log), and the task's required examples:
+`toolguard_cases.json` is one decision table shared with the pi guard: every case names the command, the PATH situation (`orch` on PATH, `orch` on PATH but a stub that exits 1, `fd` and `rg` but no `orch`, or neither; a situation's optional `broken` list names the tools whose stub exits 1) and the rule that must block it, or no rule when it is allowed. Its `builtinCases` table covers the built-in search tools, where the tool name and the rule id differ by harness: each case names a harness-neutral `tool` (`content-search` for pi `grep` and Claude `Grep`, `file-search` for pi `find` and Claude `Glob`), a pattern, a target path and the rule each harness must block with, so the repository boundary is tested the same way on both sides. Its `patternKinds` table is the third part: each pattern and the kind `deny-grep-rg` must give it, at least eight per kind, run through both implementations so the tailored hint cannot drift. `toolguard_test.py` runs every case through the real shell scripts with only stub tools on PATH, plus `bash -n`/`shellcheck`, the two switches, the non-Bash and broken-stdin paths, the broken-`orch` block, the rg exception, the 60-second cache (one probe for two calls, a stale cache re-probed, a fresh one trusted), the health log line and the 120-character detail, the pattern hint in both modes (including the generic reason byte for byte and the A/B log), the built-in table with its own switches, repository boundary and fail-open paths, and the task's required examples:
 
 ```sh
 python3 hooks/claude/toolguard_test.py
 ```
 
-The pi extension runs the same file in `TestCtxReminderSharedToolguardCases` (`skills/orchestrate/tool/ctx_reminder_test.go`) and compares blocked vs allowed and the rule name, so a disagreement between the two implementations fails a test.
+The pi extension runs the same file in `TestCtxReminderSharedToolguardCases` and `TestCtxReminderSharedBuiltinSearchCases` (`skills/orchestrate/tool/ctx_reminder_test.go`) and compares blocked vs allowed and the rule name, so a disagreement between the two implementations fails a test.

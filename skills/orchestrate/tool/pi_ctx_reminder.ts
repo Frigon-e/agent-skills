@@ -8,13 +8,18 @@
 // when `orch` answers `--version`, then fd for a file search and rg for a
 // content search, and the pi built-in tool last. An `orch` that is on PATH but
 // cannot answer is treated as absent, and the block says it is broken.
-// A grep filtering another command's output and plain fd are not blocked; the
-// note is appended to their result instead, and to pi's built-in grep/find/ls,
-// which are never blocked.
+// pi's own grep and find reach the tree without a shell, so two more rules
+// refuse them the same way while orch answers; ls only lists a directory and
+// stays, and with no usable orch the built-in searches are the fallback, so
+// nothing is blocked and nothing is appended. orch ctx is pinned to a git
+// repository root, so a built-in search that names an absolute path outside the
+// session's repository has no replacement and is allowed. A grep filtering
+// another command's output and plain fd are not blocked; the note is appended
+// to their result instead, and to a built-in search that does run.
 import type { ExtensionAPI, ToolCallEvent, ToolResultEvent } from "@earendil-works/pi-coding-agent";
 import { spawnSync } from "node:child_process";
 import { accessSync, appendFileSync, constants, statSync } from "node:fs";
-import { delimiter, join } from "node:path";
+import { delimiter, dirname, isAbsolute, join, resolve } from "node:path";
 
 const marker = "orch ctx reminder";
 const guardMarker = "orch tool guard";
@@ -53,6 +58,25 @@ type rule = {
 	// A rule may add one line built from the pattern the model typed. Empty
 	// when there is nothing to build it from.
 	tuned?: (line: string, tools: tools) => string;
+};
+
+// A built-in tool call: pi's own tools reach the tree without a shell, so a
+// rule for one matches the tool name and the arguments it carries.
+type builtinCall = { name: string; input: Record<string, unknown> };
+
+type builtinRule = {
+	// The full name the reason shows, and the short name the log records.
+	name: string;
+	id: string;
+	// The one ORCH_TOOL_GUARD_SKIP name that disables every built-in rule.
+	group: string;
+	match: (call: builtinCall) => boolean;
+	// The reason is fixed: the rule only matches while orch answers.
+	reason: string;
+	// The kind of the pattern the model typed, for the log.
+	kind: (input: Record<string, unknown>) => string;
+	// One line built from the arguments the model typed, like a shell rule's.
+	tuned: (input: Record<string, unknown>) => string;
 };
 
 // ORCH_TOOL_GUARD_HINT=pattern appends one line built from the blocked
@@ -551,6 +575,111 @@ function patternHint(segment: segment): string {
 		: `Use orch ctx text ${shellQuoted(pattern)}.`;
 }
 
+// The root of the git repository the session runs in, found by walking up from
+// the working directory (a worktree root has a .git file rather than a
+// directory, so any entry counts), or "" outside one. Resolved once: the working
+// directory does not change under a session.
+let repoRoot: string | undefined;
+function repositoryRoot(): string {
+	if (repoRoot !== undefined) return repoRoot;
+	repoRoot = "";
+	let dir = process.cwd();
+	for (;;) {
+		try {
+			statSync(join(dir, ".git"));
+			repoRoot = dir;
+			break;
+		} catch {
+			// No repository here; keep walking up.
+		}
+		const parent = dirname(dir);
+		if (parent === dir) break;
+		dir = parent;
+	}
+	return repoRoot;
+}
+
+// True when the path a built-in search names is inside the session's
+// repository. orch ctx is pinned to a git repository root, so a path outside it
+// has no ctx answer and the built-in tool is the only way in. A relative or
+// missing path counts as inside; with no repository at all nothing is inside, so
+// only the relative form is blocked and a block never names a tool that cannot
+// answer there.
+function insideRepository(path: string): boolean {
+	const target = path.trim();
+	if (!target || !isAbsolute(target)) return true;
+	const root = repositoryRoot();
+	if (!root) return false;
+	const resolved = resolve(target);
+	const base = root.endsWith("/") ? root : `${root}/`;
+	return resolved === root || resolved.startsWith(base);
+}
+
+// The directory a built-in search starts from, scoped the way the shell hint
+// scopes it: a file names its own directory, and no path or `.` is the root.
+function builtinDir(input: Record<string, unknown>): string {
+	const path = String(input.path ?? "").trim().replace(/\/+$/, "");
+	if (!path || path === ".") return "";
+	const parts = path.split("/");
+	const last = parts[parts.length - 1] ?? "";
+	if (last.includes(".")) return parts.slice(0, -1).join("/");
+	return path;
+}
+
+// The name or glob a built-in find asks for. The installed pi passes `pattern`;
+// `name` and `glob` are read too so a build that names the argument otherwise
+// still gets a hint instead of a generic reason.
+function builtinFindPattern(input: Record<string, unknown>): string {
+	for (const key of ["pattern", "name", "glob"]) {
+		const value = String(input[key] ?? "").trim();
+		if (value) return value;
+	}
+	return "";
+}
+
+// The one ctx line a built-in search's pattern lands on, in the batch syntax the
+// other hints use: a name is a symbol, a broad phrase is a concept, and a string
+// is a text lookup scoped by the directory the model named.
+function builtinHint(kind: searchKind, pattern: string, dir: string): string {
+	if (kind === "symbol") return `Use orch ctx batch -q "symbol:${pattern} refs=3".`;
+	const words = conceptWords(pattern);
+	if (kind === "concept" && words) {
+		return `Use orch ctx batch -q "find:Code that ${words.replaceAll('"', "'")}".`;
+	}
+	return dir
+		? `Use orch ctx batch -q "text:${shellQuoted(pattern)} glob=${dir}/**".`
+		: `Use orch ctx batch -q "text:${shellQuoted(pattern)}".`;
+}
+
+// The built-in grep's pattern picks one of the same three kinds as the shell
+// rule, so a name, a string and a broad phrase each get their own query.
+function builtinGrepHint(input: Record<string, unknown>): string {
+	const pattern = String(input.pattern ?? "").trim();
+	if (!pattern) return "";
+	return builtinHint(patternKind(pattern), pattern, builtinDir(input));
+}
+
+// The built-in find's name or glob argument is a file name, and no ctx kind
+// lists files by name: a concept asks for a concept search, and anything else is
+// a text lookup scoped by the directory, which is what `glob=` is for.
+function builtinFindHint(input: Record<string, unknown>): string {
+	const pattern = builtinFindPattern(input);
+	if (!pattern) return "";
+	const kind = patternKind(pattern) === "concept" ? "concept" : "text";
+	return builtinHint(kind, pattern, builtinDir(input));
+}
+
+// The line the log records for a built-in call: the tool and the arguments the
+// model typed, in the shape a shell command would have.
+function builtinLogLine(tool: string, input: Record<string, unknown>): string {
+	const parts = [tool];
+	for (const key of ["pattern", "name", "path", "glob"]) {
+		const value = String(input[key] ?? "").trim();
+		if (value) parts.push(`${key}=${value}`);
+	}
+	return parts.join(" ");
+}
+
 // The grep segment a block names, so a hint is built from the pattern the
 // model typed and not from a generic example.
 function grepSegment(line: string, tools: tools): segment | undefined {
@@ -676,17 +805,64 @@ const rules: rule[] = [
 	},
 ];
 
-// ORCH_TOOL_GUARD_SKIP=find-chains,find,sed-inplace,cat-head-tail disables
-// single rules by short name or by full name.
-function activeRules(): rule[] {
+// pi's built-in grep and find walk the tree without a shell, so a shell rule
+// alone leaves them as the way around the guard. While orch answers they are
+// refused like the shell rules and point at the same ctx query; with no usable
+// orch they are the fallback, so they are never blocked then. `ls` lists a
+// directory instead of searching, so it has no rule and stays allowed.
+const builtinRules: builtinRule[] = [
+	{
+		name: "deny-builtin-grep",
+		id: "builtin-grep",
+		group: "builtin-search",
+		match: (call) => call.name === "grep",
+		reason:
+			`${guardMarker} (deny-builtin-grep): the built-in grep tool is blocked; orch ctx answers searches here.\n` +
+			`One orch ctx batch replaces it: orch ctx batch -q "text:pattern glob=dir/**" -q "symbol:Name refs=3" (a concept: find:...).`,
+		kind: (input) => {
+			const pattern = String(input.pattern ?? "").trim();
+			return pattern ? patternKind(pattern) : "";
+		},
+		tuned: builtinGrepHint,
+	},
+	{
+		name: "deny-builtin-find",
+		id: "builtin-find",
+		group: "builtin-search",
+		match: (call) => call.name === "find",
+		reason:
+			`${guardMarker} (deny-builtin-find): the built-in find tool is blocked; orch ctx answers file searches here.\n` +
+			`One orch ctx batch replaces it: orch ctx batch -q "find:Code that ..." -q "text:pattern glob=dir/**" (--compact shortens it).`,
+		kind: (input) => {
+			const pattern = builtinFindPattern(input);
+			return pattern ? patternKind(pattern) : "";
+		},
+		tuned: builtinFindHint,
+	},
+];
+
+// The rules and the built-in rules ORCH_TOOL_GUARD_SKIP disables, by short name,
+// by full name, or by group (`builtin-search` for both built-in rules at once).
+function skipped(): Set<string> {
 	const raw = process.env.ORCH_TOOL_GUARD_SKIP ?? "";
-	const skip = new Set(
+	return new Set(
 		raw
 			.split(",")
 			.map((name) => name.trim())
 			.filter(Boolean),
 	);
+}
+
+// ORCH_TOOL_GUARD_SKIP=find-chains,find,sed-inplace,cat-head-tail disables
+// single rules by short name or by full name.
+function activeRules(): rule[] {
+	const skip = skipped();
 	return rules.filter((rule) => !skip.has(rule.id) && !skip.has(rule.name));
+}
+
+function activeBuiltinRules(): builtinRule[] {
+	const skip = skipped();
+	return builtinRules.filter((rule) => !skip.has(rule.id) && !skip.has(rule.name) && !skip.has(rule.group));
 }
 
 export default function (pi: ExtensionAPI) {
@@ -696,6 +872,7 @@ export default function (pi: ExtensionAPI) {
 	const ready = installed();
 	const guard = process.env.ORCH_TOOL_GUARD !== "off";
 	const active = guard ? activeRules() : [];
+	const activeBuiltins = guard ? activeBuiltinRules() : [];
 
 	// A blocked command stays blocked, so the model learns not to use it. From
 	// the third block in a row the reason also says the guard will not give way.
@@ -708,6 +885,9 @@ export default function (pi: ExtensionAPI) {
 		try {
 			pi.on("tool_result", async (event: ToolResultEvent) => {
 				if (!isSearch(event.toolName, event.input)) return undefined;
+				// A search outside the repository has no orch ctx replacement, so it
+				// gets no note either.
+				if (!insideRepository(String(event.input.path ?? ""))) return undefined;
 				const content = event.content ?? [];
 				if (content.some((part) => part.type === "text" && part.text.includes(marker))) return undefined;
 				const next = [...content, { type: "text" as const, text: reminder }];
@@ -725,8 +905,27 @@ export default function (pi: ExtensionAPI) {
 	// then let every later search through so the retry always runs.
 	let fallbackReminded = false;
 
+	// The reason a block carries: the rule's own text, the tailored line when the
+	// hint mode asks for one, and the give-way line from the third block in a row.
+	const blockReason = (reason: string, tuned: string) =>
+		reason + (tuned ? `\n${tuned}` : "") + (blocksInRow >= 3 ? giveWay : "");
+
 	pi.on("tool_call", async (event: ToolCallEvent) => {
 		const input = event.input as Record<string, unknown>;
+		// The built-in searches are the way around the shell rules, so while orch
+		// answers they are refused the same way. With no usable orch they are the
+		// fallback, so they run and the shell rules point at them instead.
+		const builtin = ready.orch
+			? activeBuiltins.find(
+					(rule) => rule.match({ name: event.toolName, input }) && insideRepository(String(input.path ?? "")),
+				)
+			: undefined;
+		if (builtin) {
+			blocksInRow += 1;
+			const mode = guardHintMode();
+			guardLog("pi", builtin.id, mode, builtin.kind(input), builtinLogLine(event.toolName, input));
+			return { block: true, reason: blockReason(builtin.reason, mode === "pattern" ? builtin.tuned(input) : "") };
+		}
 		const line = event.toolName === "bash" ? String(input.command ?? "").trim() : "";
 		if (!line) {
 			blocksInRow = 0;
@@ -740,10 +939,7 @@ export default function (pi: ExtensionAPI) {
 			// name the tool it points at.
 			const tuned = mode === "pattern" && ready.orch && rule.tuned ? rule.tuned(line, ready) : "";
 			guardLog("pi", rule.id, mode, rule.id === "grep-rg" ? grepKind(line, ready) : "", line);
-			return {
-				block: true,
-				reason: rule.reason(ready) + (tuned ? `\n${tuned}` : "") + (blocksInRow >= 3 ? giveWay : ""),
-			};
+			return { block: true, reason: blockReason(rule.reason(ready), tuned) };
 		}
 		blocksInRow = 0;
 		if (!ready.orch || !guard || remindersByResult || fallbackReminded) return undefined;

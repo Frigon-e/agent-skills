@@ -224,8 +224,10 @@ func TestCtxReminderDecisionTable(t *testing.T) {
 		{Name: "find by type", Tool: "bash", Input: bash(`find src -type f`), Blocks: "find", Needs: orch},
 		{Name: "pipe find", Tool: "bash", Input: bash(`cat list.txt | find . -name "*.ts"`), Remind: true},
 		{Name: "pipe grep", Tool: "bash", Input: bash(`cat file | grep -n Gateway`), Remind: true},
-		{Name: "builtin grep", Tool: "grep", Input: map[string]any{"pattern": "Gateway"}, Remind: true},
-		{Name: "builtin find", Tool: "find", Input: map[string]any{"pattern": "*.go"}, Remind: true},
+		// pi's own grep and find reach the tree without a shell, so they are blocked
+		// too while orch answers; ls only lists a directory and stays.
+		{Name: "builtin grep", Tool: "grep", Input: map[string]any{"pattern": "Gateway"}, Blocks: "builtin-grep", Needs: orch},
+		{Name: "builtin find", Tool: "find", Input: map[string]any{"pattern": "*.go"}, Blocks: "builtin-find", Needs: orch},
 		{Name: "builtin ls", Tool: "ls", Input: map[string]any{"path": "."}, Remind: true},
 		// Everything else stays quiet.
 		{Name: "orch ctx text", Tool: "bash", Input: bash(`orch ctx text Gateway`)},
@@ -291,9 +293,10 @@ func TestCtxReminderGuardDenyFind(t *testing.T) {
 		{Name: "absolute find", Tool: "bash", Input: bash(`/usr/bin/find . -name x`), Blocks: "find", Needs: orch},
 		// find -exec is a chain, so the more specific rule names it.
 		{Name: "find -exec", Tool: "bash", Input: bash(`find . -name x -exec ls {} \;`), Blocks: "find-chains", Needs: orch},
-		// Does not touch: find reading a pipe, the find tool, fd and a quoted word.
+		// Does not touch: find reading a pipe, fd and a quoted word. The find tool
+		// has its own rule.
 		{Name: "find reads a pipe", Tool: "bash", Input: bash(`printf x | find . -name "*.ts"`), Remind: true},
-		{Name: "builtin find", Tool: "find", Input: map[string]any{"pattern": "*.go"}, Remind: true},
+		{Name: "builtin find", Tool: "find", Input: map[string]any{"pattern": "*.go"}, Blocks: "builtin-find", Needs: orch},
 		{Name: "fd", Tool: "bash", Input: bash(`fd -e ts gateway`), Remind: true},
 		{Name: "echo quoted find", Tool: "bash", Input: bash(`echo "find"`)},
 	}
@@ -463,6 +466,245 @@ func TestCtxReminderGuardDenyGrepRg(t *testing.T) {
 	t.Logf("deny-grep-rg: %d blocked, %d allowed, %d reminded", blocked, quiet, reminded)
 }
 
+// deny-builtin-grep and deny-builtin-find: pi's own grep and find reach the tree
+// without a shell, so they are the way around the shell rules. While orch answers
+// they are blocked and point at the same ctx query; with no usable orch they are
+// the fallback, so nothing is blocked and nothing is appended.
+func TestCtxReminderGuardBuiltinSearch(t *testing.T) {
+	orch := []string{"orch ctx batch"}
+	// The two generic reasons, byte for byte.
+	const grepReason = "orch tool guard (deny-builtin-grep): the built-in grep tool is blocked; orch ctx answers searches here.\n" +
+		`One orch ctx batch replaces it: orch ctx batch -q "text:pattern glob=dir/**" -q "symbol:Name refs=3" (a concept: find:...).`
+	const findReason = "orch tool guard (deny-builtin-find): the built-in find tool is blocked; orch ctx answers file searches here.\n" +
+		`One orch ctx batch replaces it: orch ctx batch -q "find:Code that ..." -q "text:pattern glob=dir/**" (--compact shortens it).`
+
+	// The two generic reasons, byte for byte, each the first block of its run so
+	// the give-way line cannot join them.
+	t.Run("generic reason is fixed", func(t *testing.T) {
+		cases := []reminderCase{
+			{Name: "grep", Tool: "grep", Input: map[string]any{"pattern": "Gateway"}, Blocks: "builtin-grep", Needs: orch},
+			{Name: "find", Tool: "find", Input: map[string]any{"pattern": "*.go"}, Blocks: "builtin-find", Needs: orch},
+		}
+		for name, env := range map[string][]string{
+			"unset":   nil,
+			"generic": {"ORCH_TOOL_GUARD_HINT=generic"},
+		} {
+			got := runCtxReminder(t, env, cases)
+			if reason := got.Out["grep"].Block; reason != grepReason {
+				t.Errorf("%s mode changed the generic grep reason: %q", name, reason)
+			}
+			if reason := got.Out["find"].Block; reason != findReason {
+				t.Errorf("%s mode changed the generic find reason: %q", name, reason)
+			}
+		}
+	})
+
+	t.Run("blocked while orch answers", func(t *testing.T) {
+		cwd, err := os.Getwd()
+		if err != nil {
+			t.Fatal(err)
+		}
+		// An absolute path inside the repository is still a search orch ctx can
+		// answer, so it is blocked too.
+		inside := filepath.Join(cwd, "notes.md")
+		cases := []reminderCase{
+			{Name: "grep", Tool: "grep", Input: map[string]any{"pattern": "Gateway"}, Blocks: "builtin-grep", Needs: orch},
+			{Name: "grep with path", Tool: "grep", Input: map[string]any{"pattern": "Gateway", "path": "internal"}, Blocks: "builtin-grep", Needs: orch},
+			{Name: "grep with glob", Tool: "grep", Input: map[string]any{"pattern": "Gateway", "glob": "*.go"}, Blocks: "builtin-grep", Needs: orch},
+			{Name: "grep absolute inside", Tool: "grep", Input: map[string]any{"pattern": "Gateway", "path": inside}, Blocks: "builtin-grep", Needs: orch},
+			{Name: "find", Tool: "find", Input: map[string]any{"pattern": "*.go"}, Blocks: "builtin-find", Needs: orch},
+			{Name: "find with path", Tool: "find", Input: map[string]any{"pattern": "*.go", "path": "internal"}, Blocks: "builtin-find", Needs: orch},
+			{Name: "find absolute inside", Tool: "find", Input: map[string]any{"pattern": "*.go", "path": cwd}, Blocks: "builtin-find", Needs: orch},
+			// ls only lists a directory, and a read, edit or write is not a search.
+			{Name: "ls", Tool: "ls", Input: map[string]any{"path": "."}, Remind: true},
+			{Name: "read", Tool: "read", Input: map[string]any{"path": "a.go"}},
+			{Name: "write", Tool: "write", Input: map[string]any{"path": "a.go", "content": "x"}},
+			{Name: "edit", Tool: "edit", Input: map[string]any{"path": "a.go", "oldText": "a", "newText": "b"}},
+		}
+		got := runCtxReminder(t, nil, cases)
+		checkReminder(t, got, cases)
+	})
+
+	// orch ctx is pinned to a git repository root, so an absolute path outside it
+	// has no replacement: the built-in tool is the only way in, and it gets no
+	// note either.
+	t.Run("allowed outside the repository", func(t *testing.T) {
+		cases := []reminderCase{
+			{Name: "grep /tmp", Tool: "grep", Input: map[string]any{"pattern": "Gateway", "path": "/tmp/orchestrate/notes.md"}},
+			{Name: "find var folder", Tool: "find", Input: map[string]any{"pattern": "*.log", "path": "/private/var/folders/xy/T/orchestrate/logs"}},
+			{Name: "ls outside", Tool: "ls", Input: map[string]any{"path": "/tmp/orchestrate"}},
+		}
+		got := runCtxReminder(t, nil, cases)
+		checkReminder(t, got, cases)
+	})
+
+	// Without orch the built-in searches are the replacement the shell rules
+	// name, so they run: no block, no reminder, and only the guard hook.
+	t.Run("allowed with no orch", func(t *testing.T) {
+		cases := []reminderCase{
+			{Name: "grep", Tool: "grep", Input: map[string]any{"pattern": "Gateway"}},
+			{Name: "find", Tool: "find", Input: map[string]any{"pattern": "*.go"}},
+			{Name: "ls", Tool: "ls", Input: map[string]any{"path": "."}},
+		}
+		got := runCtxReminderWith(t, nil, nil, cases)
+		if len(got.Handlers) != 1 || got.Handlers[0] != "tool_call" {
+			t.Fatalf("without orch only the guard hook is expected, got %v", got.Handlers)
+		}
+		for _, c := range cases {
+			if reason := got.Out[c.Name].Block; reason != "" {
+				t.Errorf("%q was blocked although orch is absent: %s", c.Name, reason)
+			}
+			if added := got.Out[c.Name].Added; added != "" {
+				t.Errorf("%q got a reminder although orch is absent: %q", c.Name, added)
+			}
+		}
+	})
+
+	// An orch that is on PATH but cannot answer counts as absent, so the
+	// built-in searches are the fallback and the broken line stays a shell line.
+	t.Run("allowed with a broken orch", func(t *testing.T) {
+		cases := []reminderCase{
+			{Name: "grep", Tool: "grep", Input: map[string]any{"pattern": "Gateway"}},
+			{Name: "find", Tool: "find", Input: map[string]any{"pattern": "*.go"}},
+		}
+		got := runCtxReminderWithBroken(t, []string{"orch", "fd", "rg"}, []string{"orch"}, nil, cases)
+		if len(got.Handlers) != 1 || got.Handlers[0] != "tool_call" {
+			t.Fatalf("a broken orch must leave only the guard hook, got %v", got.Handlers)
+		}
+		for _, c := range cases {
+			if reason := got.Out[c.Name].Block; reason != "" {
+				t.Errorf("%q was blocked although orch cannot answer: %s", c.Name, reason)
+			}
+			if added := got.Out[c.Name].Added; added != "" {
+				t.Errorf("%q got a reminder although orch cannot answer: %q", c.Name, added)
+			}
+		}
+	})
+
+	// The same classifier as deny-grep-rg, in the batch syntax: a name is a
+	// symbol, a string is text scoped by the directory, a broad pattern is a
+	// concept, and a file name goes on the glob with a text query.
+	t.Run("pattern hint is one extra line", func(t *testing.T) {
+		cases := []reminderCase{
+			{Name: "grep symbol", Tool: "grep", Input: map[string]any{"pattern": "Normalize", "path": "internal"}, Blocks: "builtin-grep"},
+			{Name: "grep text", Tool: "grep", Input: map[string]any{"pattern": "cannot find user", "path": "internal"}, Blocks: "builtin-grep"},
+			{Name: "grep text no path", Tool: "grep", Input: map[string]any{"pattern": "/api/users"}, Blocks: "builtin-grep"},
+			{Name: "grep concept", Tool: "grep", Input: map[string]any{"pattern": "refund.*failed", "path": "src"}, Blocks: "builtin-grep"},
+			{Name: "find name", Tool: "find", Input: map[string]any{"pattern": "*.go", "path": "internal"}, Blocks: "builtin-find"},
+			{Name: "find file path", Tool: "find", Input: map[string]any{"pattern": "*.go", "path": "internal/gateway.go"}, Blocks: "builtin-find"},
+			{Name: "find concept", Tool: "find", Input: map[string]any{"pattern": "refund.*failed", "path": "src"}, Blocks: "builtin-find"},
+		}
+		want := map[string]string{
+			"grep symbol":       `Use orch ctx batch -q "symbol:Normalize refs=3".`,
+			"grep text":         `Use orch ctx batch -q "text:'cannot find user' glob=internal/**".`,
+			"grep text no path": `Use orch ctx batch -q "text:'/api/users'".`,
+			"grep concept":      `Use orch ctx batch -q "find:Code that refund failed".`,
+			"find name":         `Use orch ctx batch -q "text:'*.go' glob=internal/**".`,
+			"find file path":    `Use orch ctx batch -q "text:'*.go' glob=internal/**".`,
+			"find concept":      `Use orch ctx batch -q "find:Code that refund failed".`,
+		}
+		tuned := runCtxReminder(t, []string{"ORCH_TOOL_GUARD_HINT=pattern"}, cases)
+		generic := runCtxReminder(t, []string{"ORCH_TOOL_GUARD_HINT=generic"}, cases)
+		for _, c := range cases {
+			extra := undrop(strings.Split(tuned.Out[c.Name].Block, "\n"), strings.Split(generic.Out[c.Name].Block, "\n"))
+			if extra != want[c.Name] {
+				t.Errorf("%q: the tailored line is %q, want %q", c.Name, extra, want[c.Name])
+			}
+		}
+	})
+
+	t.Run("third block carries the give-way line", func(t *testing.T) {
+		cases := []reminderCase{
+			{Name: "grep first", Tool: "grep", Input: map[string]any{"pattern": "Gateway"}, Blocks: "builtin-grep"},
+			{Name: "find second", Tool: "find", Input: map[string]any{"pattern": "*.go"}, Blocks: "builtin-find"},
+			{Name: "grep third", Tool: "grep", Input: map[string]any{"pattern": "Gateway"}, Blocks: "builtin-grep", Repeat: true},
+		}
+		got := runCtxReminder(t, nil, cases)
+		checkReminder(t, got, cases)
+	})
+
+	t.Run("skip and guard switches", func(t *testing.T) {
+		// `builtin-search` disables both built-in rules, and the shell rules stay.
+		skipped := []reminderCase{
+			{Name: "grep", Tool: "grep", Input: map[string]any{"pattern": "Gateway"}, Remind: true},
+			{Name: "find", Tool: "find", Input: map[string]any{"pattern": "*.go"}, Remind: true},
+			{Name: "grep dir", Tool: "bash", Input: bash(`grep -rn Gateway internal`), Blocks: "grep-rg", Needs: orch},
+		}
+		got := runCtxReminder(t, []string{"ORCH_TOOL_GUARD_SKIP=builtin-search"}, skipped)
+		checkReminder(t, got, skipped)
+
+		// One built-in rule also answers to its own short name.
+		one := []reminderCase{
+			{Name: "grep", Tool: "grep", Input: map[string]any{"pattern": "Gateway"}, Remind: true},
+			{Name: "find", Tool: "find", Input: map[string]any{"pattern": "*.go"}, Blocks: "builtin-find", Needs: orch},
+		}
+		got = runCtxReminder(t, []string{"ORCH_TOOL_GUARD_SKIP=builtin-grep"}, one)
+		checkReminder(t, got, one)
+
+		// ORCH_TOOL_GUARD=off leaves the built-in searches to the model, with the
+		// reminder that still names one ctx batch call.
+		off := []reminderCase{
+			{Name: "grep", Tool: "grep", Input: map[string]any{"pattern": "Gateway"}, Remind: true},
+			{Name: "find", Tool: "find", Input: map[string]any{"pattern": "*.go"}, Remind: true},
+		}
+		got = runCtxReminder(t, []string{"ORCH_TOOL_GUARD=off"}, off)
+		checkReminder(t, got, off)
+	})
+
+	t.Run("silent in the ctx-only gate shell", func(t *testing.T) {
+		cases := []reminderCase{
+			{Name: "grep", Tool: "grep", Input: map[string]any{"pattern": "Gateway"}},
+			{Name: "find", Tool: "find", Input: map[string]any{"pattern": "*.go"}},
+		}
+		got := runCtxReminder(t, []string{"ORCH_CTX_ONLY_READY=/tmp/ready"}, cases)
+		if len(got.Handlers) != 0 {
+			t.Fatalf("the extension acted inside the ctx-only shell: %v", got.Handlers)
+		}
+		for _, c := range cases {
+			if reason := got.Out[c.Name].Block; reason != "" {
+				t.Errorf("%q was blocked inside the ctx-only shell: %s", c.Name, reason)
+			}
+			if added := got.Out[c.Name].Added; added != "" {
+				t.Errorf("%q got a reminder inside the ctx-only shell: %q", c.Name, added)
+			}
+		}
+	})
+
+	// The A/B log names the built-in rule and the arguments the model typed.
+	t.Run("log names the built-in rule", func(t *testing.T) {
+		log := filepath.Join(t.TempDir(), "guard.log")
+		cases := []reminderCase{
+			{Name: "grep", Tool: "grep", Input: map[string]any{"pattern": "Normalize", "path": "internal"}, Blocks: "builtin-grep"},
+			{Name: "find", Tool: "find", Input: map[string]any{"pattern": "*.go"}, Blocks: "builtin-find"},
+		}
+		runCtxReminder(t, []string{"ORCH_TOOL_GUARD_HINT=pattern", "ORCH_TOOL_GUARD_LOG=" + log}, cases)
+		raw, err := os.ReadFile(log)
+		if err != nil {
+			t.Fatalf("the log was not written: %v", err)
+		}
+		entries := strings.Split(strings.TrimSpace(string(raw)), "\n")
+		if len(entries) != 2 {
+			t.Fatalf("the log must hold one line per block, got %d: %q", len(entries), raw)
+		}
+		want := []struct{ rule, kind, command string }{
+			{"builtin-grep", "symbol", "grep pattern=Normalize path=internal"},
+			{"builtin-find", "text", "find pattern=*.go"},
+		}
+		for at, entry := range entries {
+			var record map[string]any
+			if err := json.Unmarshal([]byte(entry), &record); err != nil {
+				t.Fatalf("the log line is not JSON: %v %q", err, entry)
+			}
+			if record["harness"] != "pi" || record["hint"] != "pattern" {
+				t.Errorf("the log line names the wrong harness or hint: %v", record)
+			}
+			if record["rule"] != want[at].rule || record["kind"] != want[at].kind || record["command"] != want[at].command {
+				t.Errorf("the log line names the wrong block: %v, want %v", record, want[at])
+			}
+		}
+	})
+}
+
 // Without orch on PATH every rule still blocks, pointing at the built-ins, and
 // no note is appended because there is nothing to name. rg is the exception:
 // with no orch it is the preferred grep, so it is never blocked.
@@ -622,6 +864,17 @@ type sharedToolguardFile struct {
 		Rule      string `json:"rule"`
 		Command   string `json:"command"`
 	} `json:"cases"`
+	// BuiltinCases is the third table: the built-in search tools, where the tool
+	// name and the rule id differ by harness. Tool is harness-neutral, and Rule
+	// names the rule each harness must block with, empty for allowed.
+	BuiltinCases []struct {
+		Name      string            `json:"name"`
+		Situation string            `json:"situation"`
+		Tool      string            `json:"tool"`
+		Pattern   string            `json:"pattern"`
+		Path      string            `json:"path"`
+		Rule      map[string]string `json:"rule"`
+	} `json:"builtinCases"`
 	// PatternKinds is the classifier table: the kind deny-grep-rg must give a
 	// pattern, shared with the Claude guard so the tailored hint cannot drift.
 	PatternKinds []struct {
@@ -996,6 +1249,45 @@ func TestCtxReminderSharedToolguardCases(t *testing.T) {
 				}
 			}
 			t.Logf("shared cases, %s PATH: %d cases, %d must block", situation, len(cases), blocked)
+		})
+	}
+}
+
+// piToolFor is the harness-neutral tool of the shared built-in table, in pi.
+var piToolFor = map[string]string{"content-search": "grep", "file-search": "find"}
+
+// The built-in search table: pi's grep and find reach the tree without a shell,
+// so blocking them is the same decision in both harnesses. The shared file
+// cannot know this repository's root, so it carries relative and outside
+// absolute paths only; the tests below add the absolute-inside case.
+func TestCtxReminderSharedBuiltinSearchCases(t *testing.T) {
+	file := sharedGuardFile(t)
+	if len(file.BuiltinCases) == 0 {
+		t.Fatal("the shared case file has no builtinCases")
+	}
+	for situation, spec := range file.PathSituations {
+		t.Run(situation, func(t *testing.T) {
+			var cases []reminderCase
+			for _, c := range file.BuiltinCases {
+				if c.Situation != situation {
+					continue
+				}
+				toolName, ok := piToolFor[c.Tool]
+				if !ok {
+					t.Fatalf("%q has an unknown tool %q", c.Name, c.Tool)
+				}
+				input := map[string]any{"pattern": c.Pattern}
+				if c.Path != "" {
+					input["path"] = c.Path
+				}
+				cases = append(cases, reminderCase{Name: c.Name, Tool: toolName, Input: input, Blocks: c.Rule["pi"]})
+			}
+			if len(cases) == 0 {
+				t.Skip("no built-in cases for this PATH situation")
+			}
+			got := runCtxReminderWithBroken(t, spec.Tools, spec.Broken, nil, cases)
+			_, quiet, blocked := checkReminder(t, got, cases)
+			t.Logf("shared built-in cases, %s PATH: %d blocked, %d allowed", situation, blocked, quiet)
 		})
 	}
 }

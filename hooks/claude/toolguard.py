@@ -8,6 +8,13 @@ deny-grep-rg. `deny-find-chains.sh` owns the first two, because a plain find is
 a file search and a find chain is its sharper form; the other three scripts own
 one rule each.
 
+`deny-builtin-search.sh` is the sixth script and carries the two rules for
+Claude's own Grep and Glob tools: deny-builtin-grep and deny-builtin-glob. They
+reach the tree without a shell, so while `orch` answers they are refused like
+the shell rules and point at the same ctx query; with no usable `orch` they are
+the fallback. `orch ctx` is pinned to a git repository root, so a search whose
+path is outside the session's repository has no replacement and is allowed.
+
 Each script passes its group name as the only argument. The hook JSON arrives
 on stdin, and a block is exit 2 with the reason on stderr, which is how Claude
 Code's PreToolUse hooks hand a refusal back to the model.
@@ -584,6 +591,95 @@ def pattern_hint(segment):
     return f"Use orch ctx text {shell_quoted(pattern)}."
 
 
+def repository_root(start=None):
+    """The root of the git repository the hook runs in, or "" outside one.
+
+    orch ctx is pinned to a git repository root, so a path outside it has no ctx
+    answer. A worktree root has a .git file rather than a directory, so any entry
+    counts. A lexical path keeps the decision the same as the pi guard's.
+    """
+    directory = os.path.abspath(start or os.getcwd())
+    while True:
+        if os.path.exists(os.path.join(directory, ".git")):
+            return directory
+        parent = os.path.dirname(directory)
+        if parent == directory:
+            return ""
+        directory = parent
+
+
+def inside_repository(path):
+    """True when a built-in search's target path is inside the repository.
+
+    A relative or missing path counts as inside; with no repository at all only
+    the relative form is blocked, so a block never names a tool that cannot
+    answer there.
+    """
+    target = (path or "").strip()
+    if not target or not os.path.isabs(target):
+        return True
+    root = repository_root()
+    if not root:
+        return False
+    resolved = os.path.abspath(target)
+    return resolved == root or resolved.startswith(root.rstrip(os.sep) + os.sep)
+
+
+def builtin_dir(path):
+    """The directory a built-in search starts from, scoped the way the shell hint
+    scopes it: a file names its own directory, and no path or `.` is the root."""
+    where = (path or "").strip().rstrip("/")
+    if not where or where == ".":
+        return ""
+    parts = where.split("/")
+    if "." in parts[-1]:
+        return "/".join(parts[:-1])
+    return where
+
+
+def builtin_hint(kind, pattern, path):
+    """The one ctx line a built-in search's pattern lands on, in the batch syntax
+    the shell hints use: a name is a symbol, a broad phrase is a concept, and a
+    string is a text lookup scoped by the directory the model named."""
+    if kind == "symbol":
+        return f'Use orch ctx batch -q "symbol:{pattern} refs=3".'
+    words = concept_words(pattern)
+    if kind == "concept" and words:
+        phrase = words.replace('"', "'")
+        return f'Use orch ctx batch -q "find:Code that {phrase}".'
+    where = builtin_dir(path)
+    if where:
+        return f'Use orch ctx batch -q "text:{shell_quoted(pattern)} glob={where}/**".'
+    return f'Use orch ctx batch -q "text:{shell_quoted(pattern)}".'
+
+
+def builtin_grep_hint(pattern, tool_input):
+    """The Grep tool's pattern picks one of the same three kinds as the shell
+    rule, so a name, a string and a broad phrase each get their own query."""
+    path = tool_input.get("path")
+    return builtin_hint(pattern_kind(pattern), pattern, path if isinstance(path, str) else "")
+
+
+def builtin_file_hint(pattern, tool_input):
+    """The Glob tool's name or glob argument is a file name, and no ctx kind lists
+    files by name: a concept asks for a concept search, and anything else is a
+    text lookup scoped by the directory, which is what glob= is for."""
+    kind = "concept" if pattern_kind(pattern) == "concept" else "text"
+    path = tool_input.get("path")
+    return builtin_hint(kind, pattern, path if isinstance(path, str) else "")
+
+
+def builtin_log_line(tool, tool_input):
+    """The line the log records for a built-in call: the tool and the arguments
+    the model typed, in the shape a shell command would have."""
+    parts = [tool]
+    for key in ("pattern", "path", "glob"):
+        value = tool_input.get(key)
+        if isinstance(value, str) and value.strip():
+            parts.append(f"{key}={value.strip()}")
+    return " ".join(parts)
+
+
 def grep_searches(segment, tools):
     """One segment is a raw content search over files."""
     name, args = command(segment)
@@ -770,6 +866,90 @@ def rules():
     ]
 
 
+# The built-in tools reach the tree without a shell, so their rules match a tool
+# name and the arguments it carries rather than a command line.
+def builtin_rules():
+    """The two rules for Claude's own search tools, which a shell rule alone
+    leaves as the way around the guard."""
+    return [
+        {
+            "script": "builtin-search",
+            "name": "deny-builtin-grep",
+            "id": "builtin-grep",
+            "tool": "Grep",
+            "reason": (
+                f"{GUARD_MARKER} (deny-builtin-grep): the built-in Grep tool is blocked; "
+                "orch ctx answers searches here.\n"
+                'One orch ctx batch replaces it: orch ctx batch -q "text:pattern glob=dir/**" '
+                '-q "symbol:Name refs=3" (a concept: find:...).'
+            ),
+            "tuned": builtin_grep_hint,
+        },
+        {
+            "script": "builtin-search",
+            "name": "deny-builtin-glob",
+            "id": "builtin-glob",
+            "tool": "Glob",
+            "reason": (
+                f"{GUARD_MARKER} (deny-builtin-glob): the built-in Glob tool is blocked; "
+                "orch ctx answers file searches here.\n"
+                'One orch ctx batch replaces it: orch ctx batch -q "find:Code that ..." '
+                '-q "text:pattern glob=dir/**" (--compact shortens it).'
+            ),
+            "tuned": builtin_file_hint,
+        },
+    ]
+
+
+def active_builtin_rules():
+    """ORCH_TOOL_GUARD=off disables every rule; ORCH_TOOL_GUARD_SKIP takes the
+    group name `builtin-search`, or one rule's short or full name."""
+    if os.environ.get("ORCH_TOOL_GUARD") == "off":
+        return []
+    skip = {name.strip() for name in (os.environ.get("ORCH_TOOL_GUARD_SKIP") or "").split(",") if name.strip()}
+    return [
+        rule
+        for rule in builtin_rules()
+        if rule["id"] not in skip and rule["name"] not in skip and rule["script"] not in skip
+    ]
+
+
+def builtin_search(event):
+    """A Grep or Glob call, decided against the same policy as the pi guard.
+
+    Fail open: a payload without a tool name, a tool input or a pattern is not a
+    search this guard can name a replacement for.
+    """
+    active = active_builtin_rules()
+    if not active:
+        return 0
+    tool = event.get("tool_name")
+    tool_input = event.get("tool_input")
+    if not isinstance(tool_input, dict):
+        return 0
+    pattern = tool_input.get("pattern")
+    if not isinstance(pattern, str) or not pattern.strip():
+        return 0
+    rule = next((rule for rule in active if rule["tool"] == tool), None)
+    if rule is None:
+        return 0
+    path = tool_input.get("path")
+    if not inside_repository(path if isinstance(path, str) else ""):
+        return 0
+    tools = installed()
+    if not tools["orch"]:
+        return 0
+    mode = hint_mode()
+    guard_log(rule["id"], mode, pattern_kind(pattern), builtin_log_line(tool, tool_input))
+    reason = rule["reason"]
+    if mode == "pattern":
+        tuned = rule["tuned"](pattern, tool_input)
+        if tuned:
+            reason += "\n" + tuned
+    sys.stderr.write(reason + "\n")
+    return 2
+
+
 def active_rules(script):
     """ORCH_TOOL_GUARD=off disables every rule; ORCH_TOOL_GUARD_SKIP disables
     single rules by short name or by full name."""
@@ -791,6 +971,8 @@ def main(argv):
         return 0
     if not isinstance(event, dict):
         return 0
+    if script == "builtin-search":
+        return builtin_search(event)
     tool = event.get("tool_name")
     if tool is not None and tool != "Bash":
         return 0
