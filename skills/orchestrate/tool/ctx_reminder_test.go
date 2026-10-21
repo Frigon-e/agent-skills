@@ -14,11 +14,13 @@ import (
 type reminderCase struct {
 	Name string `json:"name"`
 	Tool string `json:"tool"`
-	// Blocks is the rule that must block the call: "", find-chains,
+	// Blocks is the rule that must block the call: "", find-chains, find,
 	// sed-inplace, cat-head-tail or grep-rg.
-	Blocks string         `json:"-"`
-	Needs  []string       `json:"-"` // substrings the block reason must carry
-	Remind bool           `json:"-"` // the note is appended to the result
+	Blocks string   `json:"-"`
+	Needs  []string `json:"-"` // substrings the block reason must carry
+	Remind bool     `json:"-"` // the note is appended to the result
+	// Repeat marks the 3rd block in a row, whose reason carries one extra line.
+	Repeat bool           `json:"-"`
 	Input  map[string]any `json:"input"`
 }
 
@@ -34,11 +36,22 @@ type reminderRun struct {
 const (
 	reminderMarker = "orch ctx reminder"
 	guardMarker    = "orch tool guard"
+	// repeatedBlock is the one extra line a reason carries from the 3rd block
+	// in a row on.
+	repeatedBlock = "Blocked 3 times: use the replacement above; this guard does not give way."
 )
 
-// runCtxReminder copies the real extension into a temp dir, puts an `orch`
-// stand-in on PATH and runs the cases through the loaded extension in node.
+// runCtxReminder runs a case group with only an `orch` stand-in on PATH.
 func runCtxReminder(t *testing.T, env []string, cases []reminderCase) reminderRun {
+	t.Helper()
+	return runCtxReminderWith(t, []string{"orch"}, env, cases)
+}
+
+// runCtxReminderWith copies the real extension into a temp dir, puts a stub for
+// each named tool on PATH and runs the cases through the loaded extension in
+// node. PATH is only that temp dir, so the real system tools never leak in and
+// the case group decides which replacements the guard can name.
+func runCtxReminderWith(t *testing.T, onPath []string, env []string, cases []reminderCase) reminderRun {
 	t.Helper()
 	node, err := exec.LookPath("node")
 	if err != nil {
@@ -53,8 +66,10 @@ func runCtxReminder(t *testing.T, env []string, cases []reminderCase) reminderRu
 	if err := os.MkdirAll(bin, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(bin, "orch"), []byte("#!/bin/sh\n"), 0o755); err != nil {
-		t.Fatal(err)
+	for _, name := range onPath {
+		if err := os.WriteFile(filepath.Join(bin, name), []byte("#!/bin/sh\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
 	}
 	script := `
 import ext from ` + string(mustJSON(t, ext)) + `;
@@ -121,8 +136,17 @@ func checkReminder(t *testing.T, got reminderRun, cases []reminderCase) (reminde
 					t.Errorf("%q block reason must name %q: %q", c.Name, need, res.Block)
 				}
 			}
-			if lines := strings.Count(res.Block, "\n") + 1; lines > 3 {
-				t.Errorf("%q block reason is longer than three lines: %q", c.Name, res.Block)
+			// A reason is two or three short lines; the 3rd block in a row adds
+			// the repeated-block line.
+			limit := 3
+			if strings.Contains(res.Block, repeatedBlock) {
+				limit = 4
+			}
+			if lines := strings.Count(res.Block, "\n") + 1; lines > limit {
+				t.Errorf("%q block reason is longer than %d lines: %q", c.Name, limit, res.Block)
+			}
+			if c.Repeat && !strings.Contains(res.Block, repeatedBlock) {
+				t.Errorf("%q is the 3rd block in a row but the reason lacks %q: %q", c.Name, repeatedBlock, res.Block)
 			}
 		}
 		// A blocked call never reaches its result hook in pi, so the note is
@@ -161,9 +185,12 @@ func TestCtxReminderDecisionTable(t *testing.T) {
 		{Name: "env prefix", Tool: "bash", Input: bash(`RG_OPTS=1 rg Gateway .`), Blocks: "grep-rg", Needs: orch, Remind: true},
 		{Name: "cd && rg", Tool: "bash", Input: bash(`cd internal && rg -n Gateway .`), Blocks: "grep-rg", Needs: orch, Remind: true},
 		{Name: "git grep", Tool: "bash", Input: bash(`git grep -n Gateway`), Blocks: "grep-rg", Needs: orch, Remind: true},
-		// fd and plain find only get the note; a grep fed by a pipe filters.
+		// fd only gets the note; a plain find is now a file search to redirect,
+		// and a grep fed by a pipe filters.
 		{Name: "fd", Tool: "bash", Input: bash(`fd gateway`), Remind: true},
-		{Name: "find", Tool: "bash", Input: bash(`find . -name "*.go"`), Remind: true},
+		{Name: "find", Tool: "bash", Input: bash(`find . -name "*.go"`), Blocks: "find", Needs: orch},
+		{Name: "find by type", Tool: "bash", Input: bash(`find src -type f`), Blocks: "find", Needs: orch},
+		{Name: "pipe find", Tool: "bash", Input: bash(`cat list.txt | find . -name "*.ts"`), Remind: true},
 		{Name: "pipe grep", Tool: "bash", Input: bash(`cat file | grep -n Gateway`), Remind: true},
 		{Name: "builtin grep", Tool: "grep", Input: map[string]any{"pattern": "Gateway"}, Remind: true},
 		{Name: "builtin find", Tool: "find", Input: map[string]any{"pattern": "*.go"}, Remind: true},
@@ -203,18 +230,110 @@ func TestCtxReminderGuardDenyFindChains(t *testing.T) {
 		{Name: "sudo find -exec", Tool: "bash", Input: bash(`sudo find . -name core -exec rm {} \;`), Blocks: "find-chains", Needs: orch},
 		{Name: "cd && find | grep", Tool: "bash", Input: bash(`cd internal && find . -name "*.go" | grep Gateway`), Blocks: "find-chains", Needs: orch},
 		{Name: "/usr/bin/find -exec", Tool: "bash", Input: bash(`/usr/bin/find . -name x -exec ls {} \;`), Blocks: "find-chains", Needs: orch},
-		// Does not touch: plain find, a path or a quoted word that merely
-		// contains find or grep, and a pipeline that formats another command.
-		{Name: "plain find", Tool: "bash", Input: bash(`find . -name "*.md" -type f`), Remind: true},
-		{Name: "plain find | head", Tool: "bash", Input: bash(`find . -name "*.go" | head -20`), Remind: true},
+		// Does not touch: a path or a quoted word that merely contains find or
+		// grep, and a pipeline that formats another command. Plain find now
+		// belongs to deny-find, which blocks it.
+		{Name: "plain find", Tool: "bash", Input: bash(`find . -name "*.md" -type f`), Blocks: "find", Needs: orch},
+		{Name: "plain find | head", Tool: "bash", Input: bash(`find . -name "*.go" | head -20`), Blocks: "find", Needs: orch},
 		{Name: "path with find -exec", Tool: "bash", Input: bash(`ls my-find-exec-project/`)},
-		{Name: "find -name quoted grep", Tool: "bash", Input: bash(`find . -name "grep*"`), Remind: true},
+		{Name: "find -name quoted grep", Tool: "bash", Input: bash(`find . -name "grep*"`), Blocks: "find", Needs: orch},
 		{Name: "pipe rg quoted find -exec", Tool: "bash", Input: bash(`cat file | rg -n "find -exec"`), Remind: true},
 		{Name: "echo quoted find -exec", Tool: "bash", Input: bash(`echo "find -exec rm"`)},
 	}
 	got := runCtxReminder(t, nil, cases)
 	reminded, quiet, blocked := checkReminder(t, got, cases)
 	t.Logf("deny-find-chains: %d blocked, %d allowed, %d reminded", blocked, quiet, reminded)
+}
+
+// deny-find: find over a tree is a file search by name, path or type, so one
+// ctx batch owns it; a find reading a pipe only formats stdin.
+func TestCtxReminderGuardDenyFind(t *testing.T) {
+	orch := []string{"orch ctx batch"}
+	cases := []reminderCase{
+		{Name: "find by name", Tool: "bash", Input: bash(`find . -name "*.go"`), Blocks: "find", Needs: orch},
+		{Name: "find by type", Tool: "bash", Input: bash(`find src -type f`), Blocks: "find", Needs: orch},
+		{Name: "find path and glob", Tool: "bash", Input: bash(`find internal -name "*.ts"`), Blocks: "find", Needs: orch},
+		{Name: "bare find", Tool: "bash", Input: bash(`find`), Blocks: "find", Needs: orch},
+		{Name: "sudo find", Tool: "bash", Input: bash(`sudo find /var -type f`), Blocks: "find", Needs: orch},
+		{Name: "cd && find", Tool: "bash", Input: bash(`cd internal && find . -name "*.ts"`), Blocks: "find", Needs: orch},
+		{Name: "absolute find", Tool: "bash", Input: bash(`/usr/bin/find . -name x`), Blocks: "find", Needs: orch},
+		// find -exec is a chain, so the more specific rule names it.
+		{Name: "find -exec", Tool: "bash", Input: bash(`find . -name x -exec ls {} \;`), Blocks: "find-chains", Needs: orch},
+		// Does not touch: find reading a pipe, the find tool, fd and a quoted word.
+		{Name: "find reads a pipe", Tool: "bash", Input: bash(`printf x | find . -name "*.ts"`), Remind: true},
+		{Name: "builtin find", Tool: "find", Input: map[string]any{"pattern": "*.go"}, Remind: true},
+		{Name: "fd", Tool: "bash", Input: bash(`fd -e ts gateway`), Remind: true},
+		{Name: "echo quoted find", Tool: "bash", Input: bash(`echo "find"`)},
+	}
+	got := runCtxReminder(t, nil, cases)
+	reminded, quiet, blocked := checkReminder(t, got, cases)
+	t.Logf("deny-find: %d blocked, %d allowed, %d reminded", blocked, quiet, reminded)
+}
+
+// The replacement order: our ctx system first, then fd for a file search and rg
+// for a content search, then pi's built-in tools. PATH holds only the stub
+// executables of the case group, so the absence of fd and rg is real.
+func TestCtxReminderReplacementOrder(t *testing.T) {
+	batch := "orch ctx batch"
+	t.Run("orch installed", func(t *testing.T) {
+		cases := []reminderCase{
+			{Name: "find by name", Tool: "bash", Input: bash(`find . -name '*.ts'`), Blocks: "find", Needs: []string{batch, "text:pattern"}},
+			{Name: "find by type", Tool: "bash", Input: bash(`find src -type f`), Blocks: "find", Needs: []string{batch}},
+			{Name: "find in a pipe", Tool: "bash", Input: bash(`cat list.txt | find . -name '*.ts'`), Remind: true},
+			{Name: "grep recursive", Tool: "bash", Input: bash(`grep -rn x src`), Blocks: "grep-rg", Needs: []string{batch, "text:pattern"}},
+			{Name: "rg tree", Tool: "bash", Input: bash(`rg x src`), Blocks: "grep-rg", Needs: []string{batch}},
+			{Name: "ag tree", Tool: "bash", Input: bash(`ag x src`), Blocks: "grep-rg", Needs: []string{batch}},
+			{Name: "git grep", Tool: "bash", Input: bash(`git grep -n x`), Blocks: "grep-rg", Needs: []string{batch}},
+		}
+		got := runCtxReminderWith(t, []string{"orch", "fd", "rg"}, nil, cases)
+		reminded, quiet, blocked := checkReminder(t, got, cases)
+		t.Logf("orch installed: %d blocked, %d allowed, %d reminded", blocked, quiet, reminded)
+		t.Run("find names no fd", func(t *testing.T) {
+			if strings.Contains(got.Out["find by name"].Block, "fd") {
+				t.Errorf("orch is installed but the reason named fd: %q", got.Out["find by name"].Block)
+			}
+		})
+	})
+	t.Run("no orch, fd and rg installed", func(t *testing.T) {
+		fd := "fd -e ts pattern dir"
+		rg := "rg -n pattern dir"
+		cases := []reminderCase{
+			{Name: "find by name", Tool: "bash", Input: bash(`find . -name '*.ts'`), Blocks: "find", Needs: []string{"fd instead", fd, "fd -x cmd"}},
+			{Name: "find by type", Tool: "bash", Input: bash(`find src -type f`), Blocks: "find", Needs: []string{fd}},
+			{Name: "find in a pipe", Tool: "bash", Input: bash(`cat list.txt | find . -name '*.ts'`)},
+			{Name: "grep recursive", Tool: "bash", Input: bash(`grep -rn x src`), Blocks: "grep-rg", Needs: []string{"rg instead", rg}},
+			{Name: "rg tree", Tool: "bash", Input: bash(`rg x src`)},
+			{Name: "ag tree", Tool: "bash", Input: bash(`ag x src`), Blocks: "grep-rg", Needs: []string{rg}},
+			{Name: "git grep", Tool: "bash", Input: bash(`git grep -n x`), Blocks: "grep-rg", Needs: []string{rg}},
+		}
+		got := runCtxReminderWith(t, []string{"fd", "rg"}, nil, cases)
+		reminded, quiet, blocked := checkReminder(t, got, cases)
+		t.Logf("no orch, fd+rg: %d blocked, %d allowed, %d reminded", blocked, quiet, reminded)
+		for _, name := range []string{"find by name", "grep recursive", "ag tree", "git grep"} {
+			if reason := got.Out[name].Block; strings.Contains(reason, batch) {
+				t.Errorf("%q named orch ctx although orch is not on PATH: %q", name, reason)
+			}
+		}
+	})
+	t.Run("no orch, no fd, no rg", func(t *testing.T) {
+		cases := []reminderCase{
+			{Name: "find by name", Tool: "bash", Input: bash(`find . -name '*.ts'`), Blocks: "find", Needs: []string{"built-in find"}},
+			{Name: "find by type", Tool: "bash", Input: bash(`find src -type f`), Blocks: "find", Needs: []string{"built-in find"}},
+			{Name: "find in a pipe", Tool: "bash", Input: bash(`cat list.txt | find . -name '*.ts'`)},
+			{Name: "grep recursive", Tool: "bash", Input: bash(`grep -rn x src`), Blocks: "grep-rg", Needs: []string{"built-in grep"}},
+			{Name: "rg tree", Tool: "bash", Input: bash(`rg x src`)},
+			{Name: "ag tree", Tool: "bash", Input: bash(`ag x src`), Blocks: "grep-rg", Needs: []string{"built-in grep"}},
+			{Name: "git grep", Tool: "bash", Input: bash(`git grep -n x`), Blocks: "grep-rg", Needs: []string{"built-in grep"}},
+		}
+		got := runCtxReminderWith(t, nil, nil, cases)
+		reminded, quiet, blocked := checkReminder(t, got, cases)
+		t.Logf("no orch, no fd, no rg: %d blocked, %d allowed, %d reminded", blocked, quiet, reminded)
+		for _, name := range []string{"find by name", "grep recursive"} {
+			if reason := got.Out[name].Block; strings.Contains(reason, batch) || strings.Contains(reason, "fd -e ts") || strings.Contains(reason, "rg -n") {
+				t.Errorf("%q named a tool that is not on PATH: %q", name, reason)
+			}
+		}
+	})
 }
 
 // deny-sed-inplace: sed -i and perl -pi rewrite a file, so the edit tool owns it.
@@ -308,19 +427,20 @@ func TestCtxReminderGuardDenyGrepRg(t *testing.T) {
 }
 
 // Without orch on PATH every rule still blocks, pointing at the built-ins, and
-// no note is appended because there is nothing to name.
+// no note is appended because there is nothing to name. rg is the exception:
+// with no orch it is the preferred grep, so it is never blocked.
 func TestCtxReminderSilentInCtxOnlyShellAndGuardsWithoutOrch(t *testing.T) {
-	empty := filepath.Join(t.TempDir(), "empty")
 	t.Run("no orch on PATH", func(t *testing.T) {
 		cases := []reminderCase{
 			{Name: "find | grep", Tool: "bash", Input: bash(`find . -name "*.go" | grep Gateway`), Blocks: "find-chains", Needs: []string{"grep", "find"}},
 			{Name: "sed -i", Tool: "bash", Input: bash(`sed -i 's/a/b/' file.go`), Blocks: "sed-inplace", Needs: []string{"edit"}},
 			{Name: "cat one file", Tool: "bash", Input: bash(`cat notes.txt`), Blocks: "cat-head-tail", Needs: []string{"read", "offset"}},
-			{Name: "rg Foo internal/", Tool: "bash", Input: bash(`rg Foo internal/`), Blocks: "grep-rg", Needs: []string{"grep"}},
+			{Name: "rg Foo internal/", Tool: "bash", Input: bash(`rg Foo internal/`)},
+			{Name: "find by name", Tool: "bash", Input: bash(`find . -name "*.ts"`), Blocks: "find", Needs: []string{"built-in find"}},
 			{Name: "fd", Tool: "bash", Input: bash(`fd gateway`)},
 			{Name: "go test | tail", Tool: "bash", Input: bash(`go test ./... | tail -n 20`)},
 		}
-		got := runCtxReminder(t, []string{"PATH=" + empty}, cases)
+		got := runCtxReminderWith(t, nil, nil, cases)
 		if len(got.Handlers) != 1 || got.Handlers[0] != "tool_call" {
 			t.Fatalf("without orch only the guard hook is expected, got %v", got.Handlers)
 		}
@@ -338,17 +458,25 @@ func TestCtxReminderSilentInCtxOnlyShellAndGuardsWithoutOrch(t *testing.T) {
 	})
 }
 
-// A blocked command line runs once on its next attempt and is never blocked
-// again, and ORCH_TOOL_GUARD=off or a skip by name disables the guard.
+// A blocked command stays blocked on every retry, so the model learns not to
+// use it; the 3rd block in a row adds one line saying the guard will not give
+// way, and an allowed call ends the run. ORCH_TOOL_GUARD=off or a skip by name
+// are the human's escapes.
 func TestCtxReminderLoopProtectionAndSwitches(t *testing.T) {
-	t.Run("same command retried runs", func(t *testing.T) {
+	orch := []string{"orch ctx batch"}
+	t.Run("same command stays blocked", func(t *testing.T) {
 		cases := []reminderCase{
-			{Name: "grep dir", Tool: "bash", Input: bash(`rg Foo internal/`), Blocks: "grep-rg", Needs: []string{"orch ctx batch"}},
-			{Name: "grep dir retry", Tool: "bash", Input: bash(`rg Foo internal/`), Remind: true},
+			{Name: "grep dir", Tool: "bash", Input: bash(`rg Foo internal/`), Blocks: "grep-rg", Needs: orch},
+			{Name: "grep dir retry", Tool: "bash", Input: bash(`rg Foo internal/`), Blocks: "grep-rg", Needs: orch},
+			{Name: "grep dir third", Tool: "bash", Input: bash(`rg Foo internal/`), Blocks: "grep-rg", Needs: orch, Repeat: true},
+			{Name: "orch ctx call", Tool: "bash", Input: bash(`orch ctx text Gateway`)},
 			{Name: "cat one file", Tool: "bash", Input: bash(`cat notes.txt`), Blocks: "cat-head-tail", Needs: []string{"read"}},
 		}
 		got := runCtxReminder(t, nil, cases)
 		checkReminder(t, got, cases)
+		if strings.Contains(got.Out["cat one file"].Block, repeatedBlock) {
+			t.Errorf("an allowed call did not end the run of blocks: %q", got.Out["cat one file"].Block)
+		}
 	})
 	t.Run("ORCH_TOOL_GUARD=off", func(t *testing.T) {
 		cases := []reminderCase{
@@ -374,6 +502,22 @@ func TestCtxReminderLoopProtectionAndSwitches(t *testing.T) {
 			{Name: "sed -i", Tool: "bash", Input: bash(`sed -i 's/a/b/' file.go`), Blocks: "sed-inplace", Needs: []string{"edit"}},
 		}
 		got := runCtxReminder(t, []string{"ORCH_TOOL_GUARD_SKIP=deny-cat-head-tail"}, cases)
+		checkReminder(t, got, cases)
+	})
+	t.Run("skip find by short name", func(t *testing.T) {
+		cases := []reminderCase{
+			{Name: "find by name", Tool: "bash", Input: bash(`find . -name "*.ts"`), Remind: true},
+			{Name: "cat one file", Tool: "bash", Input: bash(`cat notes.txt`), Blocks: "cat-head-tail", Needs: []string{"read"}},
+		}
+		got := runCtxReminder(t, []string{"ORCH_TOOL_GUARD_SKIP=find"}, cases)
+		checkReminder(t, got, cases)
+	})
+	t.Run("skip find by full name", func(t *testing.T) {
+		cases := []reminderCase{
+			{Name: "find by name", Tool: "bash", Input: bash(`find . -name "*.ts"`), Remind: true},
+			{Name: "rg Foo internal/", Tool: "bash", Input: bash(`rg Foo internal/`), Blocks: "grep-rg", Needs: []string{"orch ctx batch"}},
+		}
+		got := runCtxReminder(t, []string{"ORCH_TOOL_GUARD_SKIP=deny-find"}, cases)
 		checkReminder(t, got, cases)
 	})
 }
@@ -405,9 +549,11 @@ func TestCtxReminderFallbackBlocksOnceThenAllowsRetry(t *testing.T) {
 		t.Fatalf("the first search was not blocked by the guard: %q", first)
 	}
 	blocked++
-	if reason := got.Out["same rg retry"].Block; reason != "" {
-		t.Errorf("the retry of a blocked search was blocked: %s", reason)
+	// A blocked command stays blocked, so the retry does not run.
+	if retry := got.Out["same rg retry"].Block; !strings.Contains(retry, "deny-grep-rg") {
+		t.Errorf("the retry of a blocked search was not blocked: %s", retry)
 	}
+	blocked++
 	firstFD := got.Out["first fd"].Block
 	if !strings.Contains(firstFD, reminderMarker) || !strings.Contains(firstFD, "orch ctx batch") {
 		t.Fatalf("the fallback did not block the first search with the reminder: %q", firstFD)
@@ -418,5 +564,5 @@ func TestCtxReminderFallbackBlocksOnceThenAllowsRetry(t *testing.T) {
 			t.Errorf("%q was blocked after the one reminder: %s", name, reason)
 		}
 	}
-	t.Logf("fallback: %d blocked, 5 allowed", blocked)
+	t.Logf("fallback: %d blocked, 4 allowed", blocked)
 }

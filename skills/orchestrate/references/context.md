@@ -465,22 +465,26 @@ ignored files and outside paths are not covered by that check. Gate records,
 reports and compare show `ctx_shell`; missing historical fields display `open`.
 
 `skills/orchestrate/tool/pi_ctx_reminder.ts` is a user-level pi extension (the
-orchestrator installs it under `~/.pi/agent/extensions/`). It carries four
+orchestrator installs it under `~/.pi/agent/extensions/`). It carries five
 small deny rules, each a table entry with a name, a matcher and a reason:
 `deny-find-chains` (find `-exec`/`-delete`, and a search tool feeding a grep),
-`deny-sed-inplace` (`sed -i`, `perl -pi`), `deny-cat-head-tail` (one bare
-`cat`, `head`, `tail` or `sed -n` on a file) and `deny-grep-rg` (a plain
-`grep`, `egrep`, `fgrep`, `rg`, `ag` or `git grep` over files or a directory).
-A `tool_call` block names `orch ctx` first when `orch` is on PATH and the
-built-in `edit`, `read` or `grep`/`find` otherwise; the reason is two lines.
-Allowed: a grep or rg filtering another command's output, a read that feeds a
-pipe or a redirect, `tail -f`, several files to `cat`, and plain `find` or
-`fd`. Those last two, and pi's built-in `grep`, `find` and `ls`, which are
-never blocked, keep the appended reminder that names one `orch ctx batch` call.
-A command line blocked once runs on its next attempt and is never blocked
-again. `ORCH_TOOL_GUARD=off` turns the guard off and
-`ORCH_TOOL_GUARD_SKIP=find-chains,sed-inplace,cat-head-tail,grep-rg` disables
-rules by name; the reminder stays either way. A pi build without the
+`deny-find` (a plain `find` over a tree), `deny-sed-inplace` (`sed -i`,
+`perl -pi`), `deny-cat-head-tail` (one bare `cat`, `head`, `tail` or `sed -n`
+on a file) and `deny-grep-rg` (a plain `grep`, `egrep`, `fgrep`, `ag` or
+`git grep` over files or a directory, and `rg` too while `orch` is installed).
+A `tool_call` block names the replacement in order: one `orch ctx` call when
+`orch` is on PATH, otherwise `fd` for a file search and `rg` for a content
+search, and the built-in `edit`, `read`, `grep` or `find` when those are
+missing too; the reason is two or three lines. Allowed: a grep or rg filtering
+another command's output, a read that feeds a pipe or a redirect, `tail -f`,
+several files to `cat`, a `find` reading a pipe, and plain `fd`. Plain `fd`
+and pi's built-in `grep`, `find` and `ls`, which are never blocked, keep the
+appended reminder that names one `orch ctx batch` call. A blocked command line
+is blocked every time and does not run on a retry; from the third block in a
+row the reason adds `Blocked 3 times: use the replacement above; this guard
+does not give way.` `ORCH_TOOL_GUARD=off` turns the guard off and
+`ORCH_TOOL_GUARD_SKIP=find-chains,find,sed-inplace,cat-head-tail,grep-rg`
+disables rules by name; the reminder stays either way. A pi build without the
 `tool_result` hook blocks the first search of the session once instead. It
 stays silent inside the ctx-only gate shell. Its decision tables run in node:
 `go test -run 'CtxReminder' .` in `tool`.

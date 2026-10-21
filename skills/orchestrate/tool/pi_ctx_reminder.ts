@@ -1,13 +1,15 @@
-// Guards the model against four kinds of raw shell work and points it at the
+// Guards the model against five kinds of raw shell work and points it at the
 // right tool instead. Each rule is a table entry with a name, a matcher and a
 // reason: deny-find-chains (find -exec / find -delete / a search tool feeding a
-// grep), deny-sed-inplace (sed -i, perl -pi), deny-cat-head-tail (a bare cat,
-// head, tail or sed -n on one file) and deny-grep-rg (a plain grep, egrep,
-// fgrep, rg, ag or git grep over files or a directory). A block names orch ctx
-// first when `orch` is on PATH and the pi built-in tool otherwise.
-// A grep filtering another command's output, plain find and plain fd are not
-// blocked; the note is appended to their result instead, and to pi's built-in
-// grep/find/ls, which are never blocked.
+// grep), deny-find (a find over a tree), deny-sed-inplace (sed -i, perl -pi),
+// deny-cat-head-tail (a bare cat, head, tail or sed -n on one file) and
+// deny-grep-rg (a plain grep, egrep, fgrep, ag or git grep over files or a
+// directory, and rg too while orch is installed). A block names orch ctx first
+// when `orch` is on PATH, then fd for a file search and rg for a content
+// search, and the pi built-in tool last.
+// A grep filtering another command's output and plain fd are not blocked; the
+// note is appended to their result instead, and to pi's built-in grep/find/ls,
+// which are never blocked.
 import type { ExtensionAPI, ToolCallEvent, ToolResultEvent } from "@earendil-works/pi-coding-agent";
 import { accessSync, constants, statSync } from "node:fs";
 import { delimiter, join } from "node:path";
@@ -34,20 +36,24 @@ type segment = {
 	redirect: boolean;
 };
 
+// The replacements, in the order a block names them: our ctx system first,
+// then the standalone search tools the user prefers, then pi's built-ins.
+type tools = { orch: boolean; fd: boolean; rg: boolean };
+
 type rule = {
-	// deny-find-chains, and the short name ORCH_TOOL_GUARD_SKIP takes.
+	// The full name, and the short name ORCH_TOOL_GUARD_SKIP takes.
 	name: string;
 	id: string;
-	match: (line: string) => boolean;
-	reason: (orch: boolean) => string;
+	match: (line: string, tools: tools) => boolean;
+	reason: (tools: tools) => string;
 };
 
-// True when an `orch` executable is on PATH, so the reminder is harmless in
-// repos and sessions that never installed the skill.
-function orchardOnPath(): boolean {
+// True when an executable of this name is on PATH, so the reminder is harmless
+// in repos and sessions that never installed the skill or the search tools.
+function onPath(name: string): boolean {
 	for (const dir of (process.env.PATH ?? "").split(delimiter)) {
 		if (!dir) continue;
-		const path = join(dir, "orch");
+		const path = join(dir, name);
 		try {
 			if (!statSync(path).isFile()) continue;
 			accessSync(path, constants.X_OK);
@@ -57,6 +63,11 @@ function orchardOnPath(): boolean {
 		}
 	}
 	return false;
+}
+
+// Computed once: PATH does not change under a running session.
+function installed(): tools {
+	return { orch: onPath("orch"), fd: onPath("fd"), rg: onPath("rg") };
 }
 
 // Split a command line on unquoted separators, dropping quoted text, so an
@@ -207,6 +218,12 @@ function denyFindChains(line: string): boolean {
 	return false;
 }
 
+// find over a tree is a file search by name, path or type, which fd or one
+// ctx call answers. A find reading a pipe is formatting stdin, so it stays.
+function denyFind(line: string): boolean {
+	return segments(line).some((segment) => !segment.stdinPipe && command(segment).name === "find");
+}
+
 function denySedInplace(line: string): boolean {
 	return segments(line).some((segment) => {
 		const { name, args } = command(segment);
@@ -312,12 +329,14 @@ function searchTargets(args: string[]): string[] {
 }
 
 // A grep with a file or directory argument, or one that recurses, searches
-// files. One reading stdin is a filter, so it stays allowed.
-function denyGrepRg(line: string): boolean {
+// files. One reading stdin is a filter, so it stays allowed. With no orch, rg
+// is the preferred grep rather than a raw search, so rg itself stays allowed.
+function denyGrepRg(line: string, tools: tools): boolean {
 	return segments(line).some((segment) => {
 		const { name, args } = command(segment);
 		if (!name) return false;
 		if (name === "git") return args[0] === "grep" && !segment.stdinPipe;
+		if (name === "rg" && !tools.orch) return false;
 		if (!plainSearch.has(name)) return false;
 		if (searchTargets(args).length > 0) return true;
 		const recurses =
@@ -351,11 +370,25 @@ const rules: rule[] = [
 		name: "deny-find-chains",
 		id: "find-chains",
 		match: denyFindChains,
-		reason: (orch) =>
+		reason: ({ orch, fd }) =>
 			`${guardMarker} (deny-find-chains): find -exec, -delete and find | grep chains are blocked.\n` +
 			(orch
 				? `One orch ctx batch replaces them: orch ctx batch -q "find:Code that ..." -q "symbol:Name refs=3" -q "text:pattern glob=dir/**" (--compact shortens it).`
-				: `Use the built-in grep and find tools; orch ctx is not installed.`),
+				: fd
+					? `Use fd instead (e.g. fd -e ts pattern dir, and fd -x cmd replaces find -exec).`
+					: `Use the built-in grep and find tools; orch ctx and fd are not installed.`),
+	},
+	{
+		name: "deny-find",
+		id: "find",
+		match: denyFind,
+		reason: ({ orch, fd }) =>
+			`${guardMarker} (deny-find): find over a tree is blocked.\n` +
+			(orch
+				? `One orch ctx batch replaces it: orch ctx batch -q "find:Code that ..." -q "text:pattern glob=dir/**" (--compact shortens it).`
+				: fd
+					? `Use fd instead (e.g. fd -e ts pattern dir, and fd -x cmd replaces find -exec).`
+					: `Use the built-in find tool; orch ctx and fd are not installed.`),
 	},
 	{
 		name: "deny-sed-inplace",
@@ -369,17 +402,19 @@ const rules: rule[] = [
 		name: "deny-grep-rg",
 		id: "grep-rg",
 		match: denyGrepRg,
-		reason: (orch) =>
-			`${guardMarker} (deny-grep-rg): a plain grep, rg, ag or git grep over files is blocked.\n` +
+		reason: ({ orch, rg }) =>
+			`${guardMarker} (deny-grep-rg): a plain grep${orch ? ", rg" : ""}, ag or git grep over files is blocked.\n` +
 			(orch
 				? `One orch ctx batch replaces it: orch ctx batch -q "text:pattern glob=dir/**" -q "symbol:Name refs=3" (a concept: find:...).`
-				: `Use the built-in grep tool; orch ctx is not installed.`),
+				: rg
+					? `Use rg instead (e.g. rg -n pattern dir).`
+					: `Use the built-in grep tool; orch ctx and rg are not installed.`),
 	},
 	{
 		name: "deny-cat-head-tail",
 		id: "cat-head-tail",
 		match: denyCatHeadTail,
-		reason: (orch) =>
+		reason: ({ orch }) =>
 			`${guardMarker} (deny-cat-head-tail): a bare cat, head, tail or sed -n floods the context.\n` +
 			(orch
 				? `Use the built-in read tool with offset and limit; for a function or type body prefer orch ctx sym Name.`
@@ -387,8 +422,8 @@ const rules: rule[] = [
 	},
 ];
 
-// ORCH_TOOL_GUARD_SKIP=find-chains,sed-inplace,cat-head-tail disables single
-// rules by short name or by full name.
+// ORCH_TOOL_GUARD_SKIP=find-chains,find,sed-inplace,cat-head-tail disables
+// single rules by short name or by full name.
 function activeRules(): rule[] {
 	const raw = process.env.ORCH_TOOL_GUARD_SKIP ?? "";
 	const skip = new Set(
@@ -404,16 +439,18 @@ export default function (pi: ExtensionAPI) {
 	// The ctx-only gate shell already refuses everything but one orch ctx call,
 	// and has its own guard, so this one has to stay silent there.
 	if (process.env.ORCH_CTX_ONLY_READY) return;
-	const orch = orchardOnPath();
+	const ready = installed();
 	const guard = process.env.ORCH_TOOL_GUARD !== "off";
 	const active = guard ? activeRules() : [];
 
-	// A blocked command line runs the next time it is asked for, and is never
-	// blocked again: the tool may truly need it, and a block never repeats.
-	const allowedAfterBlock = new Set<string>();
+	// A blocked command stays blocked, so the model learns not to use it. From
+	// the third block in a row the reason also says the guard will not give way.
+	// Any call the guard lets through ends the run.
+	const giveWay = `\nBlocked 3 times: use the replacement above; this guard does not give way.`;
+	let blocksInRow = 0;
 
 	let remindersByResult = false;
-	if (orch) {
+	if (ready.orch) {
 		try {
 			pi.on("tool_result", async (event: ToolResultEvent) => {
 				if (!isSearch(event.toolName, event.input)) return undefined;
@@ -437,14 +474,17 @@ export default function (pi: ExtensionAPI) {
 	pi.on("tool_call", async (event: ToolCallEvent) => {
 		const input = event.input as Record<string, unknown>;
 		const line = event.toolName === "bash" ? String(input.command ?? "").trim() : "";
-		if (!line) return undefined;
-		if (allowedAfterBlock.has(line)) return undefined;
-		for (const rule of active) {
-			if (!rule.match(line)) continue;
-			allowedAfterBlock.add(line);
-			return { block: true, reason: rule.reason(orch) };
+		if (!line) {
+			blocksInRow = 0;
+			return undefined;
 		}
-		if (!orch || !guard || remindersByResult || fallbackReminded) return undefined;
+		for (const rule of active) {
+			if (!rule.match(line, ready)) continue;
+			blocksInRow += 1;
+			return { block: true, reason: rule.reason(ready) + (blocksInRow >= 3 ? giveWay : "") };
+		}
+		blocksInRow = 0;
+		if (!ready.orch || !guard || remindersByResult || fallbackReminded) return undefined;
 		if (event.toolName !== "bash" || !commandSearch(line)) return undefined;
 		fallbackReminded = true;
 		return { block: true, reason: reminder };
