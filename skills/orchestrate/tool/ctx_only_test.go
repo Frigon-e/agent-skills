@@ -25,6 +25,7 @@ func TestCtxOnlyExtensionAllowsOnlyOneOrchCtxCall(t *testing.T) {
 		`orch ctx batch -q "find:Code that saves a payment method" -q "symbol:Gateway refs=3" -q "text:foo glob=internal/**"`,
 		`orch ctx text 'a|b(c)$' --compact --limit 3`,
 		`orch ctx sym Service.saveMethod --refs 2`,
+		`orch ctx refs Service.saveMethod --refs 2`,
 		`orch ctx find "Code that lists payment gateways"`,
 	}
 	blocked := []string{
@@ -73,12 +74,16 @@ console.log(JSON.stringify(out));
 		t.Fatalf("extension did not acknowledge guarded activation: %q", got)
 	}
 	var got map[string]string
-	if err := json.Unmarshal(out[strings.Index(string(out), "{"):], &got); err != nil {
+	start := strings.Index(string(out), "{")
+	if start < 0 {
+		t.Fatalf("node produced no JSON result:\n%s", out)
+	}
+	if err := json.Unmarshal(out[start:], &got); err != nil {
 		t.Fatalf("%v\n%s", err, out)
 	}
 	for _, c := range allowed {
-		if got[c] != "" {
-			t.Errorf("blocked an allowed call %q: %s", c, got[c])
+		if reason, ok := got[c]; !ok || reason != "" {
+			t.Errorf("allowed call %q: present %v, reason %q", c, ok, reason)
 		}
 	}
 	for _, c := range blocked {

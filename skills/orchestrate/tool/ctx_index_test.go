@@ -215,7 +215,9 @@ func TestCtxCacheIsKeyedByHeadAndTheDirtyDiff(t *testing.T) {
 	for _, args := range [][]string{{"add", "."}, {"-c", "user.name=t", "-c", "user.email=t@e.com", "commit", "-q", "-m", "x"}} {
 		cmd := exec.Command("git", args...)
 		cmd.Dir = code
-		cmd.Run()
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
 	}
 	if after := ctxCacheDir(code); after == clean || strings.HasSuffix(after, "-clean") == false {
 		t.Errorf("a new commit: %s (was %s)", after, clean)

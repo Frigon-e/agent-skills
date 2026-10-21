@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"testing"
 )
@@ -41,8 +40,6 @@ func fakeHits(n int) rgResult {
 	}
 	return res
 }
-
-var hitLocRe = regexp.MustCompile(`(?m)^(p/f\d+\.go)\n|^ +(\d+): needle`)
 
 // locsOf lists the "path:line" of the match rows of a view.
 func locsOf(v *ctxView) []string {
@@ -82,6 +79,15 @@ func TestTextPagesAreDisjointStableAndCoverTheList(t *testing.T) {
 		}
 		if v.Total != 25 {
 			t.Errorf("page %d total %d", page, v.Total)
+		}
+		if page == 1 {
+			want := "showing 1-10 of 25; next: --page 2; left out: p/f03.go (2), p/f04.go (3), p/f05.go (3), p/f06.go (3), p/f07.go (3), +1 more files"
+			if v.Pager != want {
+				t.Errorf("first-page footer = %q, want %q", v.Pager, want)
+			}
+		}
+		if page == 3 && strings.Contains(v.Pager, "left out") {
+			t.Errorf("the last page left nothing out: %q", v.Pager)
 		}
 	}
 	if len(seen) != 25 || len(order) != 25 {
@@ -202,6 +208,12 @@ search)
 	printf ']}\n';;
 esac
 `), 0o755)
+	p1 := c.must("ctx", "find", "anything", "--limit", "4")
+	wantContains(t, c.log(c.jbCalls), "--limit 12")
+	wantContains(t, p1, "showing 1-4 of at least 11; next: --page 2; left out: pay/f05.go (1), pay/f06.go (1), pay/f07.go (1), pay/f08.go (1), pay/f09.go (1), +2 more files")
+	if strings.Contains(p1, "f05.go\n") {
+		t.Errorf("the left-out files are named, not shown:\n%s", p1)
+	}
 	p2 := c.must("ctx", "find", "anything", "--limit", "4", "--page", "2")
 	wantContains(t, p2, "pay/f05.go", "pay/f08.go", "showing 5-8 of at least 11; next: --page 3; left out: pay/f09.go (1), pay/f10.go (1), pay/f11.go (1)")
 	if strings.Contains(p2, "func F4()") || strings.Contains(p2, "func F9()") {
@@ -229,59 +241,6 @@ func TestPageFooterInABatchSpeaksInQueryKeys(t *testing.T) {
 	}
 	if got := pageFooter(0, 4, 31, 4, 1, false, false, narrowText); got != "showing 1-4 of 31; next: --page 2" {
 		t.Errorf("a single call keeps the flag form: %q", got)
-	}
-}
-
-func TestFooterNamesTheFilesOfTheHitsItLeftOut(t *testing.T) {
-	dir := t.TempDir()
-	os.MkdirAll(filepath.Join(dir, "p"), 0o755)
-	for i := 0; i < 10; i++ {
-		os.WriteFile(filepath.Join(dir, "p", fmt.Sprintf("f%02d.go", i)), []byte("needle\nneedle\nneedle\n"), 0o644)
-	}
-	e := &ctxEnv{Code: dir}
-	v := e.textView(rgQuery{Pattern: "needle"}, "", fakeHits(25), 10, 1, 0, ctxFmt{})
-	want := "showing 1-10 of 25; next: --page 2; left out: p/f03.go (2), p/f04.go (3), p/f05.go (3), p/f06.go (3), p/f07.go (3), +1 more files"
-	if v.Pager != want {
-		t.Errorf("footer = %q, want %q", v.Pager, want)
-	}
-	if v := e.textView(rgQuery{Pattern: "needle"}, "", fakeHits(25), 10, 3, 0, ctxFmt{}); strings.Contains(v.Pager, "left out") {
-		t.Errorf("the last page left nothing out: %q", v.Pager)
-	}
-}
-
-func TestFindLooksPastItsPageToNameWhatTheNextPageHolds(t *testing.T) {
-	c := newCtxHarness(t)
-	jb := filepath.Join(c.jbDir, "jbcontext")
-	for i := 1; i <= 11; i++ {
-		src := strings.Repeat("\n", i-1) + fmt.Sprintf("func F%d() {}\n", i)
-		os.WriteFile(filepath.Join(c.repo, "pay", fmt.Sprintf("f%02d.go", i)), []byte(src), 0o644)
-	}
-	c.git("add", ".")
-	c.git("commit", "-q", "-m", "hits")
-	head, _ := git(c.repo, "rev-parse", "HEAD")
-	os.WriteFile(jb, []byte(`#!/bin/sh
-echo "$*" >> "`+c.jbCalls+`"
-case "$1" in
-status) echo '{"type":"status_result","indices":[{"snapshots":[{"revision":"`+head+`","createdAt":1}]}]}';;
-watch) printf 'Watch daemon running (pid 7)\n';;
-search)
-	lim=5
-	while [ $# -gt 0 ]; do [ "$1" = --limit ] && lim=$2; shift; done
-	n=11; [ "$lim" -lt "$n" ] && n=$lim
-	printf '{"type":"search_result","results":['
-	i=1; while [ $i -le $n ]; do
-		[ $i -gt 1 ] && printf ','
-		printf '{"result":{"sourcePosition":{"relativePath":"pay/f%02d.go"}},"content":"func F%d() {}","contentStartLine":%d}' $i $i $i
-		i=$((i+1))
-	done
-	printf ']}\n';;
-esac
-`), 0o755)
-	out := c.must("ctx", "find", "anything", "--limit", "4")
-	wantContains(t, c.log(c.jbCalls), "--limit 12")
-	wantContains(t, out, "showing 1-4 of at least 11; next: --page 2; left out: pay/f05.go (1), pay/f06.go (1), pay/f07.go (1), pay/f08.go (1), pay/f09.go (1), +2 more files")
-	if strings.Contains(out, "f05.go\n") {
-		t.Errorf("the left-out files are named, not shown:\n%s", out)
 	}
 }
 

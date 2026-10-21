@@ -259,6 +259,9 @@ func TestProjectRootsComeFromManifestsNotDirectoryNames(t *testing.T) {
 	for _, r := range projectRoots(code) {
 		got[r.Dir] = r.Langs
 	}
+	if len(got) != 4 {
+		t.Fatalf("project roots = %v, want four manifest roots", got)
+	}
 	for dir, lang := range map[string]string{"": "go", "frontend/": "typescript", "services/api/": "python", "core/": "go"} {
 		found := false
 		for _, l := range got[dir] {
@@ -268,14 +271,14 @@ func TestProjectRootsComeFromManifestsNotDirectoryNames(t *testing.T) {
 			t.Errorf("root %q lacks %s: %v", dir, lang, got)
 		}
 	}
-	if r, _ := rootFor(code, "core/core.go", "go"); r.Dir != "core/" {
-		t.Errorf("nested go root = %q", r.Dir)
+	if r, ok := rootFor(code, "core/core.go", "go"); !ok || r.Dir != "core/" {
+		t.Errorf("nested go root = %q, found %v", r.Dir, ok)
 	}
-	if r, _ := rootFor(code, "main.go", "go"); r.Dir != "" {
-		t.Errorf("root-level go root = %q", r.Dir)
+	if r, ok := rootFor(code, "main.go", "go"); !ok || r.Dir != "" {
+		t.Errorf("root-level go root = %q, found %v", r.Dir, ok)
 	}
-	if r, _ := rootFor(code, "services/api/api/main.py", "python"); r.Dir != "services/api/" {
-		t.Errorf("python root = %q", r.Dir)
+	if r, ok := rootFor(code, "services/api/api/main.py", "python"); !ok || r.Dir != "services/api/" {
+		t.Errorf("python root = %q, found %v", r.Dir, ok)
 	}
 	trees := codeTreesFor(code, []string{"services/api/api/main.py"})
 	if len(trees) == 0 || !strings.HasPrefix(trees[0], "services/api") {

@@ -151,7 +151,7 @@ func TestViewCutSaysWhatWasLeftOutAndTheFlag(t *testing.T) {
 	if !strings.Contains(out, "cut at about 400 characters: ") || !strings.Contains(out, "--full raises the bounded cap") {
 		t.Errorf("no cut note:\n%s", out)
 	}
-	if shown := count(out, "x\n") + count(out, "xxxx\n") - 0; shown == 0 || count(out, ": xxxxxxxxxxxxxxxxxxxx") >= 100 {
+	if shown := count(out, ": xxxxxxxxxxxxxxxxxxxx"); shown == 0 || shown >= 100 {
 		t.Errorf("the cap did not apply:\n%s", out)
 	}
 	b.Reset()
@@ -624,6 +624,9 @@ func TestCtxErrorsAreStructuredOnStdoutWithExitCode2(t *testing.T) {
 			want = strings.TrimPrefix(strings.TrimPrefix(want, "error: "), "help: ")
 			wantContains(t, ctxTestStrings(t, out), want)
 		}
+		if c.errw.Len() != 0 {
+			t.Errorf("%v wrote to stderr: %s", tc.args, c.errw.String())
+		}
 	}
 	// A plan with one bad unit of work is a partial batch, not a failure.
 	c.stdin.WriteString(`{"lookups":[{"kind":"text","query":"StartCheckout"},{"kind":"read","path":"pay/missing.go"},{"kind":"text","query":"zzzNone"}]}`)
@@ -643,6 +646,7 @@ func TestCtxHomeShowsLiveStateAndHelpAndVersionAreCheap(t *testing.T) {
 	if c.log(c.jbCalls) != "" && strings.Contains(c.log(c.jbCalls), "index") {
 		t.Errorf("the home view refreshed the index: %s", c.log(c.jbCalls))
 	}
+	jb, rg, gopls := c.log(c.jbCalls), c.log(c.rgCalls), c.log(c.gCall)
 	if out := c.must("ctx", "--version"); out != ctxVersion+"\n" {
 		t.Errorf("--version = %q", out)
 	}
@@ -670,6 +674,9 @@ func TestCtxHomeShowsLiveStateAndHelpAndVersionAreCheap(t *testing.T) {
 	}
 	if found["--tests"] != "none" {
 		t.Errorf("test default=%#v", found)
+	}
+	if c.log(c.jbCalls) != jb || c.log(c.rgCalls) != rg || c.log(c.gCall) != gopls {
+		t.Error("help or version invoked a context tool")
 	}
 }
 

@@ -124,7 +124,7 @@ func TestBriefLookAlikesAreConceptChunksOfCodeOutsideTheOwns(t *testing.T) {
 	b := e.Briefs([]briefInput{{ID: "p", Title: "Svc Thing", Text: "Build the svc thing.\n\n#### Acceptance\n- the svc thing works\n", Owns: []string{"svc/own.go"}}})[0]
 
 	like := strings.Join(b.Like, "\n")
-	if !strings.Contains(like, "- `svc/other.go:2-4` in func SvcThing via concept \"") && !strings.Contains(like, "svc/other.go:") {
+	if !strings.Contains(like, "- `svc/other.go:3-4` in func SvcThing via concept \"") {
 		t.Fatalf("a concept chunk of code outside the owns is missing (notes %v):\n%s", e.Notes(), like)
 	}
 	for _, bad := range []string{"svc/own.go", "x_test.go", "openapi.json", "run.sh", "x.pb.go"} {
@@ -158,7 +158,7 @@ func TestMissingNamesKeepIdentifiersRoutesAndPathsOnly(t *testing.T) {
 }
 
 func TestBriefSheetKeepsOnlySymbolsThePackageDefinesExtendsOrCalls(t *testing.T) {
-	pl := &briefPlan{in: briefInput{Owns: []string{"pay"}}, accept: []string{"Wired lists Named"}}
+	pl := &briefPlan{in: briefInput{Owns: []string{"pay"}}, accept: []string{"Wired lists Named"}, ptrs: []pointer{{sym: "Pointed"}}}
 	def := func(where string, callers ...string) *symFact {
 		return &symFact{Defs: []symDef{{Where: where, Callers: callers}}}
 	}
@@ -168,8 +168,10 @@ func TestBriefSheetKeepsOnlySymbolsThePackageDefinesExtendsOrCalls(t *testing.T)
 	}{
 		"Defined":   {def("pay/a.go:3"), true},
 		"Called":    {def("store/q.go:3", "pay/b.go:9"), true},
+		"Extended":  {&symFact{Defs: []symDef{{Where: "store/q.go:3", Impls: []string{"pay/stripe.go:7"}}}}, true},
 		"Elsewhere": {def("config/c.go:3", "config/d.go:4"), false},
 		"Named":     {def("config/c.go:3"), true},
+		"Pointed":   {def("config/c.go:3"), true},
 	} {
 		if got := pl.symKept(name, c.f); got != c.want {
 			t.Errorf("symKept(%s) = %v, want %v", name, got, c.want)
@@ -304,7 +306,7 @@ func TestConceptQueriesAreShortKeyPhrasesNotSpecSentences(t *testing.T) {
 			t.Errorf("query %q has %d words", q, n)
 		}
 	}
-	if !strings.HasPrefix(pl.concepts[0], "Gateway Registry registry") && !strings.HasPrefix(pl.concepts[0], "Gateway Registry") {
+	if !strings.HasPrefix(pl.concepts[0], "Gateway Registry") {
 		t.Errorf("the first query is names and purpose: %q", pl.concepts[0])
 	}
 	if strings.Contains(strings.Join(pl.concepts, "|"), "off-session charge of a saved method") {
