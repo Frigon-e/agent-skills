@@ -727,7 +727,7 @@ func TestGateStateExecutionFailuresHaveTypedReasons(t *testing.T) {
 			h := setup(t)
 			dir := h.gateRepo(1)
 			h.fakePi(gatePasses(map[string]string{"adv-a": tc.reply}))
-			if code, out := h.run("gate", "spec.md"); code != 1 {
+			if code, out := h.run("gate", "spec.md", "--runner", "pi:"+gateModelDef); code != 1 {
 				t.Fatalf("required execution failure approved: %s", out)
 			}
 			rec := readRecord(t, dir)
