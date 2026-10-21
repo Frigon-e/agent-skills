@@ -464,6 +464,18 @@ unchanged check remain separate layers, not an operating-system sandbox;
 ignored files and outside paths are not covered by that check. Gate records,
 reports and compare show `ctx_shell`; missing historical fields display `open`.
 
+`skills/orchestrate/tool/pi_ctx_reminder.ts` is a user-level pi extension (the
+orchestrator installs it under `~/.pi/agent/extensions/`) that appends a
+short reminder to every raw search: a bash `rg`, `grep`, `egrep`, `fgrep`,
+`ag`, `fd`, `find` or `git grep`, including after `cd x &&` or inside a pipe,
+and pi's built-in `grep`, `find` or `ls`. The reminder names the single
+`orch ctx batch` call that replaces several searches. It does not block: the
+search still runs and the reminder joins its result, so the model sees it
+right away. A pi build without the `tool_result` hook instead blocks the first
+search of the session once, then lets every later search through. It stays
+silent when `orch` is not on PATH and inside the ctx-only gate shell. Its
+decision table runs in node: `go test -run 'CtxReminder' .` in `tool`.
+
 Harness verification uses only local mock endpoints, never a paid model:
 
 ```sh
