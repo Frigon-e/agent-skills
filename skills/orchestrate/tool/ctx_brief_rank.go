@@ -39,20 +39,6 @@ func acceptanceBullets(text string) []string {
 	return out
 }
 
-// ownsQuery turns an owned directory (or file) into a concept query: its last
-// two names as words.
-func ownsQuery(o string) string {
-	o = strings.Trim(strings.TrimPrefix(strings.TrimSpace(o), "./"), "/")
-	o = strings.TrimSuffix(o, filepath.Ext(o))
-	parts := strings.Split(o, "/")
-	parts = parts[max(0, len(parts)-2):]
-	q := strings.NewReplacer("_", " ", "-", " ").Replace(strings.Join(parts, " "))
-	if len(strings.Fields(q)) == 0 || len(q) < 4 {
-		return ""
-	}
-	return q
-}
-
 // missingWorthy keeps the names a "not found" line is useful for: identifiers,
 // routes and file paths, not globs or bare test-file names.
 func missingWorthy(n string) bool {
@@ -577,10 +563,60 @@ func keyPhrase(s string, n int) string {
 	return strings.Join(out, " ")
 }
 
-// makeQueries sets the concept queries of a brief: the top three names the
-// package defines or builds with a short purpose phrase, key phrases of the
-// "builds" lines and the acceptance bullets (at most eight words each), and one
-// per owned directory. Long spec sentences are never sent.
+const (
+	queryMinWords = 4  // a concept query carries meaning or is not sent
+	queryMaxWords = 30 // a sentence is cut here
+)
+
+var (
+	sentenceEndRe = regexp.MustCompile(`[.!?]+(?:\s|$)`)
+	commandRe     = regexp.MustCompile(`^\s*(?:[$>]\s*|` + "`" + `?(?:cd|go|npm|pnpm|yarn|make|orch|git|bash|sh|python3?|pytest|cargo|rg|fd)\s)`)
+	plainWordRe   = regexp.MustCompile(`^[A-Za-z][A-Za-z'-]*[,;:.]?$`)
+	verbishRe     = regexp.MustCompile(`(?i)^(?:is|are|be|has|have|do|does|can|must|should|will|show|shows|run|runs|fail|fails|pass|passes|return|returns|send|sends|create|creates|reject|rejects|keep|keeps|print|prints|write|writes|read|reads|use|uses|build|builds|add|adds|remove|removes|record|records|match|matches)[,;:.]?$|(?i)^[a-z]{4,}(?:ed|es|s)[,;:.]?$`)
+)
+
+// sentenceQuery is the first sentence of a spec bullet, whole, cut at
+// queryMaxWords. It is "" when the result has fewer than queryMinWords words.
+func sentenceQuery(s string) string {
+	s = flat(s)
+	if loc := sentenceEndRe.FindStringIndex(s); loc != nil {
+		s = s[:loc[0]+1]
+	}
+	w := strings.Fields(s)
+	if len(w) > queryMaxWords {
+		w = w[:queryMaxWords]
+	}
+	if len(w) < queryMinWords {
+		return ""
+	}
+	return strings.Join(w, " ")
+}
+
+// behaviourQuery is an acceptance bullet as a query, only when it describes
+// behaviour: not a command line, a file name or a flag list, and it has plain
+// words with a verb in them.
+func behaviourQuery(s string) string {
+	if commandRe.MatchString(s) || strings.Contains(s, "&&") {
+		return ""
+	}
+	plain, verb := 0, false
+	for _, w := range strings.Fields(s) {
+		if plainWordRe.MatchString(w) {
+			plain++
+			verb = verb || verbishRe.MatchString(w)
+		}
+	}
+	if plain < queryMinWords || !verb {
+		return ""
+	}
+	return sentenceQuery(s)
+}
+
+// makeQueries sets the concept queries of a brief: the first sentence of each
+// of the first three "builds" lines, whole, then the acceptance bullets that
+// describe behaviour; with no builds line, the package title or the first
+// sentence of its body. Owned directories narrow where the queries run (the
+// code trees) and are not queries. No query has fewer than queryMinWords words.
 func (pl *briefPlan) makeQueries() {
 	var names []string
 	add := func(n string) {
@@ -610,30 +646,23 @@ func (pl *briefPlan) makeQueries() {
 	}
 	var qs []string
 	push := func(q string) {
-		if len(strings.Fields(q)) >= 2 {
+		if len(strings.Fields(q)) >= queryMinWords {
 			qs = addUniq(qs, q, 40)
 		}
 	}
-	push(strings.TrimSpace(strings.Join(names, " ") + " " + pl.purpose))
 	for i, l := range pl.builds {
 		if i < 3 {
-			push(keyPhrase(l, 8))
+			push(sentenceQuery(l))
 		}
 	}
 	for i, l := range pl.accept {
 		if i < 3 {
-			push(keyPhrase(l, 8))
+			push(behaviourQuery(l))
 		}
 	}
-	dirs := 0
-	for _, pass := range []bool{true, false} { // directories first
-		for _, o := range pl.in.Owns {
-			if dirs < dossierDirs && strings.HasSuffix(o, "/") == pass {
-				if q := ownsQuery(o); q != "" {
-					push(q)
-					dirs++
-				}
-			}
+	if len(pl.builds) == 0 {
+		if push(sentenceQuery(pl.in.Title)); len(qs) == 0 {
+			push(sentenceQuery(pl.in.Body))
 		}
 	}
 	pl.concepts = qs

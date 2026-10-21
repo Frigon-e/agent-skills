@@ -375,6 +375,14 @@ Drop any slot that does not apply; do not force the whole template.
 - Good (short): `Code that retries failed payments`.
 - Bad (noun list): `payment checkout method customer store`.
 
+Dossiers and briefs build their own concept queries from the spec package, in
+the same plain language and with no model: the first sentence of each of the
+first three Builds bullets as written (at most 30 words), then each of the first
+three acceptance bullets that describes behaviour (command lines and bare file
+names are skipped). With no Builds bullets the package title is used, else the
+first sentence of its body. A query of fewer than 4 words is never sent. Owned
+directories narrow the search to their code tree; they are not queries.
+
 `orch ctx find --help`, the home view, the plan-arm planner prompt and the gate's
 per-item checklist queries (`Code that implements <item>`) use the same form.
 A short noun-list query, or an answer with at most one hit, gets one line:
