@@ -111,6 +111,196 @@ func TestReuseQueriesCountCompletionNotScheduling(t *testing.T) {
 	}
 }
 
+// jbOrderFake is a jbcontext stand-in for `search`. The query "q<k>" gets one hit
+// in lib/f<k>.go after <dir>/delay.<k> seconds (0.05 when absent), or an error
+// when <dir>/fail.<k> exists, and answers 429 to the first <dir>/limit calls. With <dir>/onefile every query hits lib/f0.go, q0
+// at line 1 and any other at line 2. It logs the number of searches running at
+// once to conc.log and the order the answers left in done.log.
+func jbOrderFake(t *testing.T, n int, slots int) (code, dir string) {
+	t.Helper()
+	files := map[string]string{}
+	for k := 0; k < n; k++ {
+		files[fmt.Sprintf("lib/f%d.go", k)] = "package lib\nfunc F() {}\n"
+	}
+	code = rankRepo(t, files)
+	dir = t.TempDir()
+	bin := filepath.Join(dir, "jbcontext")
+	script := `#!/bin/sh
+D="` + dir + `"
+[ "$1" = search ] || exit 0
+for last; do :; done
+k=${last#q}
+echo "$$" >> "$D/calls.log"
+if [ -f "$D/limit" ] && [ "$(wc -l < "$D/calls.log" | tr -d ' ')" -le "$(cat "$D/limit")" ]; then
+  echo "Limit reached. Please try again later (HTTP 429)" >&2
+  exit 1
+fi
+mkdir "$D/run.$$"
+n=$(ls "$D" | grep -c '^run\.')
+echo "$n" >> "$D/conc.log"
+sleep "$(cat "$D/delay.$k" 2>/dev/null || echo 0.05)"
+echo "$k" >> "$D/done.log"
+rmdir "$D/run.$$"
+if [ -f "$D/fail.$k" ]; then echo "jbcontext exploded" >&2; exit 1; fi
+f=$k; c='package lib'; l=1
+if [ -f "$D/onefile" ]; then
+  f=0
+  if [ "$k" != 0 ]; then c='func F() {}'; l=2; fi
+fi
+printf '{"type":"search_result","results":[{"result":{"sourcePosition":{"relativePath":"lib/f%s.go"}},"content":"%s\\n","contentStartLine":%s}]}\n' "$f" "$c" "$l"
+`
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("ORCH_JBCONTEXT", bin)
+	t.Setenv("ORCH_JB_SLOTS", fmt.Sprint(slots))
+	t.Setenv("ORCH_JB_BACKOFF_MS", "10")
+	return code, dir
+}
+
+func conceptJobs(n int) []dossierJob {
+	var jobs []dossierJob
+	for k := 0; k < n; k++ {
+		jobs = append(jobs, dossierJob{name: fmt.Sprintf("q%d", k)})
+	}
+	return jobs
+}
+
+func TestRunJobsReturnsAnswersInJobOrderWhateverFinishesFirst(t *testing.T) {
+	code, dir := jbOrderFake(t, 10, 4)
+	for k := 0; k < 10; k++ { // the earlier the job, the later its answer
+		os.WriteFile(filepath.Join(dir, fmt.Sprintf("delay.%d", k)), []byte(fmt.Sprintf("0.%d", 9-k)), 0o644)
+	}
+	outs := newCtxEnv(code, ctxOpts{}).runJobs(conceptJobs(10))
+	for k, o := range outs {
+		if o.err != nil || len(o.hits) != 1 || o.hits[0].Path != fmt.Sprintf("lib/f%d.go", k) {
+			t.Fatalf("job %d got %+v", k, o)
+		}
+	}
+	done := jbRateLines(dir, "done.log")
+	if len(done) != 10 || strings.Join(done, " ") == "0 1 2 3 4 5 6 7 8 9" {
+		t.Fatalf("the searches did not finish out of order, so the test proves nothing: %v", done)
+	}
+}
+
+func TestRunJobsNeverRunsMoreSearchesThanTheSlotCap(t *testing.T) {
+	for _, slots := range []int{2, 7} {
+		t.Run(fmt.Sprint(slots), func(t *testing.T) {
+			code, dir := jbOrderFake(t, 24, slots)
+			os.WriteFile(filepath.Join(dir, "delay.0"), []byte("0.2"), 0o644)
+			newCtxEnv(code, ctxOpts{}).runJobs(conceptJobs(24))
+			if got := jbRateMax(dir); got > slots || got < min(slots, 2) {
+				t.Fatalf("most searches at once = %d, cap %d", got, slots)
+			}
+		})
+	}
+}
+
+func TestRunJobsReportsAFailedLookupInItsOwnPlace(t *testing.T) {
+	code, dir := jbOrderFake(t, 6, 3)
+	os.WriteFile(filepath.Join(dir, "fail.3"), nil, 0o644)
+	outs := newCtxEnv(code, ctxOpts{}).runJobs(conceptJobs(6))
+	for k, o := range outs {
+		switch {
+		case k == 3 && (o.err == nil || len(o.hits) != 0):
+			t.Fatalf("job 3 should have failed: %+v", o)
+		case k != 3 && (o.err != nil || len(o.hits) != 1 || o.hits[0].Path != fmt.Sprintf("lib/f%d.go", k)):
+			t.Fatalf("job %d got %+v", k, o)
+		}
+	}
+}
+
+func TestRunJobsAsksAgainForSearchesTheServiceRefused(t *testing.T) {
+	code, dir := jbOrderFake(t, 8, 4)
+	os.WriteFile(filepath.Join(dir, "limit"), []byte("12"), 0o644)
+	waits := 0
+	old := dossierCooldownWait
+	dossierCooldownWait = func(bin string) {
+		waits++
+		jbCoolMu.Lock()
+		delete(jbCoolUntil, bin)
+		jbCoolMu.Unlock()
+	}
+	defer func() { dossierCooldownWait = old }()
+	outs := newCtxEnv(code, ctxOpts{}).runJobs(conceptJobs(8))
+	for k, o := range outs {
+		if o.err != nil || len(o.hits) != 1 || o.hits[0].Path != fmt.Sprintf("lib/f%d.go", k) {
+			t.Fatalf("job %d got %+v", k, o)
+		}
+	}
+	if waits == 0 {
+		t.Fatal("no search was refused, so the test proves nothing")
+	}
+}
+
+func TestReuseCandidatesAreTheSameWhicheverSearchFinishesFirst(t *testing.T) {
+	var runs []string
+	for _, firstIsSlow := range []bool{true, false} {
+		code, dir := jbOrderFake(t, 1, 4)
+		os.WriteFile(filepath.Join(dir, "onefile"), nil, 0o644)
+		slow, fast := "0", "1"
+		if !firstIsSlow {
+			slow, fast = fast, slow
+		}
+		os.WriteFile(filepath.Join(dir, "delay."+slow), []byte("0.5"), 0o644)
+		os.WriteFile(filepath.Join(dir, "delay."+fast), []byte("0.01"), 0o644)
+		items := []gateItem{{ID: "p#1", Package: "p", Text: "Build it.", Queries: []string{"q0", "q1"}, Kind: "builds"}}
+		got := newCtxEnv(code, ctxOpts{}).reuseCandidates(items, []string{"mine/"}, "it")
+		if len(got) != 1 || len(got[0].Cands) != 2 || got[0].Cands[0].MatchLine != 1 || got[0].Cands[1].MatchLine != 2 {
+			t.Fatalf("candidates are not in query order: %+v", got)
+		}
+		runs = append(runs, fmt.Sprint(got[0].Cands, got[0].QueriesRun))
+	}
+	if runs[0] != runs[1] {
+		t.Fatalf("the candidates changed with the finishing order:\n%s\n%s", runs[0], runs[1])
+	}
+}
+
+func TestDossierLookupsCarryWhenTheyStartedAndHowLongTheyRan(t *testing.T) {
+	code, dir := jbOrderFake(t, 2, 4)
+	os.WriteFile(filepath.Join(dir, "delay.1"), []byte("0.3"), 0o644)
+	e := newCtxEnv(code, ctxOpts{})
+	items := []gateItem{{ID: "p#1", Package: "p", Text: "Build it.", Queries: []string{"q0", "q1"}, Kind: "builds"}}
+	ds := newDossierSet(e, &spec{packages: []*specPackage{{id: "p"}}}, map[string]string{"p": "Build it."})
+	ds.docs["p"] = &ctxBrief{ID: "p"}
+	ds.cands["p"] = e.reuseCandidates(items, []string{"mine/"}, "it")
+	b, err := json.Marshal(ds.manifest(nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m struct {
+		Lookups      []struct{ ID, Unit string }
+		LookupTiming []struct {
+			ID        string `json:"id"`
+			StartedAt string `json:"started_at"`
+			ElapsedMS *int64 `json:"elapsed_ms"`
+		} `json:"lookup_timing"`
+	}
+	if err := json.Unmarshal(b, &m); err != nil {
+		t.Fatal(err)
+	}
+	ids := map[string]bool{}
+	for _, l := range m.Lookups {
+		if l.Unit == "concept" {
+			ids[l.ID] = true
+		}
+	}
+	slowest := int64(0)
+	for _, tm := range m.LookupTiming {
+		if !ids[tm.ID] || tm.StartedAt == "" || tm.ElapsedMS == nil {
+			t.Fatalf("bad timing entry %+v", tm)
+		}
+		delete(ids, tm.ID)
+		slowest = max(slowest, *tm.ElapsedMS)
+	}
+	if len(ids) != 0 || slowest < 300 {
+		t.Fatalf("lookups without timing: %v; slowest %d ms", ids, slowest)
+	}
+	if strings.Contains(string(b), `"Timing"`) {
+		t.Fatal("the timing leaked into the lookup records")
+	}
+}
+
 func readyCLIPacket() *gateQuestionPacket {
 	return &gateQuestionPacket{Goal: "Make command dispatch predictable", KnownFacts: []string{"The parser accepts --help and rejects an empty command."}, Unknown: "Which empty-command behavior should ship?", Options: []gatePacketOption{{"a", "Print help", "Shows available commands", "More stdout output"}, {"b", "Return an error", "Scripts detect missing input", "Users must request help separately"}}, Recommendation: "a", Rationale: "The owner wants discoverable commands", Authority: "Owner decides user-visible defaults", NextAction: "Owner selects an option, then the lead adds CLI acceptance tests"}
 }

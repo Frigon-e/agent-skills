@@ -435,6 +435,17 @@ ignore). jbcontext indexes a git revision (`index --revision`, default HEAD), so
   of absence. When the byte budget cuts something it cuts the notes, then the
   lowest-scored candidates, then source previews, and says so in one line; a
   section with nothing to show is left out.
+- The dossier plans every search of every package first, then runs the symbol
+  lookups, the text searches and the concept searches at the same time (one
+  concept pool for all packages, 5 wide at most and never above the slot cap)
+  and puts the answers together in the order the searches were planned, so the
+  text does not depend on which search finished first. A concept search the
+  service refused (429) is asked again after the cooldown, up to 2 rounds. On the
+  CRM spec a wider pool was refused more (4 wide: none, 6: 3, 8: 25, 16: 64 of 132
+  searches), and a refused search is a lost lookup, so the width follows the
+  service, not the slots. `dossier-manifest.json` has a `lookup_timing` list
+  (`id`, `started_at`, `elapsed_ms`) for every lookup that ran a search; a symbol
+  lookup carries the time of its batch.
 
 ## Staleness
 

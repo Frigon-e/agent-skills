@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 )
 
 // A brief is what code can establish about a piece of work before anyone
@@ -222,72 +223,97 @@ func (e *ctxEnv) prepareBrief(in briefInput) *briefPlan {
 	return pl
 }
 
-// Briefs builds one brief per input. The symbols of all inputs go in one batch,
-// so one language server serves them all.
-func (e *ctxEnv) Briefs(ins []briefInput) []*ctxBrief {
-	var plans []*briefPlan
+// briefRun is Briefs in halves: briefsPrepare plans every lookup, symbols runs
+// the symbol lookups, and finish builds the briefs from the answers. The symbol
+// lookups and the jobs may run at the same time between prepare and finish.
+type briefRun struct {
+	e       *ctxEnv
+	plans   []*briefPlan
+	goNames []string
+	tsJobs  []tsJob
+	jobs    []dossierJob
+	owner   []*briefPlan // the plan of jobs[i]
+	jbReady bool
+
+	goFacts    map[string]*symFact
+	tsFacts    map[tsJob]*symFact
+	symStarted time.Time
+	symElapsed time.Duration
+}
+
+func (e *ctxEnv) briefsPrepare(ins []briefInput) *briefRun {
+	r := &briefRun{e: e, jbReady: e.jbMissing() == ""}
 	for _, in := range ins {
-		plans = append(plans, e.prepareBrief(in))
+		r.plans = append(r.plans, e.prepareBrief(in))
 	}
 	goSeen := map[string]bool{}
-	var goNames []string
 	tsSeen := map[tsJob]bool{}
-	var tsJobs []tsJob
-	for _, pl := range plans {
+	for _, pl := range r.plans {
 		for _, s := range pl.goSyms {
 			if !goSeen[s] {
 				goSeen[s] = true
-				goNames = append(goNames, s)
+				r.goNames = append(r.goNames, s)
 			}
 		}
 		for _, s := range pl.tsSyms {
 			if j := (tsJob{pl.tsRoot, s}); !tsSeen[j] {
 				tsSeen[j] = true
-				tsJobs = append(tsJobs, j)
+				r.tsJobs = append(r.tsJobs, j)
 			}
 		}
 	}
-	goFacts, tsFacts := e.Symbols(goNames, tsJobs)
-	for _, pl := range plans {
-		for _, s := range pl.goSyms {
-			pl.lookups = append(pl.lookups, dossierSymbolLookup(s, ".", goFacts[s]))
-			if f := goFacts[s]; f != nil && len(f.Defs) > 0 {
-				pl.facts[s] = f
-			}
-		}
-		for _, s := range pl.tsSyms {
-			pl.lookups = append(pl.lookups, dossierSymbolLookup(s, pl.tsRoot, tsFacts[tsJob{pl.tsRoot, s}]))
-			if f := tsFacts[tsJob{pl.tsRoot, s}]; f != nil && len(f.Defs) > 0 && pl.facts[s] == nil {
-				pl.facts[s] = f
-			}
-		}
-	}
-	for _, pl := range plans {
+	// The concept queries do not depend on the symbols (only the names they
+	// report do), so the jobs are known now; finish sets the queries again.
+	for _, pl := range r.plans {
 		pl.makeQueries()
-	}
-	// Text and concept lookups of every input, a few at a time.
-	type job struct {
-		pl   *briefPlan
-		name string
-		text bool
-	}
-	var jobs []job
-	jbReady := e.jbMissing() == ""
-	for _, pl := range plans {
 		for _, n := range pl.names {
-			jobs = append(jobs, job{pl, n, true})
+			r.jobs = append(r.jobs, dossierJob{text: true, name: n})
+			r.owner = append(r.owner, pl)
 		}
-		if jbReady {
+		if r.jbReady {
 			for _, q := range pl.concepts {
 				for _, tr := range pl.trees {
-					jobs = append(jobs, job{pl, q + "\x00" + tr, false})
+					r.jobs = append(r.jobs, dossierJob{name: q, tree: tr})
+					r.owner = append(r.owner, pl)
 				}
 			}
 		}
 	}
-	if !jbReady {
+	return r
+}
+
+// symbols looks up the symbols of all inputs in one batch, so one language
+// server serves them all.
+func (r *briefRun) symbols() {
+	r.symStarted = time.Now()
+	r.goFacts, r.tsFacts = r.e.Symbols(r.goNames, r.tsJobs)
+	r.symElapsed = time.Since(r.symStarted)
+}
+
+// finish builds one brief per input from the symbol facts and the answers of the
+// jobs, which are in the order of r.jobs.
+func (r *briefRun) finish(outs []jobOut) []*ctxBrief {
+	e := r.e
+	for _, pl := range r.plans {
+		for _, s := range pl.goSyms {
+			pl.lookups = append(pl.lookups, dossierSymbolLookup(s, ".", r.goFacts[s]).timed(r.symStarted, r.symElapsed))
+			if f := r.goFacts[s]; f != nil && len(f.Defs) > 0 {
+				pl.facts[s] = f
+			}
+		}
+		for _, s := range pl.tsSyms {
+			pl.lookups = append(pl.lookups, dossierSymbolLookup(s, pl.tsRoot, r.tsFacts[tsJob{pl.tsRoot, s}]).timed(r.symStarted, r.symElapsed))
+			if f := r.tsFacts[tsJob{pl.tsRoot, s}]; f != nil && len(f.Defs) > 0 && pl.facts[s] == nil {
+				pl.facts[s] = f
+			}
+		}
+	}
+	for _, pl := range r.plans {
+		pl.makeQueries()
+	}
+	if !r.jbReady {
 		e.note(e.jbMissing())
-		for _, pl := range plans {
+		for _, pl := range r.plans {
 			for _, q := range pl.concepts {
 				for _, tree := range pl.trees {
 					pl.lookups = append(pl.lookups, dossierLookup(q, tree, "concept", 0, dossierConceptHits, nil, e.jbMissing()))
@@ -295,42 +321,44 @@ func (e *ctxEnv) Briefs(ins []briefInput) []*ctxBrief {
 			}
 		}
 	}
-	var mu sync.Mutex
-	e.parallel(len(jobs), func(i int) {
-		j := jobs[i]
+	for i, j := range r.jobs {
+		pl, o := r.owner[i], outs[i]
 		if j.text {
-			res, err := e.Text(rgQuery{Pattern: j.name, Fixed: true, PerFile: 3, AllFiles: true, CaseSensitive: true})
-			hits := res.Hits
-			mu.Lock()
-			j.pl.lookups = append(j.pl.lookups, dossierTextLookup(j.name, ".", res, err))
-			mu.Unlock()
-			if err != nil {
-				e.note(err.Error())
-				return
+			pl.lookups = append(pl.lookups, dossierTextLookup(j.name, ".", o.text, o.err).timed(o.started, o.elapsed))
+			if o.err != nil {
+				e.note(o.err.Error())
+				continue
 			}
-			mu.Lock()
-			j.pl.rg[j.name] = hits
-			mu.Unlock()
-			return
+			pl.rg[j.name] = o.text.Hits
+			continue
 		}
-		q, tree, _ := strings.Cut(j.name, "\x00")
-		hits, err := e.Concept(q, tree, dossierConceptHits)
-		mu.Lock()
-		j.pl.lookups = append(j.pl.lookups, dossierLookup(q, tree, "concept", len(hits), dossierConceptHits, err, ""))
-		mu.Unlock()
-		if err != nil {
-			e.note(err.Error())
-			return
+		pl.lookups = append(pl.lookups, dossierLookup(j.name, j.tree, "concept", len(o.hits), dossierConceptHits, o.err, "").timed(o.started, o.elapsed))
+		if o.err != nil {
+			e.note(o.err.Error())
+			continue
 		}
-		mu.Lock()
-		j.pl.concept[j.name] = hits
-		mu.Unlock()
-	})
-	out := make([]*ctxBrief, len(plans))
-	for i, pl := range plans {
+		pl.concept[j.name+"\x00"+j.tree] = o.hits
+	}
+	out := make([]*ctxBrief, len(r.plans))
+	for i, pl := range r.plans {
 		out[i] = e.assemble(pl)
 	}
 	return out
+}
+
+// Briefs builds one brief per input. The symbols of all inputs go in one batch,
+// so one language server serves them all, and run beside the searches.
+func (e *ctxEnv) Briefs(ins []briefInput) []*ctxBrief {
+	r := e.briefsPrepare(ins)
+	var sym sync.WaitGroup
+	sym.Add(1)
+	go func() {
+		defer sym.Done()
+		r.symbols()
+	}()
+	outs := e.runJobs(r.jobs)
+	sym.Wait()
+	return r.finish(outs)
 }
 
 type briefFile struct {

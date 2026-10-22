@@ -7,7 +7,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
+	"time"
 )
 
 // The reuse checklist: for each item a package builds, the existing code that
@@ -124,25 +124,46 @@ func declLineFor(ls []string, ln, end int, path string) int {
 	return 0
 }
 
+// reusePlan is reuseCandidates in halves: planReuse plans the searches, run.symbols
+// and the jobs find the answers, and finish builds the candidates from them.
+type reusePlan struct {
+	owners []int
+	out    []itemCands
+	run    *reuseRun
+}
+
 // reuseCandidates finds the candidates of each item. owns are the files the
 // package creates or changes; title is its purpose.
 func (e *ctxEnv) reuseCandidates(items []gateItem, owns []string, _ string) []itemCands {
+	p := e.planReuse(items, owns)
+	p.run.symbols()
+	return p.finish(e.runJobs(p.run.jobs))
+}
+
+func (e *ctxEnv) planReuse(items []gateItem, owns []string) *reusePlan {
 	var queries []gateItem
-	var owners []int
-	out := make([]itemCands, len(items))
+	p := &reusePlan{out: make([]itemCands, len(items))}
 	for i, it := range items {
-		out[i] = itemCands{Item: it, Queries: it.Queries}
+		p.out[i] = itemCands{Item: it, Queries: it.Queries}
 		if len(it.Queries) == 0 {
 			zero := 0
-			out[i].Lookups = []evidenceLookup{{SchemaVersion: evidenceSchemaVersion, ID: "lookup-unrequested-" + subjectDigest([]byte(it.ID))[:20], Scope: ".", Unit: "concept", ExecutionStatus: lookupNotRequested, Completeness: evidenceUnknown, CountKind: evidenceCountUnknown, Counts: lookupCounts{Requested: &zero}}}
+			p.out[i].Lookups = []evidenceLookup{{SchemaVersion: evidenceSchemaVersion, ID: "lookup-unrequested-" + subjectDigest([]byte(it.ID))[:20], Scope: ".", Unit: "concept", ExecutionStatus: lookupNotRequested, Completeness: evidenceUnknown, CountKind: evidenceCountUnknown, Counts: lookupCounts{Requested: &zero}}}
 		}
 		for _, q := range it.Queries {
 			queries = append(queries, gateItem{ID: it.ID, Package: it.Package, Text: q, Queries: []string{q}})
-			owners = append(owners, i)
+			p.owners = append(p.owners, i)
 		}
 	}
-	for j, ic := range e.reuseQueryCandidates(queries, owns, candidatesPerQuery(len(queries))) {
-		i := owners[j]
+	p.run = e.reusePrepare(queries, owns, candidatesPerQuery(len(queries)))
+	return p
+}
+
+// finish builds the candidates of each item from the answers of the jobs, which
+// are in the order of p.run.jobs.
+func (p *reusePlan) finish(outs []jobOut) []itemCands {
+	out := p.out
+	for j, ic := range p.run.finish(outs) {
+		i := p.owners[j]
 		out[i].QueriesRun += ic.QueriesRun
 		out[i].Lookups = append(out[i].Lookups, ic.Lookups...)
 		for _, c := range ic.Cands {
@@ -165,57 +186,104 @@ func candidatesPerQuery(n int) int {
 	return max(reuseMinCands, min(reuseMaxCands, reuseBodyBudget/max(1, n)))
 }
 
-func (e *ctxEnv) reuseQueryCandidates(items []gateItem, owns []string, limit int) []itemCands {
-	trees := orderTrees(codeTreesFor(e.Code, owns), owns)
-	if len(trees) == 0 {
-		trees = []string{""}
+// reuseRun is the searches for the items, one per query. reusePrepare plans
+// them, symbols runs the symbol lookups, and finish scores the answers of the
+// jobs (in the order of jobs) into candidates.
+type reuseRun struct {
+	e       *ctxEnv
+	items   []gateItem
+	owns    []string
+	limit   int
+	trees   []string
+	ownL    map[string]bool
+	names   [][]string
+	tsRoots []string
+	goNames []string
+	tsJobs  []tsJob
+	jobs    []dossierJob
+	jobItem []int // the item of jobs[i]
+	jbReady bool
+	res     []itemCands
+
+	goFacts    map[string]*symFact
+	tsFacts    map[tsJob]*symFact
+	symStarted time.Time
+	symElapsed time.Duration
+}
+
+func (e *ctxEnv) reusePrepare(items []gateItem, owns []string, limit int) *reuseRun {
+	r := &reuseRun{e: e, items: items, owns: owns, limit: limit, jbReady: e.jbMissing() == ""}
+	r.trees = orderTrees(codeTreesFor(e.Code, owns), owns)
+	if len(r.trees) == 0 {
+		r.trees = []string{""}
 	}
-	ownL := map[string]bool{}
+	r.ownL = map[string]bool{}
 	for _, id := range ownsLangs(e.Code, owns) {
-		ownL[id] = true
+		r.ownL[id] = true
 	}
-	res := make([]itemCands, len(items))
-	names := make([][]string, len(items))
+	r.res = make([]itemCands, len(items))
+	r.names = make([][]string, len(items))
 	// Names first: one symbol batch for all items, so one server serves them.
 	goSeen := map[string]bool{}
-	var goNames []string
 	tsSeen := map[tsJob]bool{}
-	var tsJobs []tsJob
-	tsRoots := make([]string, len(items))
+	r.tsRoots = make([]string, len(items))
 	for i, it := range items {
-		res[i].Item = it
-		names[i] = itemNames(it.Text)
-		tsRoots[i] = tsProjectRoot(e.Code, it.Text, owns)
-		for _, n := range names[i] {
+		r.res[i].Item = it
+		r.names[i] = itemNames(it.Text)
+		r.tsRoots[i] = tsProjectRoot(e.Code, it.Text, owns)
+		for _, n := range r.names[i] {
 			if !goSeen[n] {
 				goSeen[n] = true
-				goNames = append(goNames, n)
+				r.goNames = append(r.goNames, n)
 			}
-			if tsRoots[i] != "" && tsPlain.MatchString(n) {
-				if j := (tsJob{tsRoots[i], n}); !tsSeen[j] {
+			if r.tsRoots[i] != "" && tsPlain.MatchString(n) {
+				if j := (tsJob{r.tsRoots[i], n}); !tsSeen[j] {
 					tsSeen[j] = true
-					tsJobs = append(tsJobs, j)
+					r.tsJobs = append(r.tsJobs, j)
 				}
 			}
 		}
-		res[i].Queries = it.Queries
+		r.res[i].Queries = it.Queries
 	}
-	var goFacts map[string]*symFact
-	var tsFacts map[tsJob]*symFact
-	if len(goNames) > 0 {
-		goFacts, tsFacts = e.Symbols(goNames, tsJobs)
+	// Text hits of rare names, and concept searches per project root.
+	for i := range items {
+		for _, n := range r.names[i] {
+			r.jobs = append(r.jobs, dossierJob{text: true, name: n})
+			r.jobItem = append(r.jobItem, i)
+		}
+		if r.jbReady {
+			for _, q := range r.res[i].Queries {
+				for _, t := range r.trees {
+					r.jobs = append(r.jobs, dossierJob{name: q, tree: t})
+					r.jobItem = append(r.jobItem, i)
+				}
+			}
+		}
 	}
+	return r
+}
+
+// symbols looks the names of all items up in one batch.
+func (r *reuseRun) symbols() {
+	if len(r.goNames) == 0 {
+		return
+	}
+	r.symStarted = time.Now()
+	r.goFacts, r.tsFacts = r.e.Symbols(r.goNames, r.tsJobs)
+	r.symElapsed = time.Since(r.symStarted)
+}
+
+func (r *reuseRun) finish(outs []jobOut) []itemCands {
+	e, items, owns, limit, trees, ownL, names, tsRoots, res := r.e, r.items, r.owns, r.limit, r.trees, r.ownL, r.names, r.tsRoots, r.res
+	goFacts, tsFacts := r.goFacts, r.tsFacts
 	evs := make([]map[string]*itemEv, len(items))
 	for i := range evs {
 		evs[i] = map[string]*itemEv{}
 	}
-	var mu sync.Mutex
 	note := func(i int, path, kind, via string, prio, line, start, end int, q string, body []string, sym *symDef) {
 		if path == "" || e.Skip[path] || inOwns(path, owns) || !isCodePath(path) || !lookAlikePath(path, ownL) || e.isGenerated(path) {
 			return
 		}
-		mu.Lock()
-		defer mu.Unlock()
 		ev := evs[i][path]
 		if ev == nil {
 			ev = &itemEv{fileEv: fileEv{kinds: map[string]bool{}}, agree: map[string]bool{}}
@@ -236,7 +304,7 @@ func (e *ctxEnv) reuseQueryCandidates(items []gateItem, owns []string, limit int
 					f = t
 				}
 			}
-			res[i].Lookups = append(res[i].Lookups, dossierSymbolLookup(n, orDefault(tsRoots[i], "."), f))
+			res[i].Lookups = append(res[i].Lookups, dossierSymbolLookup(n, orDefault(tsRoots[i], "."), f).timed(r.symStarted, r.symElapsed))
 			if f == nil {
 				continue
 			}
@@ -246,60 +314,40 @@ func (e *ctxEnv) reuseQueryCandidates(items []gateItem, owns []string, limit int
 				note(i, p, "sym", "symbol `"+n+"`", 3, ln, ln, ln, n, nil, &d)
 			}
 		}
-	}
-	// Text hits of rare names, and concept searches per project root.
-	type job struct {
-		i     int
-		name  string
-		tree  string
-		isTxt bool
-	}
-	var jobs []job
-	jbReady := e.jbMissing() == ""
-	for i := range items {
-		for _, n := range names[i] {
-			jobs = append(jobs, job{i, n, "", true})
-		}
-		for _, q := range res[i].Queries {
-			for _, t := range trees {
-				if jbReady {
-					jobs = append(jobs, job{i, q, t, false})
-				} else {
+		if !r.jbReady {
+			for _, q := range res[i].Queries {
+				for _, t := range trees {
 					res[i].Lookups = append(res[i].Lookups, dossierLookup(q, t, "concept", 0, dossierConceptHits, nil, e.jbMissing()))
 				}
 			}
 		}
 	}
-	e.parallel(len(jobs), func(k int) {
-		j := jobs[k]
-		if j.isTxt {
-			r, err := e.Text(rgQuery{Pattern: j.name, Fixed: true, PerFile: 3, AllFiles: true, CaseSensitive: true})
-			mu.Lock()
-			res[j.i].Lookups = append(res[j.i].Lookups, dossierTextLookup(j.name, ".", r, err))
-			mu.Unlock()
-			if err != nil || len(r.Hits) == 0 || len(r.Hits) > dossierRare {
-				return
+	// The answers go in in the order of the jobs, so which of two equal pieces of
+	// evidence is kept never depends on which search finished first.
+	for k, j := range r.jobs {
+		i, o := r.jobItem[k], outs[k]
+		if j.text {
+			res[i].Lookups = append(res[i].Lookups, dossierTextLookup(j.name, ".", o.text, o.err).timed(o.started, o.elapsed))
+			if o.err != nil || len(o.text.Hits) == 0 || len(o.text.Hits) > dossierRare {
+				continue
 			}
-			for _, h := range r.Hits {
-				note(j.i, h.Path, "text", "text `"+short(j.name, 40)+"`", 1, h.Line, h.Line, h.Line, j.name, nil, nil)
+			for _, h := range o.text.Hits {
+				note(i, h.Path, "text", "text `"+short(j.name, 40)+"`", 1, h.Line, h.Line, h.Line, j.name, nil, nil)
 			}
-			return
+			continue
 		}
-		hits, err := e.Concept(j.name, j.tree, dossierConceptHits)
-		mu.Lock()
-		res[j.i].Lookups = append(res[j.i].Lookups, dossierLookup(j.name, j.tree, "concept", len(hits), dossierConceptHits, err, ""))
-		mu.Unlock()
-		if err != nil {
-			return
+		res[i].Lookups = append(res[i].Lookups, dossierLookup(j.name, j.tree, "concept", len(o.hits), dossierConceptHits, o.err, "").timed(o.started, o.elapsed))
+		if o.err != nil {
+			continue
 		}
-		for _, h := range hits {
+		for _, h := range o.hits {
 			body := h.Body
 			if len(body) == 0 {
 				body = h.Snippet
 			}
-			note(j.i, h.Path, "jb", "concept \""+short(j.name, 40)+"\"", 2, h.Start, h.Start, h.End, j.name, body, nil)
+			note(i, h.Path, "jb", "concept \""+short(j.name, 40)+"\"", 2, h.Start, h.Start, h.End, j.name, body, nil)
 		}
-	})
+	}
 	for i := range items {
 		sort.Slice(res[i].Lookups, func(a, b int) bool { return res[i].Lookups[a].ID < res[i].Lookups[b].ID })
 		// A query succeeds only after every requested scoped execution completes.
