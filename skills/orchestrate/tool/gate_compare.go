@@ -148,6 +148,9 @@ func describeExperiment(w io.Writer, label, name string, rec *gateRecord, dir st
 	if len(rec.DossierChars) > 0 {
 		fmt.Fprintf(w, "  dossier: %s\n", dossierSummary(rec.Dossier, rec.DossierChars))
 	}
+	if rec.Checklist == "plain" {
+		fmt.Fprintln(w, "  reuse checklist: plain (spec text only; no lookups, no candidates)")
+	}
 	for _, n := range names {
 		p := rec.PassTokens[n]
 		fmt.Fprintf(w, "  pass %s: runner %s; %ds; input %d, cache read %d, cache write %d, output %d; %d requests, %d turns, max context %d; %s", n, orDefault(rec.PassRunners[n], "unknown (legacy)"), rec.PassSeconds[n],

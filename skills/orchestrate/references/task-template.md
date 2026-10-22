@@ -28,7 +28,7 @@ Out: {{what it must not touch, and which other task owns it if any}}
 
 # Acceptance
 
-{{How the lead proves it is done: commands to run and their expected result, tests that must exist, or for scout the evidence each finding needs. For Go tests in orch write `orch test-changed`, not a `-run` pattern; never ask for the full suite.}}
+{{How the lead proves it is done: commands to run and their expected result, tests that must exist, or for scout the evidence each finding needs. For Go tests in orch write `orch test-changed`, not a `-run` pattern; never ask for the full suite. When the change alters a default or a mode, add: search the tests for the old default (`orch ctx text`) and run the neighbouring test files by hand, because `orch test-changed` selects only tests that reference changed code.}}
 
 # Authority
 

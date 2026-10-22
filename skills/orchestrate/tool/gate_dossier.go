@@ -296,6 +296,43 @@ func dossierSummary(mode string, sizes map[string]int) string {
 	return fmt.Sprintf("%s, %d package(s), %d chars (~%d tokens)", mode, len(sizes), total, (total+3)/4)
 }
 
+// plainChecklistHeader is the header of the reuse checklist in every mode; the
+// code brief (ctx_brief.go) writes the same words.
+const plainChecklistHeader = "### 3a. Reuse checklist (each requirement remains a separate decision)"
+
+// plainChecklist is the reuse checklist of `--dossier off`: the items of the
+// spec with their author's pointers and search lines as plain text. No lookup
+// ran for it, so it holds no candidates.
+func plainChecklist(items []gateItem) string {
+	if len(items) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("\n\n" + plainChecklistHeader + "\nNo code lookups were run for this list: decide reuse or new for every item, one entry each, and search the repo yourself before you claim an existing match.\n")
+	for _, it := range items {
+		fmt.Fprintf(&b, "- `%s` %s\n", it.ID, it.Text)
+		for _, p := range it.Reuse {
+			fmt.Fprintf(&b, "  author's pointer: `%s`\n", p)
+		}
+		for _, q := range it.Queries {
+			fmt.Fprintf(&b, "  search: `%s` (not run)\n", q)
+		}
+	}
+	return b.String()
+}
+
+// specItems lists the items of every package of the spec, by package, and the
+// package ids in spec order.
+func specItems(sp *spec) (map[string][]gateItem, []string) {
+	items := map[string][]gateItem{}
+	var order []string
+	for _, p := range sp.packages {
+		order = append(order, p.id)
+		items[p.id] = packageItems(p)
+	}
+	return items, order
+}
+
 // ---- the planner arm ----
 
 // lookup is one request of the planner: a layer lookup for a package.

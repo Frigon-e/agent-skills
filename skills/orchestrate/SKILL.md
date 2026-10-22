@@ -244,7 +244,11 @@ Reuse checklist. Items are only Builds bullets (ids `<package>#<n>`, saved in
 or acceptance. A ship package without Builds gets a warning and skips its
 checklist; scouts are exempt. More than 8 bullets warns to split the package.
 Only explicit search lines retrieve candidates; items without them still
-appear. With the dossier on, the default is three candidates per query for
+appear. With `--dossier off` the same checklist (ids, bullet text, author
+pointers, search lines as plain text) is still put in the group prompt and
+saved in `items.json`, with no lookups and no candidates; `gate.json`
+`checklist: plain` marks it. `--verdicts` and `--dump-decider` need
+`--dossier code`. With the dossier on, the default is three candidates per query for
 small packages; larger ones divide a 24-body package budget over queries,
 clamped to 2..5. Repeated locations show once with `also for #2, #5`.
 Section 3a of the dossier shows path:range, enclosing symbol,
