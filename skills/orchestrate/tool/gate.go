@@ -1206,7 +1206,7 @@ func cmdGate(a *app, args []string) (retErr error) {
 		b, _ := json.Marshal(map[string]string{"error": e.Error()})
 		_ = os.WriteFile(filepath.Join(runDir, "subject.json"), b, 0600)
 	}
-	model := envOr("ORCH_GATE_MODEL", gateModelDef)
+	model := gateModelDef
 	passes := buildGatePasses(code, src, rel, sp, rec.Groups, only)
 	initGateReview(rec, sp, src, passes)
 	rec.Budget = newRunBudget(gateRunLimits(passes, s.cfg.GateBudget), runStarted)

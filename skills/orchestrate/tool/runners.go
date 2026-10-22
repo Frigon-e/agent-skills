@@ -132,9 +132,6 @@ type roleRun struct {
 func (s site) newRoleRun(name string, opts modelOptions) (*roleRun, error) {
 	r := s.role(name)
 	rr := &roleRun{s: s, role: name, choices: r.Use, enabled: r.Enabled == nil || *r.Enabled, allowDegraded: opts.AllowDegraded, down: map[string]string{}}
-	if name == "gate" && os.Getenv("ORCH_GATE_MODEL") != "" {
-		rr.choices = append([]profile{{Harness: "pi", Model: os.Getenv("ORCH_GATE_MODEL")}}, rr.choices...)
-	}
 	if opts.Runner != "" {
 		var err error
 		rr.choices, err = parseRunners(opts.Runner)

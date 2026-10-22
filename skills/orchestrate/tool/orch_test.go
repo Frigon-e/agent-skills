@@ -1182,9 +1182,8 @@ func TestAllowedModels(t *testing.T) {
 		t.Fatalf("respawn onto a disallowed model: %d %s", code, out)
 	}
 	// So the gate model.
-	t.Setenv("ORCH_GATE_MODEL", "weird/model")
 	h.commitSpec(threePkgSpec())
-	if code, out := h.run("gate", "spec.md"); code != 1 || gateView(t, out).State != "incomplete" || !strings.Contains(gateView(t, out).PassErrors["all"], "not on the allowed list") {
+	if code, out := h.run("gate", "spec.md", "--runner", "pi:weird/model"); code != 1 || gateView(t, out).State != "incomplete" || !strings.Contains(gateView(t, out).PassErrors["all"], "not on the allowed list") {
 		t.Fatalf("gate ran a disallowed model: %d %s", code, out)
 	}
 
