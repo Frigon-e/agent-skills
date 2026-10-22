@@ -18,17 +18,17 @@ import (
 // be a spec package, a task.md or a question.
 
 const (
-	dossierOwnsCap     = 40 // files taken from the owns
-	dossierFiles       = 12 // ranked files kept
-	dossierNames       = 20 // names looked up with rg
-	dossierSyms        = 8  // symbols per language looked up
-	dossierConceptHits = 4  // chunks kept per concept query
-	dossierAccept      = 6  // acceptance bullets used as concept queries
-	dossierLike        = 8  // look-alikes kept
-	dossierLikeTree    = 4  // look-alikes kept per code tree
-	dossierDocs        = 5  // docs listed
-	dossierRare        = 20 // a name with more hits than this is noise
-	dossierTextLike    = 5  // a name with more hits than this is not shown as a look-alike
+	briefOwnsCap     = 40 // files taken from the owns
+	briefFiles       = 12 // ranked files kept
+	briefNames       = 20 // names looked up with rg
+	briefSyms        = 8  // symbols per language looked up
+	briefConceptHits = 4  // chunks kept per concept query
+	briefAccept      = 6  // acceptance bullets used as concept queries
+	briefLikeMax     = 8  // look-alikes kept
+	briefLikeTree    = 4  // look-alikes kept per code tree
+	briefDocs        = 5  // docs listed
+	briefRare        = 20 // a name with more hits than this is noise
+	briefTextLike    = 5  // a name with more hits than this is not shown as a look-alike
 )
 
 type briefInput struct {
@@ -40,9 +40,9 @@ type briefInput struct {
 }
 
 var (
-	dossierPtrRe = regexp.MustCompile(`([A-Za-z0-9_@.][A-Za-z0-9_@./-]*\.[A-Za-z0-9]{1,5})(?::(\d+)|#([A-Za-z_][A-Za-z0-9_.]*))`)
-	endpointRe   = regexp.MustCompile(`\b(?:GET|POST|PUT|PATCH|DELETE)\s+/[A-Za-z0-9_/{}:.-]+`)
-	snakeRe      = regexp.MustCompile(`\b[a-z][a-z0-9]*(?:_[a-z0-9]+)+\b`)
+	briefPtrRe = regexp.MustCompile(`([A-Za-z0-9_@.][A-Za-z0-9_@./-]*\.[A-Za-z0-9]{1,5})(?::(\d+)|#([A-Za-z_][A-Za-z0-9_.]*))`)
+	endpointRe = regexp.MustCompile(`\b(?:GET|POST|PUT|PATCH|DELETE)\s+/[A-Za-z0-9_/{}:.-]+`)
+	snakeRe    = regexp.MustCompile(`\b[a-z][a-z0-9]*(?:_[a-z0-9]+)+\b`)
 )
 
 // inOwns reports whether path is one of the owns entries or below one.
@@ -57,12 +57,12 @@ func inOwns(path string, owns []string) bool {
 }
 
 // ownedFiles lists the existing files of the owns entries: a file as itself,
-// a directory by its tracked files, up to dossierOwnsCap.
+// a directory by its tracked files, up to briefOwnsCap.
 func (e *ctxEnv) ownedFiles(owns []string) []string {
 	var out []string
 	seen := map[string]bool{}
 	add := func(f string) {
-		if len(out) < dossierOwnsCap && !seen[f] {
+		if len(out) < briefOwnsCap && !seen[f] {
 			seen[f] = true
 			out = append(out, f)
 		}
@@ -94,7 +94,7 @@ type pointer struct {
 func (e *ctxEnv) pointers(text string) []pointer {
 	var out []pointer
 	seen := map[string]bool{}
-	for _, m := range dossierPtrRe.FindAllStringSubmatch(text, -1) {
+	for _, m := range briefPtrRe.FindAllStringSubmatch(text, -1) {
 		path := strings.TrimPrefix(m[1], "./")
 		if e.Skip[path] || !strings.Contains(path, ".") {
 			continue
@@ -152,20 +152,20 @@ func (e *ctxEnv) prepareBrief(in briefInput) *briefPlan {
 	lines := strings.Split(block, "\n")
 	for _, l := range lines {
 		for _, s := range goSymbols(l) {
-			pl.goSyms = addUniq(pl.goSyms, s, dossierSyms)
+			pl.goSyms = addUniq(pl.goSyms, s, briefSyms)
 		}
 	}
 	// Names that might be symbols in any language; the declaration tier decides.
 	for _, l := range lines {
 		for _, s := range genericSymbols(l) {
-			pl.goSyms = addUniq(pl.goSyms, s, dossierSyms+8)
+			pl.goSyms = addUniq(pl.goSyms, s, briefSyms+8)
 		}
 	}
 	pl.tsRoot = tsProjectRoot(e.Code, block, in.Owns)
 	if pl.tsRoot != "" {
 		for _, l := range lines {
 			for _, s := range tsSymbols(l, nil) {
-				pl.tsSyms = addUniq(pl.tsSyms, s, dossierSyms)
+				pl.tsSyms = addUniq(pl.tsSyms, s, briefSyms)
 			}
 		}
 	}
@@ -175,36 +175,36 @@ func (e *ctxEnv) prepareBrief(in briefInput) *briefPlan {
 		}
 		if langIDOf(ptr.path) == "typescript" && pl.tsRoot != "" {
 			if tsPlain.MatchString(ptr.sym) {
-				pl.tsSyms = addUniq(pl.tsSyms, ptr.sym, dossierSyms+4)
+				pl.tsSyms = addUniq(pl.tsSyms, ptr.sym, briefSyms+4)
 			}
 		} else if langIDOf(ptr.path) != "" {
-			pl.goSyms = addUniq(pl.goSyms, ptr.sym, dossierSyms+4)
+			pl.goSyms = addUniq(pl.goSyms, ptr.sym, briefSyms+4)
 		}
 	}
 	// Names to find by text: backticked names, endpoints, snake_case names, then the symbols.
 	for _, m := range idBacktick.FindAllStringSubmatch(block, -1) {
 		span := strings.TrimSpace(m[1])
 		switch {
-		case dossierPtrRe.MatchString(span) && !strings.Contains(span, " "):
+		case briefPtrRe.MatchString(span) && !strings.Contains(span, " "):
 			continue
 		case strings.ContainsAny(span, "*?") || (strings.HasSuffix(span, "_test") && !strings.ContainsAny(span, "./")):
 			continue // a glob or a bare test-file name is not a thing to find
 		case fileExtRe.MatchString(span) && !strings.Contains(span, " "):
-			pl.files = addUniq(pl.files, filepath.Base(span), dossierNames)
+			pl.files = addUniq(pl.files, filepath.Base(span), briefNames)
 		case len(span) >= 3 && !strings.ContainsAny(span, " \t"):
-			pl.names = addUniq(pl.names, span, dossierNames)
+			pl.names = addUniq(pl.names, span, briefNames)
 		}
 	}
 	for _, s := range endpointRe.FindAllString(block, -1) {
-		pl.names = addUniq(pl.names, strings.TrimRight(s, ".,;:)"), dossierNames)
+		pl.names = addUniq(pl.names, strings.TrimRight(s, ".,;:)"), briefNames)
 	}
 	for _, s := range snakeRe.FindAllString(block, -1) {
 		if len(s) >= 5 {
-			pl.names = addUniq(pl.names, s, dossierNames)
+			pl.names = addUniq(pl.names, s, briefNames)
 		}
 	}
 	for _, s := range append(append([]string{}, pl.goSyms...), pl.tsSyms...) {
-		pl.names = addUniq(pl.names, s, dossierNames)
+		pl.names = addUniq(pl.names, s, briefNames)
 	}
 	pl.accept = acceptanceBullets(block)
 	pl.trees = codeTreesFor(e.Code, in.Owns)
@@ -219,7 +219,7 @@ type briefRun struct {
 	plans   []*briefPlan
 	goNames []string
 	tsJobs  []tsJob
-	jobs    []dossierJob
+	jobs    []lookupJob
 	owner   []*briefPlan // the plan of jobs[i]
 	jbReady bool
 
@@ -253,13 +253,13 @@ func (e *ctxEnv) briefsPrepare(ins []briefInput) *briefRun {
 	for _, pl := range r.plans {
 		pl.makeQueries()
 		for _, n := range pl.names {
-			r.jobs = append(r.jobs, dossierJob{text: true, name: n})
+			r.jobs = append(r.jobs, lookupJob{text: true, name: n})
 			r.owner = append(r.owner, pl)
 		}
 		if r.jbReady {
 			for _, q := range pl.concepts {
 				for _, tr := range pl.trees {
-					r.jobs = append(r.jobs, dossierJob{name: q, tree: tr})
+					r.jobs = append(r.jobs, lookupJob{name: q, tree: tr})
 					r.owner = append(r.owner, pl)
 				}
 			}
@@ -280,13 +280,13 @@ func (r *briefRun) finish(outs []jobOut) []*ctxBrief {
 	e := r.e
 	for _, pl := range r.plans {
 		for _, s := range pl.goSyms {
-			pl.lookups = append(pl.lookups, dossierSymbolLookup(s, ".", r.goFacts[s]))
+			pl.lookups = append(pl.lookups, symbolRecord(s, ".", r.goFacts[s]))
 			if f := r.goFacts[s]; f != nil && len(f.Defs) > 0 {
 				pl.facts[s] = f
 			}
 		}
 		for _, s := range pl.tsSyms {
-			pl.lookups = append(pl.lookups, dossierSymbolLookup(s, pl.tsRoot, r.tsFacts[tsJob{pl.tsRoot, s}]))
+			pl.lookups = append(pl.lookups, symbolRecord(s, pl.tsRoot, r.tsFacts[tsJob{pl.tsRoot, s}]))
 			if f := r.tsFacts[tsJob{pl.tsRoot, s}]; f != nil && len(f.Defs) > 0 && pl.facts[s] == nil {
 				pl.facts[s] = f
 			}
@@ -300,7 +300,7 @@ func (r *briefRun) finish(outs []jobOut) []*ctxBrief {
 		for _, pl := range r.plans {
 			for _, q := range pl.concepts {
 				for _, tree := range pl.trees {
-					pl.lookups = append(pl.lookups, dossierLookup(q, tree, "concept", 0, dossierConceptHits, nil, e.jbMissing()))
+					pl.lookups = append(pl.lookups, lookupRecord(q, tree, "concept", 0, briefConceptHits, nil, e.jbMissing()))
 				}
 			}
 		}
@@ -308,7 +308,7 @@ func (r *briefRun) finish(outs []jobOut) []*ctxBrief {
 	for i, j := range r.jobs {
 		pl, o := r.owner[i], outs[i]
 		if j.text {
-			pl.lookups = append(pl.lookups, dossierTextLookup(j.name, ".", o.text, o.err))
+			pl.lookups = append(pl.lookups, textRecord(j.name, ".", o.text, o.err))
 			if o.err != nil {
 				e.note(o.err.Error())
 				continue
@@ -316,7 +316,7 @@ func (r *briefRun) finish(outs []jobOut) []*ctxBrief {
 			pl.rg[j.name] = o.text.Hits
 			continue
 		}
-		pl.lookups = append(pl.lookups, dossierLookup(j.name, j.tree, "concept", len(o.hits), dossierConceptHits, o.err, ""))
+		pl.lookups = append(pl.lookups, lookupRecord(j.name, j.tree, "concept", len(o.hits), briefConceptHits, o.err, ""))
 		if o.err != nil {
 			e.note(o.err.Error())
 			continue
@@ -438,7 +438,7 @@ func quoteList(ss []string) string {
 }
 
 const (
-	dossierIntro       = "Absence of a hit is not proof of absence. Complete lookup records (ids, status, counts, scopes) and the omission list are in dossier-manifest.json."
+	briefIntro         = "Absence of a hit is not proof of absence."
 	searchNotesMaxWays = 4 // failure reasons listed in the search notes
 	searchNotesNames   = 12
 )
@@ -471,7 +471,7 @@ func noteReason(msg, root string) string {
 	return short(strings.Join(strings.Fields(s), " "), 110)
 }
 
-// searchNotes is the closing block of the dossier: how the lookups ended, one
+// searchNotes is the closing block of the brief: how the lookups ended, one
 // line per distinct failure reason, and the names that exist nowhere. At most
 // 8 lines, "" when there is nothing to say.
 func searchNotes(lks []evidenceLookup, missing []string, root string) string {
@@ -584,7 +584,7 @@ func (d *ctxBrief) Render(heading, noun string, total int) string {
 	in := func(sec, text string) { entries = append(entries, entry{text: text + "\n", sec: sec}) }
 
 	add(heading)
-	add(dossierIntro)
+	add(briefIntro)
 	if len(d.Files) > 0 {
 		section("files", "### 1. Ranked files")
 		for _, text := range d.Files {
@@ -618,7 +618,7 @@ func (d *ctxBrief) Render(heading, noun string, total int) string {
 			} // notes/cut notices have no source body
 			er := native.source
 			if seen[er.ID] {
-				in("like", "- source "+er.ID+" referenced above or in omissions; expand: "+dossierRead(er.Path, er.Range.StartLine, er.Range.EndLine))
+				in("like", "- source "+er.ID+" referenced above; expand: "+readHint(er.Path, er.Range.StartLine, er.Range.EndLine))
 				continue
 			}
 			seen[er.ID] = true
@@ -685,12 +685,12 @@ func (d *ctxBrief) Render(heading, noun string, total int) string {
 			what = append(what, "the search notes")
 		}
 		if n := cut["other"]; n > 0 {
-			what = append(what, fmt.Sprintf("%d look-alike or planner entr(ies)", n))
+			what = append(what, fmt.Sprintf("%d look-alike entr(ies)", n))
 		}
 		if len(what) == 0 {
 			what = []string{fmt.Sprintf("%d entries", cutAny)}
 		}
-		footer := fmt.Sprintf("Cut for the %d-byte budget: %s. Omission list and expansions: Read path=\"dossier-manifest.json\".\n", total, strings.Join(what, ", "))
+		footer := fmt.Sprintf("Cut for the %d-byte budget: %s. Read the cited files with the Read tool for the rest.\n", total, strings.Join(what, ", "))
 		if b.Len()+len(footer) <= total {
 			b.WriteString(footer)
 		}

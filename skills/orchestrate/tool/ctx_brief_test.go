@@ -9,11 +9,11 @@ import (
 	"testing"
 )
 
-const dossierSpec = planHeader + "### api: Queue API\nkind: ship\nowns: internal/queue\n\nBuild the queue. It adds `SendTransfer`, a `transfer_rows` table and `Nonexistent`, and serves POST /api/transfers. See internal/queue/queue.go:4 and internal/gone.go:9.\n\n#### Builds\n- Code that queues a transfer and serves POST /api/transfers.\n\n#### Acceptance\nTests pass.\n\n" + planTail
+const briefSpec = planHeader + "### api: Queue API\nkind: ship\nowns: internal/queue\n\nBuild the queue. It adds `SendTransfer`, a `transfer_rows` table and `Nonexistent`, and serves POST /api/transfers. See internal/queue/queue.go:4 and internal/gone.go:9.\n\n#### Builds\n- Code that queues a transfer and serves POST /api/transfers.\n\n#### Acceptance\nTests pass.\n\n" + planTail
 
-// dossierRepo is a committed repo with a queue package and a spec of one
+// briefRepo is a committed repo with a queue package and a spec of one
 // package that owns it, names things that exist and things that do not.
-func dossierRepo(t *testing.T) (code, src string) {
+func briefRepo(t *testing.T) (code, src string) {
 	t.Helper()
 	t.Setenv("ORCH_CACHE_DIR", t.TempDir())
 	if _, err := exec.LookPath("rg"); err != nil {
@@ -39,7 +39,7 @@ func dossierRepo(t *testing.T) (code, src string) {
 			t.Fatalf("git %v: %v\n%s", args, err, out)
 		}
 	}
-	src = dossierSpec
+	src = briefSpec
 	return code, src
 }
 
@@ -58,7 +58,7 @@ func briefFor(t *testing.T, code, src, cache string) (*ctxBrief, string) {
 }
 
 func TestBriefRanksFilesAndFindsWhatExistsAndWhatDoesNot(t *testing.T) {
-	code, src := dossierRepo(t)
+	code, src := briefRepo(t)
 	jb, _, _ := fakeJbcontext(t)
 	t.Setenv("ORCH_JBCONTEXT", jb)
 	// The indexed Put chunk does not exist in this checkout. It must not
@@ -92,7 +92,7 @@ func TestBriefRanksFilesAndFindsWhatExistsAndWhatDoesNot(t *testing.T) {
 }
 
 func TestBriefIsDeterministicCachedAndCapped(t *testing.T) {
-	code, src := dossierRepo(t)
+	code, src := briefRepo(t)
 	t.Setenv("ORCH_JBCONTEXT", filepath.Join(t.TempDir(), "no-jbcontext"))
 	cache := t.TempDir()
 	_, first := briefFor(t, code, src, cache)
@@ -112,12 +112,12 @@ func TestBriefIsDeterministicCachedAndCapped(t *testing.T) {
 	cmd.Dir = code
 	cmd.Run()
 	env := newCtxEnv(code, ctxOpts{})
-	if n := len(env.ownedFiles([]string{"internal/queue"})); n != dossierOwnsCap {
-		t.Errorf("owned files = %d, want the cap %d", n, dossierOwnsCap)
+	if n := len(env.ownedFiles([]string{"internal/queue"})); n != briefOwnsCap {
+		t.Errorf("owned files = %d, want the cap %d", n, briefOwnsCap)
 	}
 	d, _ := briefFor(t, code, src, t.TempDir())
-	if len(d.Files) != dossierFiles {
-		t.Errorf("ranked files = %d, want %d", len(d.Files), dossierFiles)
+	if len(d.Files) != briefFiles {
+		t.Errorf("ranked files = %d, want %d", len(d.Files), briefFiles)
 	}
 }
 
@@ -149,7 +149,7 @@ func TestDocLineFindsFirstCommentLine(t *testing.T) {
 }
 
 func TestScopeFindingsKnowWhoOwnsTheFileAndStripRemarks(t *testing.T) {
-	src := dossierSpec
+	src := briefSpec
 	src = strings.Replace(src, planTail, "### web: Web\nkind: ship\ndepends: api\nowns: internal/web/\n\nWeb.\n\n#### Builds\n- Code that shows a transfer.\n\n#### Acceptance\nOk.\n\n### core: Core\nkind: ship\nowns: internal/core/\n\nCore.\n\n#### Builds\n- Code that stores a transfer.\n\n#### Acceptance\nOk.\n\n"+planTail, 1)
 	src = strings.Replace(src, "### api: Queue API\nkind: ship\n", "### api: Queue API\nkind: ship\ndepends: core\n", 1)
 	sp := parseSpec(src)
@@ -197,15 +197,15 @@ func TestChangePathDropsTrailingRemarks(t *testing.T) {
 	}
 }
 
-// TestDossierMixedLookupsRenderOnlyTheSearchNotes: lookups of every state
+// TestBriefMixedLookupsRenderOnlyTheSearchNotes: lookups of every state
 // leave no lookup record in the prompt, only the notes.
-func TestDossierMixedLookupsRenderOnlyTheSearchNotes(t *testing.T) {
+func TestBriefMixedLookupsRenderOnlyTheSearchNotes(t *testing.T) {
 	root := t.TempDir()
 	binary := filepath.Join(root, "bin", "jbcontext")
-	ok := dossierLookup("SendTransfer", "internal/queue", "text", 3, 0, nil, "")
-	empty := dossierLookup("Nonexistent", ".", "text", 0, 0, nil, "")
-	unavailable := dossierLookup("admin staff", "web/", "concept", 0, 4, nil, "no concept search: "+binary+" was not found")
-	failed := dossierLookup("SettingsPage", "web/", "symbol", 0, 1, fmt.Errorf("%s: no TypeScript facts: no native TypeScript 7 server found (typescript@7 in a node_modules/.pnpm store); set ORCH_TSLS to one", root), "")
+	ok := lookupRecord("SendTransfer", "internal/queue", "text", 3, 0, nil, "")
+	empty := lookupRecord("Nonexistent", ".", "text", 0, 0, nil, "")
+	unavailable := lookupRecord("admin staff", "web/", "concept", 0, 4, nil, "no concept search: "+binary+" was not found")
+	failed := lookupRecord("SettingsPage", "web/", "symbol", 0, 1, fmt.Errorf("%s: no TypeScript facts: no native TypeScript 7 server found (typescript@7 in a node_modules/.pnpm store); set ORCH_TSLS to one", root), "")
 	lks := []evidenceLookup{ok, empty, unavailable, failed}
 	d := &ctxBrief{
 		ID:      "web",

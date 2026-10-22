@@ -135,8 +135,8 @@ func TestBriefLookAlikesAreConceptChunksOfCodeOutsideTheOwns(t *testing.T) {
 			t.Errorf("%s must not be a look-alike:\n%s", bad, like)
 		}
 	}
-	if !strings.Contains(like, "6 more cut") || len(b.LikeRows) != dossierLikeTree {
-		t.Errorf("the cap of %d look-alikes per tree is not applied and said (%d rows):\n%s", dossierLikeTree, len(b.LikeRows), like)
+	if !strings.Contains(like, "6 more cut") || len(b.LikeRows) != briefLikeTree {
+		t.Errorf("the cap of %d look-alikes per tree is not applied and said (%d rows):\n%s", briefLikeTree, len(b.LikeRows), like)
 	}
 	if !strings.Contains(like, "func SvcThing() {}") {
 		t.Errorf("no chunk lines shown:\n%s", like)
@@ -257,8 +257,8 @@ func TestLookAlikesHaveAQuotaPerTreeAndTheOwnsTreeComesFirst(t *testing.T) {
 			}
 		}
 	}
-	if svc != dossierLikeTree || web != dossierLikeTree || lastSvc > firstWeb {
-		t.Errorf("want %d per tree with svc/ first, got svc %d web %d:\n%s", dossierLikeTree, svc, web, strings.Join(b.Like, "\n"))
+	if svc != briefLikeTree || web != briefLikeTree || lastSvc > firstWeb {
+		t.Errorf("want %d per tree with svc/ first, got svc %d web %d:\n%s", briefLikeTree, svc, web, strings.Join(b.Like, "\n"))
 	}
 	if !strings.Contains(strings.Join(b.Like, "\n"), "4 more cut") {
 		t.Errorf("the cut is not said:\n%s", strings.Join(b.Like, "\n"))

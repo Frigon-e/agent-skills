@@ -556,7 +556,7 @@ func enrichGate(dir, code, src, rel string, sp *spec) (*enrichResult, error) {
 	if why := env.jbMissing(); why != "" {
 		for i := range items {
 			items[i].CodeReview = "Code search did not run: " + why
-			items[i].Search = []evidenceLookup{dossierLookup(items[i].Q.Question, ".", "concept", 0, enrichMaxHints, nil, why)}
+			items[i].Search = []evidenceLookup{lookupRecord(items[i].Q.Question, ".", "concept", 0, enrichMaxHints, nil, why)}
 		}
 		if env.NoJB {
 			res.Notes = append(res.Notes, why)
@@ -579,11 +579,11 @@ func enrichGate(dir, code, src, rel string, sp *spec) (*enrichResult, error) {
 				mu.Unlock()
 				if stop {
 					it.CodeReview = "Code search skipped after earlier search failures."
-					it.Search = []evidenceLookup{dossierLookup(it.Q.Question, ".", "concept", 0, enrichMaxHints, nil, "skipped after earlier failures")}
+					it.Search = []evidenceLookup{lookupRecord(it.Q.Question, ".", "concept", 0, enrichMaxHints, nil, "skipped after earlier failures")}
 					return
 				}
 				hits, err := env.Concept(short(strings.Join(strings.Fields(it.Q.Question), " "), enrichQueryChars), "", 3)
-				it.Search = []evidenceLookup{dossierLookup(short(flat(it.Q.Question), enrichQueryChars), ".", "concept", len(hits), enrichMaxHints, err, "")}
+				it.Search = []evidenceLookup{lookupRecord(short(flat(it.Q.Question), enrichQueryChars), ".", "concept", len(hits), enrichMaxHints, err, "")}
 				mu.Lock()
 				defer mu.Unlock()
 				if err != nil {

@@ -11,9 +11,9 @@ import (
 	"time"
 )
 
-// dossierJob is one text or concept search of the dossier. A text job looks
+// lookupJob is one text or concept search of a brief. A text job looks
 // name up in the tracked files; a concept job searches query within tree.
-type dossierJob struct {
+type lookupJob struct {
 	text       bool
 	name, tree string
 }
@@ -28,19 +28,19 @@ type jobOut struct {
 }
 
 const (
-	// dossierPoolWidth is the most concept searches the dossier keeps in flight,
+	// lookupPoolWidth is the most concept searches a brief keeps in flight,
 	// below the slot cap: the service answers 429 when it is asked too fast, and
-	// a refused search is a lookup the dossier loses. Measured on the CRM spec
+	// a refused search is a lookup the brief loses. Measured on the CRM spec
 	// (4 packages): width 4 had no refusal, 6 had 3, 8 had 25, 16 had 64.
-	dossierPoolWidth = 5
-	// dossierRateRounds is how many times the searches the service refused are
+	lookupPoolWidth = 5
+	// lookupRateRounds is how many times the searches the service refused are
 	// asked again, after the cooldown, one half as wide each time.
-	dossierRateRounds = 2
+	lookupRateRounds = 2
 )
 
-// dossierCooldownWait waits until jbcontext is out of its cooldown, at most as
+// lookupCooldownWait waits until jbcontext is out of its cooldown, at most as
 // long as the cooldown plus a margin. A variable so a test need not wait.
-var dossierCooldownWait = func(bin string) {
+var lookupCooldownWait = func(bin string) {
 	for end := time.Now().Add(jbCooldown + 5*time.Second); jbCooling(bin) && time.Now().Before(end); {
 		time.Sleep(250 * time.Millisecond)
 	}
@@ -49,9 +49,9 @@ var dossierCooldownWait = func(bin string) {
 // runJobs runs the jobs and returns their answers in job order, whatever the
 // order they finished in. The text searches run a few at a time; the concept
 // searches run as one pool, as wide as the slot cap allows up to
-// dossierPoolWidth, at the same time. A concept search the service refused for
+// lookupPoolWidth, at the same time. A concept search the service refused for
 // rate is asked again after the cooldown; its timing is that of the last ask.
-func (e *ctxEnv) runJobs(jobs []dossierJob) []jobOut {
+func (e *ctxEnv) runJobs(jobs []lookupJob) []jobOut {
 	outs := make([]jobOut, len(jobs))
 	var texts, concepts []int
 	for i, j := range jobs {
@@ -68,7 +68,7 @@ func (e *ctxEnv) runJobs(jobs []dossierJob) []jobOut {
 		if j.text {
 			o.text, o.err = e.Text(rgQuery{Pattern: j.name, Fixed: true, PerFile: 3, AllFiles: true, CaseSensitive: true})
 		} else {
-			o.hits, o.err = e.Concept(j.name, j.tree, dossierConceptHits)
+			o.hits, o.err = e.Concept(j.name, j.tree, briefConceptHits)
 		}
 		o.elapsed = time.Since(o.started)
 	}
@@ -78,11 +78,11 @@ func (e *ctxEnv) runJobs(jobs []dossierJob) []jobOut {
 		defer wg.Done()
 		e.parallel(len(texts), func(k int) { run(texts[k]) })
 	}()
-	width := min(jbSlotCount(), dossierPoolWidth)
+	width := min(jbSlotCount(), lookupPoolWidth)
 	go func() {
 		defer wg.Done()
 		fanOut(width, len(concepts), func(k int) { run(concepts[k]) })
-		for round := 1; round <= dossierRateRounds; round++ {
+		for round := 1; round <= lookupRateRounds; round++ {
 			var again []int
 			for _, i := range concepts {
 				if errors.Is(outs[i].err, errJBRateLimited) {
@@ -92,7 +92,7 @@ func (e *ctxEnv) runJobs(jobs []dossierJob) []jobOut {
 			if len(again) == 0 {
 				return
 			}
-			dossierCooldownWait(e.JB)
+			lookupCooldownWait(e.JB)
 			fanOut(max(1, width>>round), len(again), func(k int) { run(again[k]) })
 		}
 	}()
@@ -102,17 +102,17 @@ func (e *ctxEnv) runJobs(jobs []dossierJob) []jobOut {
 
 // ctxLookup contains only JSON value types. Keep the original selectors, not
 // a shortened prose query, on every expansion route.
-func mustDossierJSON(v any) []byte {
+func mustLookupJSON(v any) []byte {
 	b, err := json.Marshal(v)
 	if err != nil {
-		panic(fmt.Errorf("internal dossier selector serialization: %w", err))
+		panic(fmt.Errorf("internal lookup selector serialization: %w", err))
 	}
 	return b
 }
 
-// dossierLookup preserves B1 execution and completeness independently. The
+// lookupRecord preserves B1 execution and completeness independently. The
 // legacy semantic API has unknown global counts, even after execution completes.
-func dossierLookup(query, scope, unit string, n, limit int, err error, unavailable string) evidenceLookup {
+func lookupRecord(query, scope, unit string, n, limit int, err error, unavailable string) evidenceLookup {
 	zero, one := 0, 1
 	l := evidenceLookup{SchemaVersion: evidenceSchemaVersion, ID: "lookup-" + subjectJSONDigest([]any{query, scope, unit, n, fmt.Sprint(err), unavailable})[:20], Query: query, Scope: orDefault(scope, "."), Unit: unit, Exclusions: []string{"spec input excluded; candidate selection separately excludes tests, generated files and owns"}, CountKind: evidenceCountUnknown, Completeness: evidenceUnknown, ExecutionStatus: lookupNotRequested, Counts: lookupCounts{Requested: &zero}}
 	if unavailable != "" {
@@ -157,15 +157,15 @@ func dossierLookup(query, scope, unit string, n, limit int, err error, unavailab
 	return l
 }
 
-func dossierSymbolLookup(query, scope string, f *symFact) evidenceLookup {
+func symbolRecord(query, scope string, f *symFact) evidenceLookup {
 	if f == nil {
-		return dossierLookup(query, scope, "symbol", 0, 0, nil, "symbol backend returned no execution record")
+		return lookupRecord(query, scope, "symbol", 0, 0, nil, "symbol backend returned no execution record")
 	}
 	var err error
 	if len(f.Errors) > 0 {
 		err = fmt.Errorf("%s", strings.Join(f.Errors, "; "))
 	}
-	l := dossierLookup(query, scope, "symbol", len(f.Defs), 0, err, "")
+	l := lookupRecord(query, scope, "symbol", len(f.Defs), 0, err, "")
 	l.ID = "lookup-" + subjectJSONDigest([]any{query, scope, "symbol", f})[:20]
 	if err == nil {
 		for _, d := range f.Defs {
@@ -180,9 +180,9 @@ func dossierSymbolLookup(query, scope string, f *symFact) evidenceLookup {
 	return l
 }
 
-func dossierTextLookup(query, scope string, r rgResult, err error) evidenceLookup {
-	l := dossierLookup(query, scope, "text", r.Total, 0, err, "")
-	l.Scope = string(mustDossierJSON(map[string]any{"path": orDefault(scope, "."), "fixed": true, "case_sensitive": true, "per_file": 3, "all_files": true}))
+func textRecord(query, scope string, r rgResult, err error) evidenceLookup {
+	l := lookupRecord(query, scope, "text", r.Total, 0, err, "")
+	l.Scope = string(mustLookupJSON(map[string]any{"path": orDefault(scope, "."), "fixed": true, "case_sensitive": true, "per_file": 3, "all_files": true}))
 	if err == nil && (!r.Complete || r.Limited) {
 		l.Status = "partial"
 		l.Completeness = evidencePartial
@@ -219,12 +219,12 @@ func shortPathText(s, root string) string {
 	return failureTemp.ReplaceAllString(s, "$1<tmp>")
 }
 
-func dossierSource(e *ctxEnv, path string, start, end int) evidenceRecord {
+func lookupSource(e *ctxEnv, path string, start, end int) evidenceRecord {
 	ls := e.Lines(path)
 	from := min(len(ls), max(0, start-1))
 	to := min(len(ls), max(from, end))
 	body := strings.Join(ls[from:to], "\n")
-	id := dossierSourceID(path, start, end, body)
+	id := lookupSourceID(path, start, end, body)
 	valid := start >= 1 && end >= start && end <= len(ls)
 	complete := evidenceComplete
 	if !valid {
@@ -239,9 +239,9 @@ func dossierSource(e *ctxEnv, path string, start, end int) evidenceRecord {
 	return evidenceRecord{SchemaVersion: evidenceSchemaVersion, ID: id, Completeness: complete, SourceKind: kind, Language: langIDOf(path), Path: path, Range: &evidenceRange{StartLine: start, EndLine: end}, ContentHash: subjectDigest([]byte(body)), LookupID: "lookup-" + id, Selected: &valid, LocatorValid: &valid}
 }
 
-func dossierSourceID(path string, start, end int, body string) string {
+func lookupSourceID(path string, start, end int, body string) string {
 	return "evidence-" + subjectJSONDigest([]any{path, start, end, subjectDigest([]byte(body))})[:20]
 }
-func dossierRead(path string, start, end int) string {
+func readHint(path string, start, end int) string {
 	return fmt.Sprintf("Read path=%q offset=%d limit=%d", path, max(1, start), max(1, end-start+1))
 }

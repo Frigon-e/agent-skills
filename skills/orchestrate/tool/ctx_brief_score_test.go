@@ -23,20 +23,20 @@ func scoreFixture() *ctxBrief {
 		for si, sc := range scopes {
 			switch {
 			case qi%6 == 5:
-				d.Lookups = append(d.Lookups, dossierLookup(q, sc, "concept", 0, 4, fmt.Errorf("%s", score429), ""))
+				d.Lookups = append(d.Lookups, lookupRecord(q, sc, "concept", 0, 4, fmt.Errorf("%s", score429), ""))
 			case qi%6 == 4 && si == 0:
-				d.Lookups = append(d.Lookups, dossierLookup(q, sc, "concept", 0, 4, fmt.Errorf("%s", scoreLicense), ""))
+				d.Lookups = append(d.Lookups, lookupRecord(q, sc, "concept", 0, 4, fmt.Errorf("%s", scoreLicense), ""))
 			default:
-				d.Lookups = append(d.Lookups, dossierLookup(q, sc, "concept", si+1, 4, nil, ""))
+				d.Lookups = append(d.Lookups, lookupRecord(q, sc, "concept", si+1, 4, nil, ""))
 			}
 		}
 	}
 	for ni := 0; ni < 10; ni++ {
-		d.Lookups = append(d.Lookups, dossierLookup(fmt.Sprintf("crm1-name%d", ni), ".", "text", 40+ni, 0, nil, ""))
+		d.Lookups = append(d.Lookups, lookupRecord(fmt.Sprintf("crm1-name%d", ni), ".", "text", 40+ni, 0, nil, ""))
 	}
 	d.Lookups = append(d.Lookups,
-		dossierLookup("brandCSS", "web", "symbol", 0, 0, nil, "symbol backend returned no execution record"),
-		dossierLookup("renderStatus", "web", "symbol", 0, 0, nil, "symbol backend returned no execution record"))
+		lookupRecord("brandCSS", "web", "symbol", 0, 0, nil, "symbol backend returned no execution record"),
+		lookupRecord("renderStatus", "web", "symbol", 0, 0, nil, "symbol backend returned no execution record"))
 	d.Files = []string{"- `internal/alpha/alpha.go` (score 5: jb+sym): defines Alpha", "- `web/beta.ts` (score 4: jb): concept search", "- `internal/gamma/gamma.go` (score 2: text): text `Gamma`"}
 	d.interfaceSummary = []string{"- Alpha (go; exact)\n  `internal/alpha/alpha.go:10` [evidence-sig] match=exact signature: func Alpha(); callers: 3 (by_name=false); tests: 1"}
 	d.Facts = []symFact{{Symbol: "Alpha", Defs: []symDef{{Where: "internal/alpha/alpha.go:10"}}}}
@@ -63,7 +63,7 @@ func sectionOf(t *testing.T, text, from string) string {
 	return rest
 }
 
-func TestDossierScoreFirstLeadsWithTheScoredPictureAndKeepsTheLookupLogOut(t *testing.T) {
+func TestBriefScoreFirstLeadsWithTheScoredPictureAndKeepsTheLookupLogOut(t *testing.T) {
 	d := scoreFixture()
 	out := d.Render("## Package crm", "package", briefTestTotal)
 	t.Logf("fixture brief: %d lines, %d bytes (budget %d)\n%s", strings.Count(out, "\n"), len(out), briefTestTotal, out)
@@ -78,7 +78,9 @@ func TestDossierScoreFirstLeadsWithTheScoredPictureAndKeepsTheLookupLogOut(t *te
 	if n := strings.Count(out, "Absence of a hit is not proof of absence."); n != 1 {
 		t.Errorf("the absence sentence appears %d times, want once", n)
 	}
-	wantContains(t, out, "dossier-manifest.json")
+	if strings.Contains(out, "dossier") || strings.Contains(out, "planner") {
+		t.Errorf("the brief names the removed dossier or planner:\n%s", out)
+	}
 	pos := func(s string) int {
 		i := strings.Index(out, s)
 		if i < 0 {
@@ -112,8 +114,8 @@ func TestDossierScoreFirstLeadsWithTheScoredPictureAndKeepsTheLookupLogOut(t *te
 	}
 }
 
-func TestDossierScoreFirstOmitsSectionsWithNothingToSay(t *testing.T) {
-	d := &ctxBrief{ID: "web", root: "/work/repo", Lookups: []evidenceLookup{dossierLookup("q", "web/", "concept", 2, 4, nil, "")}}
+func TestBriefScoreFirstOmitsSectionsWithNothingToSay(t *testing.T) {
+	d := &ctxBrief{ID: "web", root: "/work/repo", Lookups: []evidenceLookup{lookupRecord("q", "web/", "concept", 2, 4, nil, "")}}
 	out := d.Render("## Package web", "package", briefTestTotal)
 	for _, heading := range []string{"### 1. Ranked files", "### 1b. Docs", "### 2. Interface sheet", "### 3. Existing", "### 3b.", "### 5."} {
 		if strings.Contains(out, heading) {
@@ -136,7 +138,7 @@ func TestDossierScoreFirstOmitsSectionsWithNothingToSay(t *testing.T) {
 	}
 }
 
-func TestDossierScoreFirstBudgetCutsLookAlikesBeforeTheNotes(t *testing.T) {
+func TestBriefScoreFirstBudgetCutsLookAlikesBeforeTheNotes(t *testing.T) {
 	full := scoreFixture()
 	likeMissing := func(out string) bool {
 		for i := 0; i < 12; i++ {
@@ -174,6 +176,10 @@ func TestDossierScoreFirstBudgetCutsLookAlikesBeforeTheNotes(t *testing.T) {
 	out := full.Render("## Package crm", "package", likeGoneAt-40)
 	if strings.Count(out, "Cut for") != 1 {
 		t.Errorf("cut lines %d:\n%s", strings.Count(out, "Cut for"), out)
+	}
+	wantContains(t, out, "Read the cited files with the Read tool for the rest.")
+	if strings.Contains(out, "dossier") || strings.Contains(out, "planner") {
+		t.Errorf("the cut line names the removed dossier or planner:\n%s", out)
 	}
 	if strings.Count(out, "Recorded omissions") != 0 {
 		t.Errorf("the omission list is printed in the prompt")

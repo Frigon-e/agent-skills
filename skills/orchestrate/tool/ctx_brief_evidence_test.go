@@ -10,7 +10,7 @@ import (
 	"testing"
 )
 
-func TestBriefDossierSummaryPreservesLegacySheet(t *testing.T) {
+func TestBriefSummaryPreservesLegacySheet(t *testing.T) {
 	code := rankRepo(t, map[string]string{"cli/main.py": "def dispatch_command(argv):\n    return argv[0]\n"})
 	e := newCtxEnv(code, ctxOpts{})
 	pl := e.prepareBrief(briefInput{ID: "cli", Text: "Use dispatch_command", Owns: []string{"cli/main.py"}})
@@ -75,10 +75,10 @@ printf '{"type":"search_result","results":[{"result":{"sourcePosition":{"relativ
 	return code, dir
 }
 
-func conceptJobs(n int) []dossierJob {
-	var jobs []dossierJob
+func conceptJobs(n int) []lookupJob {
+	var jobs []lookupJob
 	for k := 0; k < n; k++ {
-		jobs = append(jobs, dossierJob{name: fmt.Sprintf("q%d", k)})
+		jobs = append(jobs, lookupJob{name: fmt.Sprintf("q%d", k)})
 	}
 	return jobs
 }
@@ -131,14 +131,14 @@ func TestRunJobsAsksAgainForSearchesTheServiceRefused(t *testing.T) {
 	code, dir := jbOrderFake(t, 8, 4)
 	os.WriteFile(filepath.Join(dir, "limit"), []byte("12"), 0o644)
 	waits := 0
-	old := dossierCooldownWait
-	dossierCooldownWait = func(bin string) {
+	old := lookupCooldownWait
+	lookupCooldownWait = func(bin string) {
 		waits++
 		jbCoolMu.Lock()
 		delete(jbCoolUntil, bin)
 		jbCoolMu.Unlock()
 	}
-	defer func() { dossierCooldownWait = old }()
+	defer func() { lookupCooldownWait = old }()
 	outs := newCtxEnv(code, ctxOpts{}).runJobs(conceptJobs(8))
 	for k, o := range outs {
 		if o.err != nil || len(o.hits) != 1 || o.hits[0].Path != fmt.Sprintf("lib/f%d.go", k) {
@@ -154,7 +154,7 @@ func readyCLIPacket() *gateQuestionPacket {
 	return &gateQuestionPacket{Goal: "Make command dispatch predictable", KnownFacts: []string{"The parser accepts --help and rejects an empty command."}, Unknown: "Which empty-command behavior should ship?", Options: []gatePacketOption{{"a", "Print help", "Shows available commands", "More stdout output"}, {"b", "Return an error", "Scripts detect missing input", "Users must request help separately"}}, Recommendation: "a", Rationale: "The owner wants discoverable commands", Authority: "Owner decides user-visible defaults", NextAction: "Owner selects an option, then the lead adds CLI acceptance tests"}
 }
 
-func TestDossierLookupExecutionStatesAreDistinct(t *testing.T) {
+func TestBriefLookupExecutionStatesAreDistinct(t *testing.T) {
 	for _, tc := range []struct {
 		name         string
 		lk           evidenceLookup
@@ -162,9 +162,9 @@ func TestDossierLookupExecutionStatesAreDistinct(t *testing.T) {
 		status       string
 		completeness evidenceCompleteness
 	}{
-		{"failed", dossierLookup("dispatch", "cli", "concept", 0, 4, fmt.Errorf("index unavailable"), ""), lookupFailed, "failed", evidenceUnknown},
-		{"empty", dossierLookup("dispatch", "cli", "text", 0, 0, nil, ""), lookupSucceeded, "empty", evidenceComplete},
-		{"unavailable", dossierLookup("dispatch", "cli", "concept", 0, 4, nil, "backend missing"), lookupUnavailable, "", evidenceUnknown},
+		{"failed", lookupRecord("dispatch", "cli", "concept", 0, 4, fmt.Errorf("index unavailable"), ""), lookupFailed, "failed", evidenceUnknown},
+		{"empty", lookupRecord("dispatch", "cli", "text", 0, 0, nil, ""), lookupSucceeded, "empty", evidenceComplete},
+		{"unavailable", lookupRecord("dispatch", "cli", "concept", 0, 4, nil, "backend missing"), lookupUnavailable, "", evidenceUnknown},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if err := tc.lk.Validate(evidenceEnvelope{Completeness: evidenceUnknown}); err != nil {
@@ -175,13 +175,13 @@ func TestDossierLookupExecutionStatesAreDistinct(t *testing.T) {
 			}
 		})
 	}
-	l := dossierLookup("dispatch", "cli", "concept", 0, 4, nil, "")
+	l := lookupRecord("dispatch", "cli", "concept", 0, 4, nil, "")
 	if l.ExecutionStatus != lookupSucceeded || l.CountKind != evidenceCountUnknown || l.Completeness != evidencePartial {
 		t.Fatalf("semantic window manufactured absence: %+v", l)
 	}
 }
 
-func TestDossierOneBudgetIncludesEverySection(t *testing.T) {
+func TestBriefOneBudgetIncludesEverySection(t *testing.T) {
 	d := &ctxBrief{ID: "cli", Files: []string{strings.Repeat("ranked ", 100)}, Docs: []string{strings.Repeat("docs ", 200)}, Sheet: []string{strings.Repeat("signature ", 200)}, Like: []string{strings.Repeat("candidate ", 200)}}
 	for _, budget := range []int{500, 2000, 6000} {
 		got := d.Render("## CLI", "package", budget)
@@ -216,7 +216,7 @@ func TestEnrichPacketsReuseReviewFieldsAndGateReadiness(t *testing.T) {
 	}
 }
 
-func TestDossierAdversaryCoveragePersistsWithoutChangingTheReview(t *testing.T) {
+func TestBriefAdversaryCoveragePersistsWithoutChangingTheReview(t *testing.T) {
 	for _, tc := range []struct{ raw, want string }{{`{"findings":[]}`, "coverage: not reported"}, {`{"findings":[],"coverage_gaps":[]}`, "coverage: reviewer reported no further gaps"}, {`{"findings":[],"coverage_gaps":["incoming registrations not checked: turn budget"]}`, "reported coverage gap: incoming registrations not checked"}} {
 		calls := 0
 		apply := func(raw string, rec *gateRecord, repo string, sp *spec) error {
@@ -242,7 +242,7 @@ func TestDossierAdversaryCoveragePersistsWithoutChangingTheReview(t *testing.T) 
 	}
 }
 
-func TestDossierStablePrefixClassesIgnoreGroupOrder(t *testing.T) {
+func TestBriefStablePrefixClassesIgnoreGroupOrder(t *testing.T) {
 	shared := "same byte-identical spec and package index"
 	for _, class := range []string{"adversary", "group"} {
 		a := newGatePass("first", class, shared, "group B", "TAG", "task B", `{"questions":[]}`, nil)
