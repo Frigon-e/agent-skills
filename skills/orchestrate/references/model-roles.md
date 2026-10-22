@@ -46,8 +46,8 @@ Choices are filtered by their connector health and credential readiness.
 A missing role gets its defaults even when other roles are explicitly set.
 
 `orch gate spec.md --runner pi:openrouter/~deepseek/deepseek-flash-latest,claude:haiku:low`
-sets the run's ordered list. `ORCH_GATE_MODEL` prepends that pi model when
-there is no `--runner`. `ORCH_PI` and `ORCH_CLAUDE` override headless binaries.
+sets the run's ordered list. `ORCH_PI` and `ORCH_CLAUDE` override the pi and
+Claude binaries.
 A profile marked `degraded = true` requires user approval and `--degraded`.
 `site.runModel(role, prompt, ...modelOptions)` is the tool-less conversational
 entry point for generation commands. API Decider calls use the API wrapper.
@@ -152,8 +152,8 @@ or change triage. The production route stays deterministic pending trial.
 ## Optional gate adjudication infrastructure
 
 `gate_adjudicator` is separate from the main `gate` reviewer and the triage
-`decider`. It may use the same model without sharing a conversation. Neither
-`triage_model` nor `ORCH_GATE_MODEL` changes this role. Existing runner override,
+`decider`. It may use the same model without sharing a conversation. `triage_model`
+does not change this role. Existing runner override,
 health, allowlist and approved degraded-profile rules still apply through
 `newRoleRun`. Gate reviewer command overrides do not reroute adjudication.
 
@@ -389,16 +389,16 @@ integration limitation for the parent to resolve. Off keeps the original read/se
 tools without adding the notice or ctx environment. Tool-less passes stay
 tool-less even with ctx enabled.
 
-`--context-files on|off` defaults to off. Pi gets `--no-context-files` when
-off, and omits it when on. Claude gets
-`--settings '{"claudeMdExcludes":["**"]}'` when off, and omits it when on.
-This controls CLAUDE.md discovery without `--bare`, whose documented auth
-restriction would break subscription users. It is the nearest Claude
-equivalent, not a promise that every harness loads AGENTS.md identically.
-Gate/experiment records, reports and compare identify these switch values and
-`ctx_shell` (effective `open` with ctx off; absent historical fields read as `open`).
-For example, `orch gate spec.md --ctx-tool on --ctx-shell ctx-only --context-files off`
-spells out the defaults; no config key changes this default.
+Repository context files are never loaded. Pi gets `--no-context-files`. Claude
+gets `--settings '{"claudeMdExcludes":["**"]}'`. This controls CLAUDE.md
+discovery without `--bare`, whose documented auth restriction would break
+subscription users. It is the nearest Claude equivalent, not a promise that
+every harness loads AGENTS.md identically. Gate/experiment records, reports and
+compare identify `ctx_tool` and `ctx_shell` (effective `open` with ctx off;
+absent historical fields read as `open`); old records keep and print their
+`context_files` and `cache` values. For example,
+`orch gate spec.md --ctx-tool on --ctx-shell ctx-only` spells out the defaults;
+no config key changes them.
 
 Before any model pass, the gate fingerprints Git status (NUL-separated,
 including every non-ignored untracked file), the diff against HEAD, HEAD
@@ -422,15 +422,13 @@ guard, pinned ctx commands and post-pass check are not an operating-system
 sandbox.
 
 Fake tests cover argv, environment exports, prompt/cache bytes, context
-switches, transcripts and mutations under both harnesses. Opt-in installed
-Claude tests use isolated loopback mocks and dummy credentials:
+switches, transcripts and mutations under both harnesses. The opt-in installed
+Claude test uses isolated loopback mocks and dummy credentials:
 
 ```sh
-ORCH_TEST_RUNNER_CLAUDE=1 go test -v -run 'TestInstalledClaude(RefusesMutatingTools|ContextFilesToggle)'
+ORCH_TEST_RUNNER_CLAUDE=1 go test -v -run 'TestInstalledClaudeRefusesMutatingTools'
 ```
 
-The original mutation test verifies tools-off Bash/Edit/Write refusal. The
-new test measures whether a CLAUDE.md sentinel reaches the mock model for
-each context-files setting. CLI-only command permission verification belongs
+It verifies tools-off Bash/Edit/Write refusal. CLI-only command permission verification belongs
 to the ctx CLI implementation's installed-harness tests. No paid traffic is
 needed for these experiments.
