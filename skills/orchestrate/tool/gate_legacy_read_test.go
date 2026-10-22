@@ -172,3 +172,34 @@ func TestAuditGateStateAndHistoricalLabels(t *testing.T) {
 		}
 	}
 }
+
+func TestGateRecordIgnoresRemovedDossierFields(t *testing.T) {
+	data := []byte(`{"schema_version":2,"state":"experiment","spec":"spec.md","only":["group:a"],"cache":"short",
+		"dossier":"code","dossier_chars":12345,"dossier_manifest":{"lookups":[{"id":"l1"}]},
+		"shadow":[{"exp":"x"}],"review_policy":{"dossier":"code","verdicts":true},
+		"pass_errors":{"group:a":"late"},"notes":["kept"]}`)
+	var rec gateRecord
+	if err := json.Unmarshal(data, &rec); err != nil {
+		t.Fatal(err)
+	}
+	if rec.State != "experiment" || rec.Cache != "short" || rec.PassErrors["group:a"] != "late" || len(rec.Notes) != 1 {
+		t.Fatalf("old record lost current fields: %+v", rec)
+	}
+	b, err := json.Marshal(rec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, old := range []string{`"dossier":"code"`, "dossier_chars", "dossier_manifest", `"l1"`, `"shadow":[`} {
+		if strings.Contains(string(b), old) {
+			t.Fatalf("removed field %s was written back: %s", old, b)
+		}
+	}
+	var out strings.Builder
+	describeExperiment(&out, "A", "old", &rec, t.TempDir())
+	if !strings.Contains(out.String(), "experiment A: old (cache short") {
+		t.Fatalf("old record did not describe: %q", out.String())
+	}
+	if arm := loadArm(t.TempDir(), "old", t.TempDir(), &rec); arm == nil {
+		t.Fatal("old record did not load as an arm")
+	}
+}

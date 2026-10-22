@@ -49,7 +49,7 @@ func TestRoleConfigAndClaudeOnlyDefaults(t *testing.T) {
 			t.Fatalf("%s: %v %v", name, ps, skips)
 		}
 	}
-	for _, name := range []string{"shadow_flash", "decider"} {
+	for _, name := range []string{"decider"} {
 		r, _ := s.newRoleRun(name, modelOptions{})
 		if ps, _ := r.available(); len(ps) != 0 {
 			t.Fatalf("%s unexpectedly available: %v", name, ps)
@@ -75,6 +75,23 @@ enabled = false
 	}
 }
 
+func TestRemovedShadowRoleIsIgnoredOnLoad(t *testing.T) {
+	h := setup(t)
+	path := filepath.Join(h.tmp, "roles.toml")
+	t.Setenv("ORCH_CONFIG", path)
+	raw := "reuse_shadow = \"all\"\n[roles.shadow_flash]\nuse = [{harness=\"api\", provider=\"openrouter\", model=\"test-model\"}]\n"
+	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := loadConfig(h.repo)
+	if err != nil {
+		t.Fatalf("removed keys must load without error: %v", err)
+	}
+	if _, ok := cfg.Roles["shadow_flash"]; ok {
+		t.Fatal("removed role kept after load")
+	}
+}
+
 func TestRoleAdjudicatorAPIConfigIsScoped(t *testing.T) {
 	h := setup(t)
 	path := filepath.Join(h.tmp, "adjudicator-roles.toml")
@@ -88,7 +105,6 @@ func TestRoleAdjudicatorAPIConfigIsScoped(t *testing.T) {
 		{"gate_adjudicator", "claude", "", true},
 		{"gate", "api", "openrouter", false},
 		{"spec_queries", "api", "openrouter", false},
-		{"shadow_flash", "api", "openrouter", false},
 		{"decider", "claude", "", false},
 		{"gate_adjudicator", "api", "", false},
 		{"gate_adjudicator", "api", "bad/provider", false},
