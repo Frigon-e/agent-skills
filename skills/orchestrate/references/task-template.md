@@ -20,7 +20,7 @@ Out: {{what it must not touch, and which other task owns it if any}}
 
 # Pointers
 
-{{Where to start reading, one per line: `path/file.ext:line` - why it matters; docs, ADRs, issues, earlier task reports. Pointers, not pasted content: cite a spec or doc section as `path:first-last`, never paste it, and never point at a whole file larger than 8 KB. Every character of this brief is re-read by the lead on every turn and after each compaction, so keep the whole brief under 15 KB (`orch check` warns above 15000 characters) and write nothing twice. To find more, search with `orch ctx` (find, sym, text, batch) before reading files.}}
+{{Where to start reading, one per line: `path/file.ext:line` - why it matters; docs, ADRs, issues, earlier task reports. Pointers, not pasted content: cite a spec or doc section as `path:first-last`, never paste it, and never point at a whole file larger than 8 KB or at a file that loads on its own (root and nested `CLAUDE.md`). Every character of this brief is re-read by the lead on every turn and after each compaction, so keep the whole brief under 15 KB (`orch check` warns above 15000 characters) and write nothing twice. To find more, search with `orch ctx` (find, sym, text, batch) before reading files.}}
 
 # Spec
 

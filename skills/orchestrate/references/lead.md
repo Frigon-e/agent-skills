@@ -20,6 +20,7 @@ Your task.md is the contract. Its Report-back section gives the exact
   rest out of it (Context budget below).
 - Keep a short `notes.md` in the task directory (decisions, done, next);
   update it at each wave or milestone.
+- Every subagent prompt, built-in types included, carries the tool-rules sentence from `route-work`, section 4, verbatim.
 - Implementers run `sonnet`, or `haiku` for mechanical work; never pass
   `opus` down by default, even on an Opus lead (`route-work`, "Model rule").
 - Batch: independent edits and calls go in one turn as parallel calls; one
