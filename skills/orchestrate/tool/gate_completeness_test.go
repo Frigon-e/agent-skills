@@ -179,7 +179,7 @@ func TestGateSchemaRepairSharesCoverageSlot(t *testing.T) {
  *) echo '{"findings":[]}';;
  esac
 `})
-			code, out := h.run("gate", "spec.md", "--verdicts", "--runner", "pi:"+gateModelDef)
+			code, out := h.run("gate", "spec.md", "--dossier", "code", "--verdicts", "--runner", "pi:"+gateModelDef)
 			if complete && code != 0 {
 				t.Fatalf("complete schema repair failed: %s", out)
 			}

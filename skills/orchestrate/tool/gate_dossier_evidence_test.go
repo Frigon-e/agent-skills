@@ -477,7 +477,7 @@ func TestGateDossierCLIHasUsefulPythonAndTypeScriptContextWithoutFormatterCalls(
 			q := gateQuestion{Question: "Which default behavior should `dispatch_command` use when a command is missing?", Decisive: true, Packet: readyCLIPacket()}
 			answer, _ := json.Marshal(map[string]any{"id": "cli", "will_change": []string{}, "claims": []any{}, "questions": []gateQuestion{q}, "reuse": []any{}})
 			dir := h.fakePi(gatePasses(map[string]string{"package-cli": string(answer)}))
-			code, out := h.run("gate", "spec.md")
+			code, out := h.run("gate", "spec.md", "--dossier", "code")
 			if code != 1 {
 				t.Fatalf("gate exit=%d %s", code, out)
 			}

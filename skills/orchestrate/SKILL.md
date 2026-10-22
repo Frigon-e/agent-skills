@@ -195,9 +195,11 @@ files or use the network. Native read can still read outside the repo in either
 mode. The guard, prompt, pinned read-only ctx mode and post-pass check are not
 an operating-system sandbox.
 
-Gate options. Before each group pass the gate puts a code-built dossier after
-the package text (`--dossier code`, the default; `off` is the old prompt, `plan`
-adds a tool-less planner pass whose lookups code runs): ranked files, an
+Gate options. The dossier is off by default (`--dossier off`, the plain prompt):
+a blind comparison (n=3 per arm) found no quality gain from the code-built
+dossier and about double the wall time. With `--dossier code` the gate puts a
+code-built dossier after the package text before each group pass (`plan` adds a
+tool-less planner pass whose lookups code runs): ranked files, an
 interface sheet, existing look-alikes outside the package's `owns`, and names
 found nowhere, written to `gate/<hash>/dossier/<package>.md`. Each pass is given a turn budget (10 plus 5 per
 package, 40 for adversaries): at the budget a pane agent is told once to answer,

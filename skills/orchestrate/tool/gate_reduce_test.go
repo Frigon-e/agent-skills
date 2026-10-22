@@ -507,7 +507,7 @@ func TestGateStateSupportingRepairCompletesTheSameClaim(t *testing.T) {
 				retry = strings.Replace(retry, `"item":"api#1","verdict":"reuse"`, `"item":"api#1","verdict":"extend","missing_behavior":"Change storage"`, 1)
 			}
 			scriptPi(t, h, group, retry)
-			code, out := h.run("gate", "spec.md", "--verdicts")
+			code, out := h.run("gate", "spec.md", "--dossier", "code", "--verdicts")
 			rec := readRecord(t, dir)
 			if conflict {
 				if code != 1 || rec.State != "incomplete" || len(rec.Review.Repairs) != 0 {
@@ -675,7 +675,7 @@ func TestGateStateIgnoredEvidenceIsRevalidatedForApproval(t *testing.T) {
 	h.git("commit", "-qm", "Ignore runtime artifacts")
 	reply := `{"packages":[{"id":"api","will_change":[],"claims":[],"questions":[],"items":[{"item":"api#1","verdict":"reuse","candidate":"ignored/writer.py:1","why":"Writer exists","matching_behavior":"Writes output","support_assessment":{"schema_version":1,"state":"supported","rationale":"The writer implements output"}},{"item":"api#2","verdict":"extend","candidate":"ignored/writer.py:1","why":"Add the endpoint beside the writer","matching_behavior":"Writes output","missing_behavior":"Add the endpoint","support_assessment":{"schema_version":1,"state":"supported","rationale":"Writer exists but endpoint behavior is missing"}}]}]}`
 	scriptPi(t, h, reply, reply)
-	h.must("gate", "spec.md", "--verdicts")
+	h.must("gate", "spec.md", "--dossier", "code", "--verdicts")
 	src := mustRead(t, h.repo+"/spec.md")
 	before, err := captureGateSubject(h.repo, src)
 	if err != nil {
