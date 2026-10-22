@@ -724,7 +724,7 @@ func gatePackageOwn(block string) string {
 // runPi runs one headless read-only pi pass and returns its text. The session
 // is saved under sessionDir so a failed pass can be read afterwards. A pass
 // whose session files show no change for gateStall is cancelled.
-func runPi(repo, model string, p gatePass, sessionDir, cache string) (string, error) {
+func runPi(repo, model string, p gatePass, sessionDir string) (string, error) {
 	var err error
 	p, err = gateAgentPass(repo, "pi", p)
 	if err != nil {
@@ -755,10 +755,7 @@ func runPi(repo, model string, p gatePass, sessionDir, cache string) (string, er
 	}()
 	args := []string{"-p", "--session-dir", sessionDir, "--no-extensions"}
 	args = append(args, piGuardArgs(p)...)
-	args = append(args, "--no-skills")
-	if !p.contextFiles {
-		args = append(args, "--no-context-files")
-	}
+	args = append(args, "--no-skills", "--no-context-files")
 	args = append(args, piPassTools(p)...)
 	if p.effort != "" {
 		args = append(args, "--thinking", p.effort)
@@ -766,7 +763,7 @@ func runPi(repo, model string, p gatePass, sessionDir, cache string) (string, er
 	cmd := processCommandContext(ctx, envOr("ORCH_PI", "pi"), append(args, "--model", model, p.prompt)...)
 	defer cmd.Cancel()
 	cmd.Dir = repo
-	cmd.Env = agentEnv(piEnv(cache), p.cli.Env)
+	cmd.Env = agentEnv(nil, p.cli.Env)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
@@ -791,25 +788,6 @@ func runPi(repo, model string, p gatePass, sessionDir, cache string) (string, er
 		return "", err
 	}
 	return string(out), nil
-}
-
-// piEnv is the environment of a headless pi for a --cache setting: long sets
-// PI_CACHE_RETENTION=long (extended provider prompt caching), an explicit short
-// removes it, and "" leaves the environment alone (nil inherits).
-func piEnv(cache string) []string {
-	if cache == "" {
-		return nil
-	}
-	var env []string
-	for _, kv := range os.Environ() {
-		if !strings.HasPrefix(kv, "PI_CACHE_RETENTION=") {
-			env = append(env, kv)
-		}
-	}
-	if cache == "long" {
-		env = append(env, "PI_CACHE_RETENTION=long")
-	}
-	return env
 }
 
 // sessionStamp changes whenever a session file under dir is written: the
@@ -852,7 +830,6 @@ type gatePass struct {
 	noTools      bool   // the pass gets no tools at all
 	ctxTool      bool
 	ctxOnly      bool // pi: read tool plus a shell limited to orch ctx
-	contextFiles bool
 	cli          CtxCLI
 	ctx          context.Context
 	sessionDir   string           // invocation-local session; retries retain earlier usage
@@ -1021,14 +998,12 @@ func cmdGateEnrich(a *app, args []string) error {
 
 // gateOpts are the options of one gate run.
 type gateOpts struct {
-	cache        string // "" leaves the environment alone, else short or long
-	keep         bool   // keep the sessions of passes that succeeded
-	headless     bool   // run passes without panes even inside herdr
-	runner       *roleRun
-	ctxTool      bool
-	ctxOnly      bool
-	contextFiles bool
-	guard        *checkoutGuard
+	keep     bool // keep the sessions of passes that succeeded (experiments)
+	headless bool // tests only: run passes without panes even inside herdr
+	runner   *roleRun
+	ctxTool  bool
+	ctxOnly  bool
+	guard    *checkoutGuard
 }
 
 var experimentRe = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,40}$`)
@@ -1085,11 +1060,7 @@ func cmdGate(a *app, args []string) (retErr error) {
 	onlyF := fs.String("only", "", "experiment: run only these group passes (comma-separated keys); needs --experiment")
 	expF := fs.String("experiment", "", "experiment: write everything under the gate dir's experiments/<name>/ and leave the real gate record alone")
 	benchSuiteF := fs.String("bench-suite", "", "durable benchmark suite for experiment runs (default: user bench_suite, or none)")
-	cacheF := fs.String("cache", "", "short or long: set PI_CACHE_RETENTION for the pi passes (default: leave it as it is)")
-	keep := fs.Bool("keep-sessions", false, "keep the sessions of passes that succeeded (experiments always do)")
-	headless := fs.Bool("headless", false, "run the passes without herdr panes (ORCH_HEADLESS=1 does the same)")
 	ctxTool := fs.String("ctx-tool", "on", "on or off: read-only orch ctx CLI in gate agents (default on)")
-	contextFiles := fs.String("context-files", "off", "on or off: load repository context files (default off)")
 	ctxShell := fs.String("ctx-shell", "ctx-only", "open or ctx-only: pi with ctx-tool on defaults to read plus an orch ctx-only shell; open opts out; ignored by Claude and with ctx-tool off")
 	runnerF := fs.String("runner", "", "ordered harness:model[:effort],... choices for this run")
 	degraded := fs.Bool("degraded", false, "allow degraded role choices approved by the user")
@@ -1104,6 +1075,14 @@ func cmdGate(a *app, args []string) (retErr error) {
 		if name == "ctx-profile" && strings.HasPrefix(arg, "-") {
 			return fail("--ctx-profile was removed")
 		}
+		if strings.HasPrefix(arg, "-") {
+			switch name {
+			case "cache", "keep-sessions", "context-files":
+				return fail("--%s was removed", name)
+			case "headless":
+				return fail("--headless was removed; gate passes run in herdr panes")
+			}
+		}
 	}
 	pos, err := parseArgs(fs, args)
 	if err != nil {
@@ -1115,21 +1094,14 @@ func cmdGate(a *app, args []string) (retErr error) {
 	if *schemaVersion != 2 {
 		return fail("--schema-version is 2, not %d; use --schema-version 2 (the default)", *schemaVersion)
 	}
-	if err := exactArgs(pos, 1, "gate <spec> [--dry-run] [--cache short|long] [--keep-sessions] [--headless] | gate <spec> --only <group-key>[,...] --experiment <name> | gate enrich <spec> | gate compare <spec> <experiment-a> <experiment-b>"); err != nil {
+	if err := exactArgs(pos, 1, "gate <spec> [--dry-run] | gate <spec> --only <group-key>[,...] --experiment <name> | gate enrich <spec> | gate compare <spec> <experiment-a> <experiment-b>"); err != nil {
 		return err
 	}
-	for name, value := range map[string]string{"ctx-tool": *ctxTool, "context-files": *contextFiles} {
-		if value != "on" && value != "off" {
-			return fail("--%s is on or off, not %q", name, value)
-		}
+	if *ctxTool != "on" && *ctxTool != "off" {
+		return fail("--ctx-tool is on or off, not %q", *ctxTool)
 	}
 	if *ctxShell != "open" && *ctxShell != "ctx-only" {
 		return fail("--ctx-shell is open or ctx-only, not %q", *ctxShell)
-	}
-	switch *cacheF {
-	case "", "short", "long":
-	default:
-		return fail("--cache is short or long, not %q", *cacheF)
 	}
 	if (*onlyF == "") != (*expF == "") {
 		return fail("--only and --experiment go together")
@@ -1137,7 +1109,10 @@ func cmdGate(a *app, args []string) (retErr error) {
 	if *expF != "" && !experimentRe.MatchString(*expF) {
 		return fail("--experiment %q: use lowercase letters, digits, '.', '_' and '-'", *expF)
 	}
-	opts := gateOpts{ctxTool: *ctxTool == "on", ctxOnly: *ctxShell == "ctx-only" && *ctxTool == "on", contextFiles: *contextFiles == "on", cache: *cacheF, keep: *keep || *expF != "", headless: *headless || os.Getenv("ORCH_HEADLESS") == "1"}
+	if !*dry && !gatePaneMode() && !gateOutsideHerdr {
+		return fail("gate passes run in herdr panes; start orch gate inside herdr")
+	}
+	opts := gateOpts{ctxTool: *ctxTool == "on", ctxOnly: *ctxShell == "ctx-only" && *ctxTool == "on", keep: *expF != ""}
 	if err := paneOrchOnPath(opts, *dry); err != nil {
 		return fail("%v", err)
 	}
@@ -1169,17 +1144,13 @@ func cmdGate(a *app, args []string) (retErr error) {
 			return err
 		}
 	}
-	cacheName := opts.cache
-	if cacheName == "" {
-		cacheName = "short"
-	}
 	rec := &gateRecord{Spec: pos[0], Hash: hash, At: a.now().Unix(), PassErrors: map[string]string{}, PassSeconds: map[string]int{}, PassKept: map[string]string{}, PassTokens: map[string]passTokens{}, Groups: map[string][]string{},
-		Cache: cacheName, SpecRel: rel, CtxTool: onOff(opts.ctxTool), ContextFiles: onOff(opts.contextFiles)}
+		SpecRel: rel, CtxTool: onOff(opts.ctxTool)}
 	rec.CtxShell = "open"
 	if opts.ctxOnly {
 		rec.CtxShell = "ctx-only"
 	}
-	rec.ReviewPolicy = &gateReviewPolicy{Version: gateReviewPolicyVersion, CtxTool: rec.CtxTool, ContextFiles: rec.ContextFiles, CtxShell: rec.CtxShell}
+	rec.ReviewPolicy = &gateReviewPolicy{Version: gateReviewPolicyVersion, CtxTool: rec.CtxTool, CtxShell: rec.CtxShell}
 	rec.BenchBuild = benchBuildNow()
 	rec.BenchInputs = benchInputs{Repo: code, SpecPath: rel, SpecHash: hash, SpecSHA256: benchHash([]byte(src))}
 	rec.BenchConfig = benchConfig{Roles: s.cfg.Roles, Flags: append([]string(nil), args...), Command: benchCommand(args), Budgets: map[string]int{}}
@@ -1272,9 +1243,9 @@ func cmdGate(a *app, args []string) (retErr error) {
 		}
 	}
 
-	view := gateInformation{Budget: rec.Budget, SchemaVersion: rec.SchemaVersion, State: rec.State, Completion: rec.Completion, Reasons: rec.Reduction.Reasons, NextActors: rec.NextActors, NextActions: rec.NextActions, Failures: rec.Reduction.Failures, Gate: rec.State, Spec: pos[0] + " (version " + hash + ")", Report: filepath.Join(runDir, "report.md"), Bench: benchID, Warning: treeWarning(rec), Cache: opts.cache, Tokens: rec.tokenSummary(), Notes: append([]string{}, rec.Notes...), PassErrors: rec.PassErrors}
+	view := gateInformation{Budget: rec.Budget, SchemaVersion: rec.SchemaVersion, State: rec.State, Completion: rec.Completion, Reasons: rec.Reduction.Reasons, NextActors: rec.NextActors, NextActions: rec.NextActions, Failures: rec.Reduction.Failures, Gate: rec.State, Spec: pos[0] + " (version " + hash + ")", Report: filepath.Join(runDir, "report.md"), Bench: benchID, Warning: treeWarning(rec), Tokens: rec.tokenSummary(), Notes: append([]string{}, rec.Notes...), PassErrors: rec.PassErrors}
 	if experiment {
-		view.Experiment = *expF + " (cache " + cacheName + ", groups " + strings.Join(onlyList, ", ") + ")"
+		view.Experiment = *expF + " (groups " + strings.Join(onlyList, ", ") + ")"
 	}
 	concerns, unverified := 0, 0
 	for _, f := range rec.Findings {
@@ -1425,7 +1396,7 @@ func runGatePasses(dir, code, model string, passes []gatePass, rec *gateRecord, 
 					return fmt.Errorf("%s: %w", lastRoute, err)
 				}
 				run1 := func(q gatePass) (string, string, error) {
-					q.ctxTool, q.ctxOnly, q.contextFiles, q.ctx = opts.ctxTool, opts.ctxOnly, opts.contextFiles, passCtx
+					q.ctxTool, q.ctxOnly, q.ctx = opts.ctxTool, opts.ctxOnly, passCtx
 					job := strings.TrimSuffix(q.name, "#retry")
 					repair := calls[job] > 0
 					calls[job]++
@@ -1444,9 +1415,9 @@ func runGatePasses(dir, code, model string, passes []gatePass, rec *gateRecord, 
 						return runBudgetedGatePass(rec.Budget, prepared, repair, fallback, func(attempt gatePass) (string, string, error) {
 							return opts.guard.run(q.name, func() (string, string, error) {
 								if pool != nil {
-									return runPaneChoice(&pane, code, choice, dir, attempt, opts.cache)
+									return runPaneChoice(&pane, code, choice, dir, attempt)
 								}
-								out, err := runHeadless(code, choice, attempt, attempt.sessionDir, opts.cache)
+								out, err := runHeadless(code, choice, attempt, attempt.sessionDir)
 								return out, "", err
 							})
 						})
@@ -1849,7 +1820,7 @@ func writeGate(dir string, rec *gateRecord) error {
 	} else if label := storedGateResultLabel(rec); label != "" {
 		fmt.Fprintf(&r, "Historical result: **%s** (legacy record, not a v2 state)\n\n", label)
 	}
-	fmt.Fprintf(&r, "ctx_tool: %s; context_files: %s; ctx_shell: %s%s\n\n", orDefault(rec.CtxTool, "off (legacy)"), orDefault(rec.ContextFiles, "off (legacy)"), orDefault(rec.CtxShell, "open"), legacyCtxProfile(rec))
+	fmt.Fprintf(&r, "ctx_tool: %s; ctx_shell: %s%s%s\n\n", orDefault(rec.CtxTool, "off (legacy)"), orDefault(rec.CtxShell, "open"), legacyContextFiles(rec), legacyCtxProfile(rec))
 	if t := rec.tokenSummary(); t != "" {
 		fmt.Fprintf(&r, "Tokens: %s\n\n", t)
 	}
@@ -1961,11 +1932,6 @@ func gateDryRun(a *app, specArg, hash, code, src, rel string, cfg config, sp *sp
 	for _, d := range det {
 		fmt.Fprintf(a.out, "  %s\n", d)
 	}
-	cache := opts.cache
-	if cache == "" {
-		cache = "short"
-	}
-	fmt.Fprintf(a.out, "cache: %s\n", cache)
 	items, _ := specItems(sp)
 	n := 0
 	for _, its := range items {

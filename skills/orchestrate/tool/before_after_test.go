@@ -102,11 +102,17 @@ func beforeAfterEmit(t *testing.T, name, side, result string) {
 
 func beforeAfterGate(t *testing.T, h *harness, bin string, before bool, extra ...string) (int, map[string]any) {
 	t.Helper()
-	args := append([]string{"gate", "spec.md", "--headless", "--ctx-tool", "off"}, extra...)
-	if !before {
-		args = append(args, "--json")
+	args := append([]string{"gate", "spec.md", "--ctx-tool", "off"}, extra...)
+	var code int
+	var out string
+	if before {
+		// The baseline binary still has the flag. The current build has no
+		// headless switch, so it runs in process with the test seam instead.
+		code, out = beforeAfterCLI(t, h, bin, append(args, "--headless")...)
+	} else {
+		t.Setenv("HERDR_ENV", "")
+		code, out = h.run(append(args, "--json")...)
 	}
-	code, out := beforeAfterCLI(t, h, bin, args...)
 	dir := gateDir(h.a.siteRoot(t), specHash(mustRead(t, filepath.Join(h.repo, "spec.md"))))
 	path := filepath.Join(dir, "gate.json")
 	if !exists(path) {

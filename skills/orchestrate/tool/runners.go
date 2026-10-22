@@ -313,7 +313,7 @@ func (s site) runModel(role, prompt string, opts ...modelOptions) (string, error
 	defer os.RemoveAll(dir)
 	out, _, _, err := r.run(func(p profile) (string, string, error) {
 		pass := gatePass{prompt: prompt, noTools: true}
-		out, err := runHeadless(s.repo, p, pass, dir, "")
+		out, err := runHeadless(s.repo, p, pass, dir)
 		if err == nil && strings.TrimSpace(out) == "" {
 			err = fmt.Errorf("%s unavailable: empty reply from %s", role, p.String())
 		}
@@ -322,12 +322,12 @@ func (s site) runModel(role, prompt string, opts ...modelOptions) (string, error
 	return out, err
 }
 
-func runHeadless(repo string, p profile, pass gatePass, session, cache string) (string, error) {
+func runHeadless(repo string, p profile, pass gatePass, session string) (string, error) {
 	if p.Harness == "claude" {
 		return runClaude(repo, p, pass, session)
 	}
 	pass.effort = p.Effort
-	return runPi(repo, p.Model, pass, session, cache)
+	return runPi(repo, p.Model, pass, session)
 }
 
 func newClaudeSessionID() string {

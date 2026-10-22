@@ -26,18 +26,22 @@ func gatePaneMode() bool {
 
 // paneOrchOnPath fails a pane run with the ctx tool when orch is not on PATH:
 // pane passes call orch ctx through the pane shell's own PATH, which orch never
-// edits. A dry run or a headless run starts no pane.
+// edits. A dry run starts no pane.
 func paneOrchOnPath(opts gateOpts, dry bool) error {
 	if !opts.ctxTool || opts.headless || dry || !gatePaneMode() {
 		return nil
 	}
 	if _, err := exec.LookPath("orch"); err != nil {
-		return fmt.Errorf("orch is not on PATH, so gate panes cannot run orch ctx: link it, for example ln -s %s ~/.local/bin/orch, or pass --headless", selfPath())
+		return fmt.Errorf("orch is not on PATH, so gate panes cannot run orch ctx: link it, for example ln -s %s ~/.local/bin/orch", selfPath())
 	}
 	return nil
 }
 
-var unsafeFileRe =regexp.MustCompile(`[^A-Za-z0-9._+-]`)
+// gateOutsideHerdr lets a gate run outside herdr, with its passes headless.
+// Only tests set it; the command refuses to run gate passes outside herdr.
+var gateOutsideHerdr bool
+
+var unsafeFileRe = regexp.MustCompile(`[^A-Za-z0-9._+-]`)
 
 // passFile maps a pass name such as "package:api" to a safe file name.
 func passFile(name string) string { return unsafeFileRe.ReplaceAllString(name, "-") }
@@ -252,11 +256,11 @@ func paneAnswered(session, transcript string) bool {
 // the text of the last assistant message in pi's saved session. The shared and
 // task files are the prompt. The agent is addressed by pane id; its name is
 // only a best-effort label.
-func runPanePass(pane *string, repo, model, gdir string, p gatePass, cache string) (reply, hit string, err error) {
-	return runPaneChoice(pane, repo, profile{Harness: "pi", Model: model}, gdir, p, cache)
+func runPanePass(pane *string, repo, model, gdir string, p gatePass) (reply, hit string, err error) {
+	return runPaneChoice(pane, repo, profile{Harness: "pi", Model: model}, gdir, p)
 }
 
-func runPaneChoice(pane *string, repo string, choice profile, gdir string, p gatePass, cache string) (reply, hit string, err error) {
+func runPaneChoice(pane *string, repo string, choice profile, gdir string, p gatePass) (reply, hit string, err error) {
 	p, err = gateAgentPass(repo, choice.Harness, p)
 	if err != nil {
 		return "", "", err
@@ -295,10 +299,7 @@ func runPaneChoice(pane *string, repo string, choice profile, gdir string, p gat
 		argv = append(argv, "-e", f)
 	}
 	argv = append(argv, piGuardArgs(p)...)
-	argv = append(argv, "--no-skills")
-	if !p.contextFiles {
-		argv = append(argv, "--no-context-files")
-	}
+	argv = append(argv, "--no-skills", "--no-context-files")
 	argv = append(argv, piPassTools(p)...)
 	if choice.Effort != "" {
 		argv = append(argv, "--thinking", choice.Effort)
@@ -313,7 +314,7 @@ func runPaneChoice(pane *string, repo string, choice profile, gdir string, p gat
 		argv = append(argv, "--session-id", id, p.shared+"\n\n"+p.task)
 	}
 	agent := agentName(gdir, *pane, p.name)
-	if err = os.WriteFile(launcher, []byte(paneLaunchScript(p.name+": herdr agent "+agent, p.cli.Env, cache, argv)), 0o600); err != nil {
+	if err = os.WriteFile(launcher, []byte(paneLaunchScript(p.name+": herdr agent "+agent, p.cli.Env, argv)), 0o600); err != nil {
 		return "", "", err
 	}
 	start := time.Now()

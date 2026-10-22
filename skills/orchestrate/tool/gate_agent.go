@@ -209,21 +209,18 @@ func claudePassArgs(choice profile, p gatePass) []string {
 			}
 		}
 	}
-	if !p.contextFiles {
-		// Exclude repository memories without --bare, which disables subscription auth.
-		args = append(args, "--settings", `{"claudeMdExcludes":["**"]}`)
-	}
-	return args
+	// Exclude repository memories without --bare, which disables subscription auth.
+	return append(args, "--settings", `{"claudeMdExcludes":["**"]}`)
 }
 
-// paneLaunchScript is the sh script a pane pass runs: it exports env, sets or
-// clears PI_CACHE_RETENTION for an explicit cache, and execs argv. The pane's
+// paneLaunchScript is the sh script a pane pass runs: it exports env and
+// execs argv. The pane's
 // shell only types `sh <script>`. Typing the exports and the long agent
 // command instead overflowed the terminal's input queue (about 1 KB on macOS)
 // while a fresh pane's shell was still starting, which dropped bytes and
 // merged lines. The exports live only in the agent's process, never in the
 // pane's shell. PATH is not touched: the pane's own PATH must find orch.
-func paneLaunchScript(header string, env []string, cache string, argv []string) string {
+func paneLaunchScript(header string, env []string, argv []string) string {
 	var b strings.Builder
 	b.WriteString("# orch gate pass " + strings.ReplaceAll(header, "\n", " ") + "\n")
 	for _, entry := range env {
@@ -233,12 +230,6 @@ func paneLaunchScript(header string, env []string, cache string, argv []string) 
 		}
 		// Env names come from CtxCLIFor; values remain literal shell strings.
 		b.WriteString("export " + key + "=" + shellQuote(value) + "\n")
-	}
-	switch cache {
-	case "long":
-		b.WriteString("export PI_CACHE_RETENTION=long\n")
-	case "short":
-		b.WriteString("unset PI_CACHE_RETENTION\n")
 	}
 	b.WriteString("exec")
 	for _, a := range argv {

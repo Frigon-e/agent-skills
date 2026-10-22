@@ -57,48 +57,46 @@ func TestGateAgentPrefixAndTools(t *testing.T) {
 func TestGateHeadlessArgumentsAndEnv(t *testing.T) {
 	for _, harness := range []string{"pi", "claude"} {
 		for _, ctxOn := range []bool{false, true} {
-			for _, filesOn := range []bool{false, true} {
-				t.Run(fmt.Sprintf("%s/ctx-%v/files-%v", harness, ctxOn, filesOn), func(t *testing.T) {
-					h := setup(t)
-					log := filepath.Join(h.tmp, "args")
-					envlog := filepath.Join(h.tmp, "env")
-					script := fmt.Sprintf("printf '%%s\\n' \"$@\" > %q\nprintf '%%s\\n' \"$ORCH_CTX_ROOT\" > %q\n", log, envlog)
-					if harness == "pi" {
-						script += "printf '{}'"
-					} else {
-						script += `printf '%s\n' '{"type":"result","result":"{}"}'`
-					}
-					t.Setenv("ORCH_"+strings.ToUpper(harness), fakeRunner(t, harness, script))
-					t.Setenv("ORCH_CTX_ROOT", "")
-					p := gatePass{name: "test", shared: "shared", task: "task", prompt: "sharedtask", ctxTool: ctxOn, contextFiles: filesOn}
-					if _, err := runHeadless(h.repo, profile{Harness: harness, Model: "test"}, p, filepath.Join(h.tmp, "sessions"), ""); err != nil {
-						t.Fatal(err)
-					}
-					args := string(mustRead(t, log))
-					env := strings.TrimSpace(string(mustRead(t, envlog)))
-					if ctxOn && evalOr(env) != evalOr(h.repo) || !ctxOn && env != "" {
-						t.Fatalf("env: %q", env)
-					}
-					if strings.Contains(args, "READ ONLY.") != ctxOn {
+			t.Run(fmt.Sprintf("%s/ctx-%v", harness, ctxOn), func(t *testing.T) {
+				h := setup(t)
+				log := filepath.Join(h.tmp, "args")
+				envlog := filepath.Join(h.tmp, "env")
+				script := fmt.Sprintf("printf '%%s\\n' \"$@\" > %q\nprintf '%%s\\n' \"$ORCH_CTX_ROOT\" > %q\n", log, envlog)
+				if harness == "pi" {
+					script += "printf '{}'"
+				} else {
+					script += `printf '%s\n' '{"type":"result","result":"{}"}'`
+				}
+				t.Setenv("ORCH_"+strings.ToUpper(harness), fakeRunner(t, harness, script))
+				t.Setenv("ORCH_CTX_ROOT", "")
+				p := gatePass{name: "test", shared: "shared", task: "task", prompt: "sharedtask", ctxTool: ctxOn}
+				if _, err := runHeadless(h.repo, profile{Harness: harness, Model: "test"}, p, filepath.Join(h.tmp, "sessions")); err != nil {
+					t.Fatal(err)
+				}
+				args := string(mustRead(t, log))
+				env := strings.TrimSpace(string(mustRead(t, envlog)))
+				if ctxOn && evalOr(env) != evalOr(h.repo) || !ctxOn && env != "" {
+					t.Fatalf("env: %q", env)
+				}
+				if strings.Contains(args, "READ ONLY.") != ctxOn {
+					t.Fatal(args)
+				}
+				if harness == "pi" {
+					if !strings.Contains(args, "--no-context-files") {
 						t.Fatal(args)
 					}
-					if harness == "pi" {
-						if strings.Contains(args, "--no-context-files") == filesOn {
-							t.Fatal(args)
-						}
-						if strings.Contains(args, "read,grep,find,ls,bash") != ctxOn {
-							t.Fatal(args)
-						}
-					} else {
-						if strings.Contains(args, "claudeMdExcludes") == filesOn {
-							t.Fatal(args)
-						}
-						if strings.Contains(args, "Bash(orch ctx:*)") != ctxOn {
-							t.Fatal(args)
-						}
+					if strings.Contains(args, "read,grep,find,ls,bash") != ctxOn {
+						t.Fatal(args)
 					}
-				})
-			}
+				} else {
+					if !strings.Contains(args, "claudeMdExcludes") {
+						t.Fatal(args)
+					}
+					if strings.Contains(args, "Bash(orch ctx:*)") != ctxOn {
+						t.Fatal(args)
+					}
+				}
+			})
 		}
 	}
 }
@@ -124,7 +122,7 @@ func TestGatePaneTypesOneShortLineAndKeepsThePanesPath(t *testing.T) {
 				t.Setenv("ORCH_CLAUDE", fakeRunner(t, "claude", "exit 0"))
 				runner = "claude:haiku:low"
 			}
-			h.must("gate", "spec.md", "--runner", runner, "--ctx-shell", "open", "--cache", "long")
+			h.must("gate", "spec.md", "--runner", runner, "--ctx-shell", "open")
 			runs := h.gateCalls("pane", "run")
 			if len(runs) != 3 {
 				t.Fatalf("pane run calls = %d, want one per pass", len(runs))
@@ -138,7 +136,7 @@ func TestGatePaneTypesOneShortLineAndKeepsThePanesPath(t *testing.T) {
 				if strings.Contains(script, "PATH=") {
 					t.Errorf("launcher edits PATH:\n%s", script)
 				}
-				for _, want := range []string{"export ORCH_CTX_ROOT=", "export ORCH_CTX_READONLY='1'", "export ORCH_TSLS=", "export PI_CACHE_RETENTION=long", "\nexec '" + harness + "' "} {
+				for _, want := range []string{"export ORCH_CTX_ROOT=", "export ORCH_CTX_READONLY='1'", "export ORCH_TSLS=", "\nexec '" + harness + "' "} {
 					if !strings.Contains(script, want) {
 						t.Errorf("launcher lacks %q:\n%s", want, script)
 					}
@@ -162,7 +160,7 @@ func TestGatePaneTypesOneShortLineAndKeepsThePanesPath(t *testing.T) {
 			}
 			// The env reached the agent byte for byte through the launcher's quoting.
 			env := string(mustRead(t, filepath.Join(h.fake+".panes", flagValue(starts[0].Args, "--pane")+".launch.env")))
-			for _, want := range []string{"ORCH_TOOL_GUARD_STATE_DIR=" + long + "\x00", "ORCH_TOOL_GUARD_SKIP=it's \"quoted\" $HOME `x`\x00", "PI_CACHE_RETENTION=long\x00"} {
+			for _, want := range []string{"ORCH_TOOL_GUARD_STATE_DIR=" + long + "\x00", "ORCH_TOOL_GUARD_SKIP=it's \"quoted\" $HOME `x`\x00"} {
 				if harness == "claude" && strings.HasPrefix(want, "ORCH_TOOL_GUARD") {
 					continue // the pi tool guard's knobs are only for pi
 				}
@@ -174,16 +172,15 @@ func TestGatePaneTypesOneShortLineAndKeepsThePanesPath(t *testing.T) {
 	}
 }
 
-func TestGatePaneCtxAndContextFlags(t *testing.T) {
+func TestGatePaneCtxFlag(t *testing.T) {
 	for _, harness := range []string{"pi", "claude"} {
-		for _, toggles := range []struct{ ctx, files bool }{{false, false}, {false, true}, {true, false}, {true, true}} {
-			on, filesOn := toggles.ctx, toggles.files
-			t.Run(fmt.Sprintf("%s/ctx-%v/files-%v", harness, on, filesOn), func(t *testing.T) {
+		for _, on := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/ctx-%v", harness, on), func(t *testing.T) {
 				h := setup(t)
 				gdir := h.gateRepo(1)
 				h.fakePi(gatePasses(nil))
 				t.Setenv("ORCH_FAKE_CLAUDE_REPO", h.repo)
-				h.must("gate", "spec.md", "--runner", harness+":test", "--ctx-tool", onOff(on), "--context-files", onOff(filesOn))
+				h.must("gate", "spec.md", "--runner", harness+":test", "--ctx-tool", onOff(on))
 				calls := h.gateCalls()
 				starts := 0
 				exports := 0
@@ -204,11 +201,11 @@ func TestGatePaneCtxAndContextFlags(t *testing.T) {
 						if flagValue(c.Args, "--kind") != "pi" || !strings.Contains(args, " -- --no-approve ") {
 							t.Fatalf("pi start can wait on the project trust dialog: %s", args)
 						}
-						if strings.Contains(args, "--no-context-files") == filesOn {
+						if !strings.Contains(args, "--no-context-files") {
 							t.Fatal(args)
 						}
 					}
-					if harness == "claude" && strings.Contains(args, "claudeMdExcludes") == filesOn {
+					if harness == "claude" && !strings.Contains(args, "claudeMdExcludes") {
 						t.Fatal(args)
 					}
 				}
@@ -216,7 +213,7 @@ func TestGatePaneCtxAndContextFlags(t *testing.T) {
 					t.Fatalf("starts %d exports %d", starts, exports)
 				}
 				rec := readRecord(t, gdir)
-				if rec.CtxTool != onOff(on) || rec.ContextFiles != onOff(filesOn) {
+				if rec.CtxTool != onOff(on) || rec.ContextFiles != "" {
 					t.Fatal(rec)
 				}
 			})
@@ -228,21 +225,39 @@ func TestGateToggleValidationAndExperiment(t *testing.T) {
 	h := setup(t)
 	gdir := h.gateRepo(1)
 	h.fakePi(gatePasses(nil))
-	for _, flag := range []string{"--ctx-tool", "--context-files"} {
-		if code, out := h.run("gate", "spec.md", flag, "maybe"); code != 1 || !strings.Contains(out, "is on or off") {
-			t.Fatalf("%d %s", code, out)
-		}
+	if code, out := h.run("gate", "spec.md", "--ctx-tool", "maybe"); code != 1 || !strings.Contains(out, "is on or off") {
+		t.Fatalf("%d %s", code, out)
 	}
-	h.must("gate", "spec.md", "--only", "api", "--experiment", "cli", "--ctx-tool", "off", "--context-files", "on")
+	h.must("gate", "spec.md", "--only", "api", "--experiment", "cli", "--ctx-tool", "off")
 	rec := readRecord(t, filepath.Join(gdir, "experiments", "cli"))
-	if rec.CtxTool != "off" || rec.ContextFiles != "on" {
+	if rec.CtxTool != "off" || rec.ContextFiles != "" || rec.Cache != "" {
 		t.Fatal(rec)
 	}
 	h.must("gate", "spec.md", "--only", "api", "--experiment", "default")
 	rec = readRecord(t, filepath.Join(gdir, "experiments", "default"))
-	if rec.CtxTool != "on" || rec.ContextFiles != "off" {
+	if rec.CtxTool != "on" || rec.ContextFiles != "" || rec.Cache != "" {
 		t.Fatal(rec)
 	}
 	out := h.must("gate", "compare", "spec.md", "cli", "default")
-	wantContains(t, out, "ctx_tool: off; context_files: on", "ctx_tool: on; context_files: off")
+	wantContains(t, out, "ctx_tool: off;", "ctx_tool: on;")
+	if strings.Contains(out, "context_files") || strings.Contains(out, "(cache ") {
+		t.Fatalf("a new record shows a removed switch:\n%s", out)
+	}
+}
+
+func TestGateRemovedFlagsFailWithOneLine(t *testing.T) {
+	h := setup(t)
+	h.gateRepo(1)
+	for flag, want := range map[string]string{
+		"--cache":         "--cache was removed",
+		"--keep-sessions": "--keep-sessions was removed",
+		"--context-files": "--context-files was removed",
+		"--headless":      "--headless was removed; gate passes run in herdr panes",
+	} {
+		for _, args := range [][]string{{"gate", "spec.md", flag}, {"gate", "spec.md", flag + "=on"}} {
+			if code, out := h.run(args...); code != 1 || !strings.Contains(out, want) {
+				t.Errorf("%v: %d %s", args, code, out)
+			}
+		}
+	}
 }

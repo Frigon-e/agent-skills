@@ -153,12 +153,31 @@ func TestGateRecordWithRemovedCtxProfileStillLoads(t *testing.T) {
 	}
 	var out strings.Builder
 	describeExperiment(&out, "A", "lean-vs-default", &old, t.TempDir())
-	wantContains(t, out.String(), "ctx_shell: ctx-only; ctx_profile: lean")
+	wantContains(t, out.String(), "(cache short, groups group)", "ctx_shell: ctx-only; context_files: off; ctx_profile: lean")
 	out.Reset()
 	describeExperiment(&out, "B", "new", &gateRecord{CtxShell: "ctx-only"}, t.TempDir())
-	if strings.Contains(out.String(), "ctx_profile") {
-		t.Errorf("a new record shows a ctx profile: %s", out.String())
+	for _, gone := range []string{"ctx_profile", "context_files", "cache short"} {
+		if strings.Contains(out.String(), gone) {
+			t.Errorf("a new record shows %s: %s", gone, out.String())
+		}
 	}
+}
+
+// The removed --context-files, --cache and --keep-sessions switches left their
+// fields in old records: they load and the report still prints them.
+func TestGateRecordWithRemovedSwitchesPrintsInReport(t *testing.T) {
+	var old gateRecord
+	if err := json.Unmarshal(mustRead(t, filepath.Join("testdata", "gate-record-ctx-profile.json")), &old); err != nil {
+		t.Fatal(err)
+	}
+	if old.Cache != "short" || old.ContextFiles != "off" || old.ReviewPolicy.ContextFiles != "off" {
+		t.Fatalf("a removed field was lost on load: %+v", old)
+	}
+	dir := t.TempDir()
+	if err := writeGate(dir, &old); err != nil {
+		t.Fatal(err)
+	}
+	wantContains(t, string(mustRead(t, filepath.Join(dir, "report.md"))), "ctx_tool: on; ctx_shell: ctx-only; context_files: off; ctx_profile: lean")
 }
 
 func TestGateCtxProfileFlagWasRemoved(t *testing.T) {

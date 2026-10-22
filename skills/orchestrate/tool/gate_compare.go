@@ -108,9 +108,26 @@ func legacyCtxProfile(rec *gateRecord) string {
 	return "; ctx_profile: " + rec.CtxProfile
 }
 
+// legacyContextFiles names the context-files setting an old record ran with.
+// The switch is gone, so a new record has none and shows nothing.
+func legacyContextFiles(rec *gateRecord) string {
+	if rec.ContextFiles == "" {
+		return ""
+	}
+	return "; context_files: " + rec.ContextFiles
+}
+
+// legacyCache names the cache retention an old record asked for.
+func legacyCache(rec *gateRecord) string {
+	if rec.Cache == "" {
+		return ""
+	}
+	return "cache " + rec.Cache + ", "
+}
+
 func describeExperiment(w io.Writer, label, name string, rec *gateRecord, dir string) {
-	fmt.Fprintf(w, "experiment %s: %s (cache %s, groups %s)\n", label, name, orDefault(rec.Cache, "short"), strings.Join(rec.Only, ", "))
-	fmt.Fprintf(w, "  ctx_tool: %s; context_files: %s; ctx_shell: %s%s\n", orDefault(rec.CtxTool, "off (legacy)"), orDefault(rec.ContextFiles, "off (legacy)"), orDefault(rec.CtxShell, "open"), legacyCtxProfile(rec))
+	fmt.Fprintf(w, "experiment %s: %s (%sgroups %s)\n", label, name, legacyCache(rec), strings.Join(rec.Only, ", "))
+	fmt.Fprintf(w, "  ctx_tool: %s; ctx_shell: %s%s%s\n", orDefault(rec.CtxTool, "off (legacy)"), orDefault(rec.CtxShell, "open"), legacyContextFiles(rec), legacyCtxProfile(rec))
 	if warning := treeWarning(rec); warning != "" {
 		fmt.Fprintf(w, "  %s\n", warning)
 	}

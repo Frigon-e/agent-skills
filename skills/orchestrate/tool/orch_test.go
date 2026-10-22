@@ -24,6 +24,7 @@ func TestMain(m *testing.M) {
 	if path := os.Getenv("ORCH_FAKE_HERDR"); path != "" {
 		os.Exit(fakeHerdr(path, os.Args[1:]))
 	}
+	gateOutsideHerdr = true
 	os.Exit(m.Run())
 }
 

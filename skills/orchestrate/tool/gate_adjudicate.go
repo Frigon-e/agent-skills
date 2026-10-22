@@ -1245,7 +1245,7 @@ func (s site) adjudicationRunner(repo, dir string) adjudicationRunner {
 		if err != nil {
 			return resp, err
 		}
-		resp.Text, err = runHeadless(repo, p, gatePass{prompt: req.Prompt, noTools: true, ctx: ctx}, session, "")
+		resp.Text, err = runHeadless(repo, p, gatePass{prompt: req.Prompt, noTools: true, ctx: ctx}, session)
 		if u, ok := sessionTokens(session); ok && u.Requests > 0 {
 			resp.ReportedRequests = u.Requests
 			in, out := int64(u.Input+u.CacheRead+u.CacheWrite), int64(u.Output)

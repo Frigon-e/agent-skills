@@ -683,7 +683,7 @@ func TestGatePaneRunNeedsOrchOnPath(t *testing.T) {
 	if n := len(h.gateCalls("pane", "run")); n != 0 {
 		t.Fatalf("%d passes started without orch on PATH", n)
 	}
-	for _, args := range [][]string{{"--headless"}, {"--ctx-tool", "off"}, {"--dry-run"}} {
+	for _, args := range [][]string{{"--ctx-tool", "off"}, {"--dry-run"}} {
 		if code, out := h.run(append([]string{"gate", "spec.md"}, args...)...); strings.Contains(out, "orch is not on PATH") {
 			t.Errorf("%v needs no orch on PATH: exit %d %s", args, code, out)
 		}
@@ -1046,7 +1046,7 @@ func TestGuardKnobsReachBothPiPaths(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	env := agentEnv(piEnv(""), p.cli.Env)
+	env := agentEnv(nil, p.cli.Env)
 	for _, want := range []string{"ORCH_TOOL_GUARD=off", "ORCH_TOOL_GUARD_SKIP=find", "ORCH_TOOL_GUARD_STATE_DIR=/tmp/guard-state"} {
 		if !slices.Contains(env, want) || !slices.Contains(p.cli.Env, want) {
 			t.Errorf("%s missing from the pass env", want)
