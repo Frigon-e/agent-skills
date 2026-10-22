@@ -679,7 +679,7 @@ printf '%s\n' '{"type":"result","result":"{\"packages\":[{\"id\":\"api\",\"claim
 						}
 					}
 				}
-				_, out := h.run("gate", "spec.md", "--json", "--runner", strings.Join(order, ","))
+				_, out := h.run("gate", "spec.md", "--json", "--dossier", "code", "--runner", strings.Join(order, ","))
 				rec := readRecord(t, dir)
 				if rec.Review == nil || rec.Reduction == nil {
 					t.Fatalf("missing v2 records: %s", out)
