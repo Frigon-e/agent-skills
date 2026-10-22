@@ -246,20 +246,3 @@ func TestGateToggleValidationAndExperiment(t *testing.T) {
 	out := h.must("gate", "compare", "spec.md", "cli", "default")
 	wantContains(t, out, "ctx_tool: off; context_files: on", "ctx_tool: on; context_files: off")
 }
-
-func TestGatePassCarriesTheCtxProfileOnlyWhenSet(t *testing.T) {
-	h := setup(t)
-	env := func(profile string) string {
-		got, err := gateAgentPass(h.repo, "pi", gatePass{name: "a", shared: "s", task: "t", prompt: "st", ctxTool: true, ctxProfile: profile})
-		if err != nil {
-			t.Fatal(err)
-		}
-		return strings.Join(got.cli.Env, " ")
-	}
-	if strings.Contains(env(""), "ORCH_CTX_PROFILE") {
-		t.Error("the default profile sets no variable")
-	}
-	if !strings.Contains(env("lean"), "ORCH_CTX_PROFILE=lean") {
-		t.Error("ORCH_CTX_PROFILE=lean missing from the pass environment")
-	}
-}

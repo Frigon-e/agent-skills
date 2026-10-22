@@ -324,18 +324,3 @@ func capLines(lines []string, max, rest int, more *int) []string {
 	*more = rest
 	return lines
 }
-
-// leanConstWindow is constWindow for the lean profile: the declaration itself,
-// or the first lines of its function when it sits within constWindowLines of
-// the function's start; never the neighbours around a top-level definition.
-func leanConstWindow(ls []string, ln int, path string) (start, end int) {
-	if ln < 1 || ln > len(ls) {
-		return ln, ln - 1
-	}
-	decl, _ := bodyPreview(ls, ln, constWindowLines)
-	start, end = ln, ln+len(decl)-1
-	if fn, _ := enclosingAt(ls, ln, path); fn > 0 && ln-fn <= constWindowLines {
-		start, end = fn, max(fn+14, end)
-	}
-	return start, min(end, len(ls))
-}

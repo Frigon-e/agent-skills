@@ -807,7 +807,7 @@ func ctxTextCmd(a *app, args []string) error {
 	fs.StringVar(&l.Type, "type", "", "only this file type (go, ts, md, ...)")
 	both("l", "files-only", &l.FilesOnly, "list the files that match")
 	both("c", "count", &l.Count, "count matches per file")
-	ctxN := fs.Int("C", ctxTune.Context, fmt.Sprintf("lines of context around a match (default %d; 0 with --compact)", ctxTune.Context))
+	ctxN := fs.Int("C", ctxContextDefault, fmt.Sprintf("lines of context around a match (default %d; 0 with --compact)", ctxContextDefault))
 	both("U", "multiline", &l.Multiline, "let a pattern match across lines")
 	both("o", "only-matching", &l.OnlyMatching, "print only the matched text")
 	fs.IntVar(&l.PerFile, "per-file", 0, "most matches per file")

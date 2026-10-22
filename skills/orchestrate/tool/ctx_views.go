@@ -295,15 +295,11 @@ func (e *ctxEnv) symView(f symFact, o symOpts) *ctxView {
 		case isTypeKind(d.Kind):
 			own, body, start, more = defBody(ls, ln, path, defTypeLines) // the whole field or method list
 		case d.Func:
-			own, body, start, more = defBody(ls, ln, path, ctxTune.FuncLines) // the signature and the lines of the body after it
+			own, body, start, more = defBody(ls, ln, path, defFuncLines) // the signature and the lines of the body after it
 		default:
 			// A const or var reads best in its function or among its neighbours.
 			var end int
-			if ctxTune.LeanConst {
-				start, end = leanConstWindow(ls, ln, path)
-			} else {
-				start, end = constWindow(ls, ln, path)
-			}
+			start, end = constWindow(ls, ln, path)
 			if start >= 1 && end >= start && end <= len(ls) {
 				body = ls[start-1 : end]
 			}
@@ -734,7 +730,7 @@ func (e *ctxEnv) textLookup(l ctxLookup, f ctxFmt) *ctxView {
 		q.Path = p
 	}
 	res, err := e.Text(q)
-	ctx := ctxTune.Context
+	ctx := ctxContextDefault
 	if f.Compact {
 		ctx = 0
 	}

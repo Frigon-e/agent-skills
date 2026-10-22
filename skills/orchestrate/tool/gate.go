@@ -114,7 +114,7 @@ type gateRecord struct {
 	Reasons           []string                     `json:"reasons,omitempty"` // incomplete review or execution failures
 	CtxTool           string                       `json:"ctx_tool"`
 	ContextFiles      string                       `json:"context_files"`
-	CtxProfile        string                       `json:"ctx_profile,omitempty"` // a named orch ctx tuning, empty for the default
+	CtxProfile        string                       `json:"ctx_profile,omitempty"` // read from old records only
 	CtxShell          string                       `json:"ctx_shell,omitempty"`   // effective shell policy: open or ctx-only
 	TreeChanged       []string                     `json:"tree_changed,omitempty"`
 	TreeChangedPasses []string                     `json:"tree_changed_passes,omitempty"`
@@ -855,8 +855,7 @@ type gatePass struct {
 	effort       string // runner-specific thinking effort
 	noTools      bool   // the pass gets no tools at all
 	ctxTool      bool
-	ctxOnly      bool   // pi: read tool plus a shell limited to orch ctx
-	ctxProfile   string // orch ctx tuning profile for the pass, empty for the default
+	ctxOnly      bool // pi: read tool plus a shell limited to orch ctx
 	contextFiles bool
 	cli          CtxCLI
 	ctx          context.Context
@@ -1096,7 +1095,6 @@ type gateOpts struct {
 	shadow       string // the shadow judges: off, decider, flash or both
 	ctxTool      bool
 	ctxOnly      bool
-	ctxProfile   string
 	contextFiles bool
 	guard        *checkoutGuard
 }
@@ -1165,13 +1163,20 @@ func cmdGate(a *app, args []string) (retErr error) {
 	ctxTool := fs.String("ctx-tool", "on", "on or off: read-only orch ctx CLI in gate agents (default on)")
 	contextFiles := fs.String("context-files", "off", "on or off: load repository context files (default off)")
 	ctxShell := fs.String("ctx-shell", "ctx-only", "open or ctx-only: pi with ctx-tool on defaults to read plus an orch ctx-only shell; open opts out; ignored by Claude and with ctx-tool off")
-	ctxProfile := fs.String("ctx-profile", "default", "orch ctx tuning for the gate agents: "+ctxProfileNames+" (default default)")
 	verdicts := fs.Bool("verdicts", false, "experimental: the group pass returns a reuse|extend|new|unclear verdict for each reuse-checklist item, with a coverage retry (off: the checklist is only facts)")
 	runnerF := fs.String("runner", "", "ordered harness:model[:effort],... choices for this run")
 	degraded := fs.Bool("degraded", false, "allow degraded role choices approved by the user")
 	shadowF := fs.String("shadow", "", "record-only judges of the reuse checklist: off, decider, flash or both (comma-separated list works); overrides reuse_shadow in the config")
 	dumpDec := fs.String("dump-decider", "", "with --dry-run: print the decider request body (never sent) for this item id, or 'first'")
 	dump := fs.String("dump-dossier", "", "with --dry-run: write the dossier files a real pass would get into this directory, and nothing else")
+	for _, arg := range args {
+		if arg == "--" {
+			break
+		}
+		if name, _, _ := strings.Cut(strings.TrimLeft(arg, "-"), "="); name == "ctx-profile" && strings.HasPrefix(arg, "-") {
+			return fail("--ctx-profile was removed")
+		}
+	}
 	pos, err := parseArgs(fs, args)
 	if err != nil {
 		return err
@@ -1193,9 +1198,6 @@ func cmdGate(a *app, args []string) (retErr error) {
 	if *ctxShell != "open" && *ctxShell != "ctx-only" {
 		return fail("--ctx-shell is open or ctx-only, not %q", *ctxShell)
 	}
-	if _, ok := ctxProfiles[*ctxProfile]; !ok {
-		return fail("--ctx-profile is %s, not %q", ctxProfileNames, *ctxProfile)
-	}
 	switch *dossier {
 	case "off", "code", "plan":
 	default:
@@ -1212,7 +1214,7 @@ func cmdGate(a *app, args []string) (retErr error) {
 	if *expF != "" && !experimentRe.MatchString(*expF) {
 		return fail("--experiment %q: use lowercase letters, digits, '.', '_' and '-'", *expF)
 	}
-	opts := gateOpts{ctxTool: *ctxTool == "on", ctxOnly: *ctxShell == "ctx-only" && *ctxTool == "on", ctxProfile: profileArg(*ctxProfile), contextFiles: *contextFiles == "on", dossier: *dossier, cache: *cacheF, keep: *keep || *expF != "", headless: *headless || os.Getenv("ORCH_HEADLESS") == "1", verdicts: *verdicts}
+	opts := gateOpts{ctxTool: *ctxTool == "on", ctxOnly: *ctxShell == "ctx-only" && *ctxTool == "on", contextFiles: *contextFiles == "on", dossier: *dossier, cache: *cacheF, keep: *keep || *expF != "", headless: *headless || os.Getenv("ORCH_HEADLESS") == "1", verdicts: *verdicts}
 	if err := paneOrchOnPath(opts, *dry); err != nil {
 		return fail("%v", err)
 	}
@@ -1263,8 +1265,7 @@ func cmdGate(a *app, args []string) (retErr error) {
 	if opts.ctxOnly {
 		rec.CtxShell = "ctx-only"
 	}
-	rec.ReviewPolicy = &gateReviewPolicy{Version: gateReviewPolicyVersion, CtxTool: rec.CtxTool, ContextFiles: rec.ContextFiles, CtxShell: rec.CtxShell, CtxProfile: opts.ctxProfile, Dossier: opts.dossier, Verdicts: opts.verdicts}
-	rec.CtxProfile = opts.ctxProfile
+	rec.ReviewPolicy = &gateReviewPolicy{Version: gateReviewPolicyVersion, CtxTool: rec.CtxTool, ContextFiles: rec.ContextFiles, CtxShell: rec.CtxShell, Dossier: opts.dossier, Verdicts: opts.verdicts}
 	rec.BenchBuild = benchBuildNow()
 	v := opts.verdicts
 	rec.BenchInputs = benchInputs{Repo: code, SpecPath: rel, SpecHash: hash, SpecSHA256: benchHash([]byte(src))}
@@ -1367,7 +1368,7 @@ func cmdGate(a *app, args []string) (retErr error) {
 				shadowMu.Lock()
 				defer shadowMu.Unlock()
 				start := time.Now()
-				p.ctxTool, p.ctxOnly, p.ctxProfile, p.contextFiles, p.ctx = opts.ctxTool, opts.ctxOnly, opts.ctxProfile, opts.contextFiles, opts.guard.ctx
+				p.ctxTool, p.ctxOnly, p.contextFiles, p.ctx = opts.ctxTool, opts.ctxOnly, opts.contextFiles, opts.guard.ctx
 				out, _, used, err := flash.run(func(choice profile) (string, string, error) {
 					return opts.guard.run(p.name, func() (string, string, error) {
 						if shadowPane != "" {
@@ -1610,7 +1611,7 @@ func runGatePasses(dir, code, model string, passes []gatePass, rec *gateRecord, 
 					return fmt.Errorf("%s: %w", lastRoute, err)
 				}
 				run1 := func(q gatePass) (string, string, error) {
-					q.ctxTool, q.ctxOnly, q.ctxProfile, q.contextFiles, q.ctx = opts.ctxTool, opts.ctxOnly, opts.ctxProfile, opts.contextFiles, passCtx
+					q.ctxTool, q.ctxOnly, q.contextFiles, q.ctx = opts.ctxTool, opts.ctxOnly, opts.contextFiles, passCtx
 					job := strings.TrimSuffix(q.name, "#retry")
 					repair := calls[job] > 0
 					calls[job]++
@@ -2108,7 +2109,7 @@ func writeGate(dir string, rec *gateRecord) error {
 	} else if label := storedGateResultLabel(rec); label != "" {
 		fmt.Fprintf(&r, "Historical result: **%s** (legacy record, not a v2 state)\n\n", label)
 	}
-	fmt.Fprintf(&r, "ctx_tool: %s; context_files: %s; ctx_shell: %s; ctx_profile: %s\n\n", orDefault(rec.CtxTool, "off (legacy)"), orDefault(rec.ContextFiles, "off (legacy)"), orDefault(rec.CtxShell, "open"), orDefault(rec.CtxProfile, "default"))
+	fmt.Fprintf(&r, "ctx_tool: %s; context_files: %s; ctx_shell: %s%s\n\n", orDefault(rec.CtxTool, "off (legacy)"), orDefault(rec.ContextFiles, "off (legacy)"), orDefault(rec.CtxShell, "open"), legacyCtxProfile(rec))
 	if t := rec.tokenSummary(); t != "" {
 		fmt.Fprintf(&r, "Tokens: %s\n\n", t)
 	}
