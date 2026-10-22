@@ -6,6 +6,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // Attach the reducer's valid control to actual fixture checkout bytes and a
@@ -131,6 +132,32 @@ func TestFixtureGateTrust(t *testing.T) {
 	}
 }
 
+// fixtureGatePassLimit bounds one gate run over a fixture. A run that waits on
+// a pass forever fails with a message instead of hanging the test binary.
+const fixtureGatePassLimit = 45 * time.Second
+
+// runWithin runs the command and fails the test when it has not finished in
+// limit. The stuck run is left behind: the test binary ends it.
+func (h *harness) runWithin(limit time.Duration, args ...string) (int, string) {
+	h.t.Helper()
+	type result struct {
+		code int
+		out  string
+	}
+	done := make(chan result, 1)
+	go func() {
+		code, out := h.run(args...)
+		done <- result{code, out}
+	}()
+	select {
+	case r := <-done:
+		return r.code, r.out
+	case <-time.After(limit):
+		h.t.Fatalf("orch %s did not finish within %s: a gate pass is waiting on a fake that never answers", strings.Join(args, " "), limit)
+		return 0, ""
+	}
+}
+
 func TestFixtureGateModelReplies(t *testing.T) {
 	for _, f := range portabilityFixtures {
 		for _, reply := range []string{`{}`, `{"packages":[{"id":"api"}]}`, cleanPackageReply} {
@@ -138,7 +165,7 @@ func TestFixtureGateModelReplies(t *testing.T) {
 				h := fixtureRepo(t, f.name)
 				h.commitSpec(planHeader + planPkg("api", "kind: ship\nowns: parser/", "") + planTail)
 				h.fakePi(gatePasses(map[string]string{"group": reply, "adv-a": `{"findings":[]}`, "adv-b": `{"findings":[]}`}))
-				code, out := h.run("gate", "spec.md")
+				code, out := h.runWithin(fixtureGatePassLimit, "gate", "spec.md")
 				wantCode := 1
 				if reply == cleanPackageReply {
 					wantCode = 0

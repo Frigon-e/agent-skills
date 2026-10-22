@@ -234,6 +234,9 @@ func setup(t *testing.T) *harness {
 	oldWait, oldPoll := gateLeaveWait, gateLeavePoll
 	gateLeaveWait, gateLeavePoll = time.Second, 10*time.Millisecond
 	t.Cleanup(func() { gateLeaveWait, gateLeavePoll = oldWait, oldPoll })
+	oldStart := gateStartWait
+	gateStartWait = 5 * time.Second
+	t.Cleanup(func() { gateStartWait = oldStart })
 	t.Cleanup(func() { gateWarmDelay = oldWarm })
 	tmp, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {
@@ -281,6 +284,8 @@ func setup(t *testing.T) *harness {
 	}
 	h := &harness{t: t, stdin: &bytes.Buffer{}, out: &bytes.Buffer{}, errw: &bytes.Buffer{}, tmp: tmp, repo: repo,
 		fake: filepath.Join(tmp, "herdr.json"), now: time.Unix(1_800_000_000, 0)}
+	// The fake claude in a pane saves its transcript where the runner reads it.
+	t.Setenv("ORCH_FAKE_CLAUDE_REPO", repo)
 	h.dec = newDecStub(t)
 	h.a = &app{cwd: repo, stdin: h.stdin, out: h.out, errw: h.errw, now: func() time.Time { return h.now }}
 	return h
