@@ -5,10 +5,14 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
+	"unicode/utf8"
 )
 
-const briefWordLimit = 1500
+// briefCharLimit is the size of task.md past which orch check warns: a lead
+// re-reads the whole brief on every turn and again after each compaction.
+const briefCharLimit = 15000
 
 var (
 	taskIDRe         = regexp.MustCompile(`^[a-z][a-z0-9-]{0,26}$`)
@@ -168,10 +172,32 @@ func checkTask(root, id string) (problems, warnings []string, err error) {
 			add("depends_on: %q is not done yet", dep)
 		}
 	}
-	if words := len(strings.Fields(body)); words > briefWordLimit {
-		warnings = append(warnings, fmt.Sprintf("task.md is %d words; leads re-read it, so keep it under %d", words, briefWordLimit))
+	if n := utf8.RuneCount(raw); n > briefCharLimit {
+		warnings = append(warnings, fmt.Sprintf("task.md is %d characters; the lead re-reads it on every turn, so keep it under %d. Largest sections: %s", n, briefCharLimit, largestSections(secs, 3)))
 	}
 	return problems, warnings, nil
+}
+
+// largestSections names the n biggest sections with their sizes in characters.
+func largestSections(secs map[string]string, n int) string {
+	names := make([]string, 0, len(secs))
+	for k := range secs {
+		names = append(names, k)
+	}
+	sort.Slice(names, func(i, j int) bool {
+		if a, b := len(secs[names[i]]), len(secs[names[j]]); a != b {
+			return a > b
+		}
+		return names[i] < names[j]
+	})
+	if len(names) > n {
+		names = names[:n]
+	}
+	parts := make([]string, len(names))
+	for i, k := range names {
+		parts[i] = fmt.Sprintf("%s (%d)", k, utf8.RuneCountInString(secs[k]))
+	}
+	return strings.Join(parts, ", ")
 }
 
 // setFrontMatter sets key in task.md's front matter, adding it before the

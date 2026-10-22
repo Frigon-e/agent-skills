@@ -284,7 +284,8 @@ What makes a brief work (template: `references/task-template.md`):
   scout, the evidence each finding needs.
 - **Authority** says what the lead settles alone, what comes back to you,
   and the hard limits.
-- Keep it under 1500 words. The brief is the contract: to change course,
+- Keep it under 15 KB (`orch check` warns above 15000 characters and names
+  the largest sections). The brief is the contract: to change course,
   edit task.md, then `orch send` the lead a line saying what changed.
 
 ## Loop
