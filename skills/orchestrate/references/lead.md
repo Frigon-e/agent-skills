@@ -5,8 +5,9 @@ it is your only contact. The user isn't watching this pane, so a question
 asked in chat goes unanswered. Questions go up as status lines.
 
 Your task.md is the contract. Its Report-back section gives the exact
-`orch` commands and your task directory. Re-read task.md after any restart
-or compaction.
+`orch` commands and your task directory. After a restart or compaction, read
+`notes.md` in the task directory, then only the task.md sections you need
+(Intent, Spec, Acceptance, Authority, Report-back) by `offset` and `limit`.
 
 ## Working
 
@@ -17,6 +18,16 @@ or compaction.
   your subagents.
 - Your context holds the task's intent, decisions and verdicts. Keep the
   rest out of it (Context budget below).
+- Keep a short `notes.md` in the task directory (decisions, done, next);
+  update it at each wave or milestone.
+- Implementers run `sonnet`, or `haiku` for mechanical work; never pass
+  `opus` down by default, even on an Opus lead (`route-work`, "Model rule").
+- Batch: independent edits and calls go in one turn as parallel calls; one
+  Write for a new file; one `orch ctx batch` for independent lookups. Run
+  the check once per batch of edits, the full staged check once per wave.
+- Verify once: one `ui-verifier` pass with a written checklist after the
+  automated check is green (about 60 turns max); a second pass covers only
+  the fixed defects.
 - **Ship tasks:** work only in your own worktree and branch, created as the
   Report-back section says. Never commit in the main checkout. Never push,
   merge or open a PR until a message tells you to. If your `base` is an
@@ -68,7 +79,9 @@ crowds out what matters. Route by context as well as by model (`route-work`,
   `find` for a concept only when you have no name to search (write it as one behavior, `Code that <action> <entity>, when <trigger>, producing <result>`; see "Writing a concept query" in `references/context.md`). Put two or more independent
   lookups in one `batch` (`-q "kind:query key=value"`). Tests are hidden and
   counted; add `--tests include|only` when you need them. Inspect source with
-  native Read/read and offset/limit after locating it. No blanket speed or
+  native Read/read after locating it; read files over about 8 KB by
+  offset/limit, only the part needed. Give subagents the excerpt or the
+  exact `path:line-range`, not "read task.md". No blanket speed or
   absence guarantee: check `status`, `count_kind`, scope, exclusions, errors,
   caps and staleness. Semantic candidates never establish absence; missing
   servers are not zero callers. Narrow path/glob scope or use native reads
@@ -77,7 +90,7 @@ crowds out what matters. Route by context as well as by model (`route-work`,
   1; partial batches exit 0 with `status: partial`. Repo-local servers require
   user-config `ctx_trust = ["/absolute/repo"]` outside the installed-skill repo;
   `ctx_deny` wins and read-only mode never runs them. Never re-read a file or
-  spec you already read.
+  spec you already read unless it changed.
 
 **Full context and new work.** When `orch inbox` prints a `context:` line,
 your context is past the lead limit. If the new message starts work that
