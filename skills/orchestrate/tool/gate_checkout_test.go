@@ -280,7 +280,7 @@ func TestGateCheckoutWarningInV2AndFirstInReport(t *testing.T) {
 	t.Setenv("HERDR_ENV", "")
 	t.Setenv("ORCH_PI", fakeRunner(t, "pi", `printf changed > agent.txt
 printf '{}'`))
-	code, out := h.run("gate", "spec.md", "--runner", "pi:test", "--ctx-tool", "off", "--context-files", "on")
+	code, out := h.run("gate", "spec.md", "--runner", "pi:test", "--ctx-tool", "off")
 	if code != 1 {
 		t.Fatalf("%d %s", code, out)
 	}
@@ -289,7 +289,7 @@ printf '{}'`))
 	if view.Warning != treeWarning(&rec) || !strings.HasPrefix(view.Warning, "UNVERIFIED: checkout changed:") {
 		t.Fatalf("checkout warning missing or differs from recorded facts: %+v", view)
 	}
-	if rec.State != "stale" || rec.CtxTool != "off" || rec.ContextFiles != "on" || len(rec.Findings) != 0 {
+	if rec.State != "stale" || rec.CtxTool != "off" || len(rec.Findings) != 0 {
 		t.Fatalf("%+v", rec)
 	}
 	report := string(mustRead(t, filepath.Join(gdir, "report.md")))

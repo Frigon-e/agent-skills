@@ -95,8 +95,8 @@ findings yourself, add a Claude adversarial pass on the Design rules when
 the spec is risky, and show the user only what survives. Decisive open
 questions arrive as cards: `orch ask --cards <gate dir>/questions`. A model
 verdict is input, not truth: Flash can miss a flaw and the gate can fail a
-fine spec, so the call is yours and the user's. Inside herdr the model passes always run in the panes of a
-`gate-<hash>` tab (at most six, closed when the gate ends; if it cannot be opened no pass runs, the report says so and the state is `incomplete`; headless passes are only for runs outside herdr, `--headless` or `ORCH_HEADLESS=1`); each pass is a
+fine spec, so the call is yours and the user's. The model passes run in the panes of a
+`gate-<hash>` tab (at most six, closed when the gate ends; if it cannot be opened no pass runs, the report says so and the state is `incomplete`); outside herdr `orch gate` refuses to run (only `--dry-run` works); each pass is a
 real pi or Claude agent in a pane named after it, which you can watch and attach to; a pass that
 failed keeps its session and output under `gate/<hash>/` for 7 days and
 for the newest 5 gate runs; a run without `gate.json` is still running and is
@@ -147,8 +147,8 @@ key check attributes an empty key only to a proved model scope; otherwise it
 says `unknown scope` and uses `pi:openrouter`. OpenAI and Anthropic checks
 only inspect credential presence, never make model calls.
 `--runner pi:<model>,claude:haiku:low` overrides gate choices for one run;
-`ORCH_GATE_MODEL` puts a pi choice first, and `--degraded` permits approved
-weaker choices. `ORCH_PI` and `ORCH_CLAUDE` override headless binary paths.
+`--degraded` permits approved weaker choices. `ORCH_PI` and `ORCH_CLAUDE`
+override the pi and Claude binary paths.
 Provider-down errors skip that connector lane for the run and retry the pass once on
 the next choice, without writing health; the report prints the exact manual
 `orch health set <lane> limited --for 3h` hint. Stalls keep their existing retry
@@ -174,13 +174,13 @@ and unrestricted bash. Claude ignores this setting and adds Bash with the
 `Bash(orch ctx:*)` permission. Prefer one `orch ctx batch` over several greps;
 read what it returns before searching again. With ctx off, the original read
 and search tools remain and the ctx notice/env are absent.
-`--context-files on|off` defaults to off: pi keeps `--no-context-files`; Claude
+Repository context files are never loaded: pi gets `--no-context-files`; Claude
 uses `--settings '{"claudeMdExcludes":["**"]}'` instead of `--bare`, so disabling
-CLAUDE.md discovery does not disable subscription authentication. On removes
-those exclusions. The checklist stays in the task text, not in a context file.
-These settings, including the effective `ctx_shell` (`open` with ctx off), are
-in gate/experiment records, reports, and compare output. Old records without
-`ctx_shell` still display `open`.
+CLAUDE.md discovery does not disable subscription authentication. The checklist
+stays in the task text, not in a context file. `ctx_tool` and the effective
+`ctx_shell` (`open` with ctx off) are in gate/experiment records, reports, and
+compare output. Old records without `ctx_shell` still display `open`, and old
+records still show their `context_files` and `cache` values.
 
 Every runner, including ctx-off runs, gets a post-pass unchanged-checkout
 check against the pre-pass baseline: Git status, diff and untracked-file
@@ -199,10 +199,11 @@ Gate options. The gate puts the plain package text and the reuse checklist in ea
 package, 40 for adversaries): at the budget a pane agent is told once to answer,
 at 1.4 times it, or when its context passes 150000 tokens, it is interrupted and
 asked for the answer; `gate.json` `pass_tokens` records turns, budget hits, cost
-and context. `--cache long` sets `PI_CACHE_RETENTION=long` for the pi passes,
-`--keep-sessions` keeps the sessions of passes that succeeded. To compare
+and context. Sessions of passes that succeeded are dropped; experiments keep
+them. `--cache`, `--keep-sessions`, `--context-files` and `--headless` were
+removed and fail with a one-line error. To compare
 settings without touching the real record: `orch gate <spec> --only <group-key>
-[--cache short|long] --experiment <name>` runs just those
+--experiment <name>` runs just those
 group passes into `gate/<hash>/experiments/<name>/` (sessions kept), and `orch
 gate compare <spec> <expA> <expB>` prints requests, tokens, cost, seconds,
 findings, questions and their overlap, with an exploration profile per pass.

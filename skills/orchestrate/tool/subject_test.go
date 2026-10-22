@@ -329,11 +329,11 @@ func TestGateSubjectRuntimeReview(t *testing.T) {
 	h.gateRepo(1)
 	dir := gateDir(h.a.siteRoot(t), specHash(mustRead(t, filepath.Join(h.repo, "spec.md"))))
 	h.fakePi(gatePasses(nil))
-	h.must("gate", "spec.md", "--ctx-tool", "off", "--ctx-shell", "ctx-only", "--context-files", "on")
+	h.must("gate", "spec.md", "--ctx-tool", "off", "--ctx-shell", "ctx-only")
 	rec := readRecord(t, dir)
 	// ctx-only has no effect when the ctx tool is off. Record the effective
 	// policy rather than falsely claiming that the shell was restricted.
-	if rec.ReviewPolicy == nil || rec.CtxShell != "open" || rec.ReviewPolicy.CtxShell != "open" || rec.ReviewPolicy.CtxTool != "off" || rec.ReviewPolicy.ContextFiles != "on" {
+	if rec.ReviewPolicy == nil || rec.CtxShell != "open" || rec.ReviewPolicy.CtxShell != "open" || rec.ReviewPolicy.CtxTool != "off" {
 		t.Fatalf("effective review policy: %+v", rec.ReviewPolicy)
 	}
 	if !rec.Subject.valid() || rec.Subject.RuntimePath != ".gate-runtime" {

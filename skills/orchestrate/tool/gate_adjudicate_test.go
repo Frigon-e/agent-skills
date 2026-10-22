@@ -96,7 +96,6 @@ func adjudicationJSON(t *testing.T, b adjudicationReplyBatch) string {
 func TestAdjudicatorRoleAbsentDisabledAndIndependent(t *testing.T) {
 	t.Setenv("ORCH_PI", fakeRunner(t, "pi", "exit 99"))
 	t.Setenv("ORCH_CLAUDE", fakeRunner(t, "claude", "exit 99"))
-	t.Setenv("ORCH_GATE_MODEL", "reviewer-env")
 	s := roleSite(profile{Harness: "claude", Model: "reviewer"})
 	s.cfg.Roles["decider"] = modelRole{Use: []profile{{Harness: "api", Provider: "openrouter", Model: "triage"}}}
 	s.cfg.TriageModel = "legacy-triage"

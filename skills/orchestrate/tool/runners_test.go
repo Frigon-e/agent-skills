@@ -153,7 +153,6 @@ output_reserve = 4000
 
 func TestRoleOrderedFilteringOverrideAndFallback(t *testing.T) {
 	t.Setenv("ORCH_HEALTH", filepath.Join(t.TempDir(), "health.json"))
-	t.Setenv("ORCH_GATE_MODEL", "")
 	t.Setenv("ORCH_PI", fakeRunner(t, "pi", "exit 0"))
 	t.Setenv("ORCH_CLAUDE", fakeRunner(t, "claude", "exit 0"))
 	s := roleSite(profile{Harness: "pi", Model: "first"}, profile{Harness: "claude", Model: "haiku"}, profile{Harness: "pi", Model: "third"})
@@ -183,11 +182,6 @@ func TestRoleOrderedFilteringOverrideAndFallback(t *testing.T) {
 	}
 	r, _ = s.newRoleRun("gate", modelOptions{Runner: "claude:sonnet:low,pi:other"})
 	if r.choices[0].Model != "sonnet" || r.choices[0].Effort != "low" {
-		t.Fatal(r.choices)
-	}
-	t.Setenv("ORCH_GATE_MODEL", "override")
-	r, _ = s.newRoleRun("gate", modelOptions{})
-	if r.choices[0].Model != "override" {
 		t.Fatal(r.choices)
 	}
 	for _, text := range []string{"wat:x", "pi", "claude:", "pi:x:low:bad"} {

@@ -40,8 +40,8 @@ func TestGatePutsThePackageBlocksBeforeTheTagAndHasNoDossier(t *testing.T) {
 	if strings.Contains(calls, "Use the evidence dossier") || strings.Contains(calls, "dossier-manifest.json") || exists(filepath.Join(gdir, "dossier")) {
 		t.Errorf("the gate produced a dossier:\n%s\n%s", out, calls)
 	}
-	if rec := readRecord(t, gdir); rec.Cache != "short" {
-		t.Errorf("record: cache %q", rec.Cache)
+	if rec := readRecord(t, gdir); rec.Cache != "" || rec.ContextFiles != "" {
+		t.Errorf("record: cache %q, context_files %q", rec.Cache, rec.ContextFiles)
 	}
 	if code, _ := h.run("gate", "spec.md", "--dossier", "maybe"); code == 0 {
 		t.Error("a --dossier value was accepted")
@@ -53,8 +53,8 @@ func TestGateDryRunShowsNoDossierSizesAndRunsNothing(t *testing.T) {
 	h.gateRepo(2)
 	dir := h.fakePi(gatePasses(nil))
 	out := h.must("gate", "spec.md", "--dry-run")
-	wantContains(t, out, "cache: short", "turn budget: 20 soft, 28 hard")
-	if strings.Contains(out, "    api: ") || strings.Contains(out, "dossier") {
+	wantContains(t, out, "turn budget: 20 soft, 28 hard")
+	if strings.Contains(out, "    api: ") || strings.Contains(out, "dossier") || strings.Contains(out, "cache: ") {
 		t.Errorf("the dry run showed a dossier:\n%s", out)
 	}
 	if exists(filepath.Join(dir, "calls.log")) {
@@ -80,7 +80,7 @@ func TestGateExperimentIsolatedAndCompared(t *testing.T) {
 
 	out := h.must("gate", "spec.md", "--only", "api+2", "--experiment", "e1")
 	view := wantGateState(t, out, "experiment")
-	if view.Experiment != "e1 (cache short, groups group:api+2)" || view.Tokens == "" {
+	if view.Experiment != "e1 (groups group:api+2)" || view.Tokens == "" {
 		t.Fatalf("experiment metadata/tokens missing: %+v", view)
 	}
 	if strings.Contains(piCalls(t, h), "GATE-ADVERSARY") {
@@ -107,9 +107,9 @@ func TestGateExperimentIsolatedAndCompared(t *testing.T) {
 	wantContains(t, string(mustRead(t, filepath.Join(exp, "report.md"))), "Exploration per pass")
 
 	h.sessionPi(gatePasses(over))
-	h.must("gate", "spec.md", "--only", "group:api+2", "--cache", "long", "--experiment", "e2")
+	h.must("gate", "spec.md", "--only", "group:api+2", "--experiment", "e2")
 	cmp := h.must("gate", "compare", "spec.md", "e1", "e2")
-	wantContains(t, cmp, "experiment A: e1 (cache short, groups group:api+2)", "experiment B: e2 (cache long, groups group:api+2)",
+	wantContains(t, cmp, "experiment A: e1 (groups group:api+2)", "experiment B: e2 (groups group:api+2)",
 		"requests 1; tokens: input 100, cache read 300 (75% of input), cache write 5, output 10; max context 400 in group:api+2",
 		"cost $0.00 (incomplete: 1 request(s) without cost)", "findings: 1 (1 verified; by source: reuse 1); questions: 1 (1 need a decision)",
 		"pass group:api+2: ", "exploration: requests 1;", "overlap of findings: 1 matched, 1 in e1, 1 in e2, Jaccard 1.00", "overlap of questions: 1 matched")
@@ -133,85 +133,20 @@ func TestMatchItemsPairsByWords(t *testing.T) {
 	}
 }
 
-func TestGateCacheRetentionReachesHeadlessAndPanePi(t *testing.T) {
-	t.Run("headless", func(t *testing.T) {
-		h := setup(t)
-		gdir := h.gateRepo(1)
-		t.Setenv("HERDR_ENV", "")
-		t.Setenv("PI_CACHE_RETENTION", "inherited")
-		for _, tc := range []struct {
-			args []string
-			want string
-		}{
-			{nil, "inherited"}, {[]string{"--cache", "long"}, "long"}, {[]string{"--cache", "short"}, ""},
-		} {
-			h.fakePi(gatePasses(nil))
-			out := h.must(append([]string{"gate", "spec.md"}, tc.args...)...)
-			b, _ := os.ReadFile(filepath.Join(h.tmp, "fakepi", "cache.log"))
-			lines := strings.Split(strings.TrimSuffix(string(b), "\n"), "\n")
-			if len(lines) != 3 {
-				t.Fatalf("pi ran %d times", len(lines))
-			}
-			for _, l := range lines {
-				if l != tc.want {
-					t.Errorf("%v: pi saw PI_CACHE_RETENTION=%q, want %q", tc.args, l, tc.want)
-				}
-			}
-			if tc.want == "long" {
-				wantContains(t, out, "cache: long")
-				if rec := readRecord(t, gdir); rec.Cache != "long" {
-					t.Errorf("record cache = %q", rec.Cache)
-				}
-			}
+func TestGatePaneLauncherLeavesTheCacheSettingAlone(t *testing.T) {
+	h := setup(t)
+	h.gateRepo(1)
+	h.sessionPi(gatePasses(nil))
+	h.must("gate", "spec.md", "--ctx-tool", "off")
+	runs := h.gateCalls("pane", "run")
+	if len(runs) != 3 {
+		t.Fatalf("pane run calls = %d, want one per pass", len(runs))
+	}
+	for _, r := range runs {
+		if script := fmt.Sprint(r.Extra["script"]); strings.Contains(script, "PI_CACHE_RETENTION") {
+			t.Errorf("the launcher touched PI_CACHE_RETENTION: %s", script)
 		}
-	})
-	t.Run("pane", func(t *testing.T) {
-		h := setup(t)
-		h.gateRepo(1)
-		h.sessionPi(gatePasses(nil))
-		h.must("gate", "spec.md", "--cache", "long", "--ctx-tool", "off")
-		// Each pass's launcher sets the setting for its own pi, not the pane's shell.
-		launchers := func() []string {
-			var out []string
-			for _, r := range h.gateCalls("pane", "run") {
-				out = append(out, fmt.Sprint(r.Extra["script"]))
-			}
-			return out
-		}
-		runs := launchers()
-		if len(runs) != 3 {
-			t.Fatalf("pane run calls = %d, want one per pass", len(runs))
-		}
-		for _, r := range runs {
-			if !strings.Contains(r, "\nexport PI_CACHE_RETENTION=long\n") {
-				t.Errorf("launcher: %s", r)
-			}
-		}
-		b, _ := os.ReadFile(filepath.Join(h.tmp, "fakepi", "cache.log"))
-		if got := strings.Fields(string(b)); len(got) != 3 || got[0] != "long" || got[1] != "long" || got[2] != "long" {
-			t.Errorf("pi saw %q", b)
-		}
-		// short: unset, and the default sends nothing at all.
-		h.sessionPi(gatePasses(nil))
-		os.Remove(h.fake + ".gate.log")
-		h.must("gate", "spec.md", "--cache", "short", "--ctx-tool", "off")
-		runs = launchers()
-		if len(runs) != 3 {
-			t.Fatalf("short cache reset reached %d panes, want 3", len(runs))
-		}
-		for _, r := range runs {
-			if !strings.Contains(r, "\nunset PI_CACHE_RETENTION\n") {
-				t.Errorf("launcher: %s", r)
-			}
-		}
-		os.Remove(h.fake + ".gate.log")
-		h.must("gate", "spec.md", "--ctx-tool", "off")
-		for _, r := range launchers() {
-			if strings.Contains(r, "PI_CACHE_RETENTION") {
-				t.Errorf("the default touched PI_CACHE_RETENTION: %s", r)
-			}
-		}
-	})
+	}
 }
 
 func TestGateTurnBudgetPromptsOnceAndInterruptsAtTheHardLimit(t *testing.T) {
@@ -328,7 +263,7 @@ func TestSessionProgressAndProfile(t *testing.T) {
 	}
 }
 
-func TestGateInsideHerdrNeedsItsTabAndHeadlessIsExplicit(t *testing.T) {
+func TestGateInsideHerdrNeedsItsTab(t *testing.T) {
 	h := setup(t)
 	gdir := h.gateRepo(1)
 	h.sessionPi(gatePasses(nil))
@@ -344,41 +279,37 @@ func TestGateInsideHerdrNeedsItsTabAndHeadlessIsExplicit(t *testing.T) {
 	if rec := readRecord(t, gdir); rec.State != "incomplete" {
 		t.Errorf("state %s", rec.State)
 	}
-	// An explicit choice runs headless, inside herdr as well.
-	for _, via := range []string{"flag", "env"} {
-		h.sessionPi(gatePasses(nil))
-		os.Remove(h.fake + ".gate.log")
-		tabs := len(callsOf(h.fakeState(), "tab", "create"))
-		args := []string{"gate", "spec.md"}
-		if via == "flag" {
-			args = append(args, "--headless")
-		} else {
-			t.Setenv("ORCH_HEADLESS", "1")
-		}
-		wantGateState(t, h.must(args...), "pass")
-		if exists(h.fake+".gate.log") || len(callsOf(h.fakeState(), "tab", "create")) != tabs {
-			t.Errorf("%s: herdr was used", via)
-		}
+}
+
+func TestGateOutsideHerdrRefusesButDryRunWorks(t *testing.T) {
+	h := setup(t)
+	h.gateRepo(1)
+	h.sessionPi(gatePasses(nil))
+	t.Setenv("HERDR_ENV", "")
+	t.Setenv("ORCH_HEADLESS", "1")
+	gateOutsideHerdr = false
+	t.Cleanup(func() { gateOutsideHerdr = true })
+	code, out := h.run("gate", "spec.md")
+	if code != 1 || !strings.Contains(out, "gate passes run in herdr panes; start orch gate inside herdr") {
+		t.Fatalf("outside herdr: %d %s", code, out)
+	}
+	if exists(filepath.Join(h.tmp, "fakepi", "calls.log")) {
+		t.Error("a pass ran outside herdr")
+	}
+	if code, out := h.run("gate", "spec.md", "--dry-run"); code != 0 {
+		t.Errorf("dry run outside herdr: %d %s", code, out)
 	}
 }
 
-func TestGateKeepSessionsKeepsTheSessionsOfPassesThatSucceeded(t *testing.T) {
+func TestGateDropsTheSessionsOfPassesThatSucceeded(t *testing.T) {
 	h := setup(t)
 	gdir := h.gateRepo(1)
 	t.Setenv("HERDR_ENV", "")
 	h.sessionPi(gatePasses(nil))
 	h.must("gate", "spec.md")
 	if exists(filepath.Join(gdir, "sessions", "group-api")) {
-		t.Error("a succeeding pass kept its session without --keep-sessions")
+		t.Error("a succeeding pass kept its session")
 	}
-	h.sessionPi(gatePasses(nil))
-	h.must("gate", "spec.md", "--keep-sessions")
-	for _, p := range []string{"group-api", "adversary-a"} {
-		if !exists(filepath.Join(gdir, "sessions", p, "session.jsonl")) {
-			t.Errorf("--keep-sessions dropped the session of %s", p)
-		}
-	}
-	wantContains(t, string(mustRead(t, filepath.Join(gdir, "report.md"))), "Exploration per pass", "group:api: requests 1;")
 }
 
 func TestSessionProfileSeparatesOrchCtxFromRawShellAndRangedReads(t *testing.T) {

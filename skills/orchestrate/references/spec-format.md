@@ -150,7 +150,7 @@ None.
 `orch gate <spec>` runs before `orch plan` and records a verdict for the
 spec's exact text (a change to the spec voids it). It checks that every
 `path#Symbol` or `path:line[-line]` pointer and every acceptance command exists, then runs four
-read-only passes on a cheap model (`ORCH_GATE_MODEL`, default DeepSeek
+read-only passes on a cheap model (the `gate` role, default DeepSeek
 Flash through pi): one per package for scope and open questions, and two
 adversaries. A model
 claim counts only when its evidence line exists in the repo, and only a

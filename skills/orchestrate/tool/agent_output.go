@@ -98,7 +98,6 @@ type gateInformation struct {
 	Experiment    string             `json:"experiment,omitempty"`
 	Bench         string             `json:"bench,omitempty"`
 	Warning       string             `json:"warning,omitempty"`
-	Cache         string             `json:"cache,omitempty"`
 	Tokens        string             `json:"tokens,omitempty"`
 	Shadow        string             `json:"shadow,omitempty"`
 	QuestionCards string             `json:"question_cards,omitempty"`
