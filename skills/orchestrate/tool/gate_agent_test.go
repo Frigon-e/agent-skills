@@ -116,8 +116,8 @@ func TestGatePaneTypesOneShortLineAndKeepsThePanesPath(t *testing.T) {
 			h.sessionPi(gatePasses(nil))
 			t.Setenv("ORCH_FAKE_CLAUDE_REPO", h.repo)
 			long := "/var/folders/" + strings.Repeat("deep/", 60) + "guard.jsonl"
-			t.Setenv("ORCH_TOOL_GUARD_LOG", long)
-			t.Setenv("ORCH_TOOL_GUARD_HINT", "it's \"quoted\" $HOME `x`")
+			t.Setenv("ORCH_TOOL_GUARD_STATE_DIR", long)
+			t.Setenv("ORCH_TOOL_GUARD_SKIP", "it's \"quoted\" $HOME `x`")
 			t.Setenv("ORCH_TSLS", long+"-tsls")
 			runner := "pi:" + gateModelDef
 			if harness == "claude" {
@@ -162,7 +162,7 @@ func TestGatePaneTypesOneShortLineAndKeepsThePanesPath(t *testing.T) {
 			}
 			// The env reached the agent byte for byte through the launcher's quoting.
 			env := string(mustRead(t, filepath.Join(h.fake+".panes", flagValue(starts[0].Args, "--pane")+".launch.env")))
-			for _, want := range []string{"ORCH_TOOL_GUARD_LOG=" + long + "\x00", "ORCH_TOOL_GUARD_HINT=it's \"quoted\" $HOME `x`\x00", "PI_CACHE_RETENTION=long\x00"} {
+			for _, want := range []string{"ORCH_TOOL_GUARD_STATE_DIR=" + long + "\x00", "ORCH_TOOL_GUARD_SKIP=it's \"quoted\" $HOME `x`\x00", "PI_CACHE_RETENTION=long\x00"} {
 				if harness == "claude" && strings.HasPrefix(want, "ORCH_TOOL_GUARD") {
 					continue // the pi tool guard's knobs are only for pi
 				}

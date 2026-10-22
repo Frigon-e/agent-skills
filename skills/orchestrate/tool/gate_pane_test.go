@@ -980,7 +980,7 @@ func TestGatePiLoadsToolGuardOnlyInOpenShell(t *testing.T) {
 				if mode == "headless" {
 					t.Setenv("HERDR_ENV", "")
 				}
-				t.Setenv("ORCH_TOOL_GUARD_HINT", "pattern")
+				t.Setenv("ORCH_TOOL_GUARD_SKIP", "pattern")
 				h.sessionPi(gatePasses(nil))
 				h.must(append([]string{"gate", "spec.md"}, c.args...)...)
 				var lines [][]string
@@ -1023,7 +1023,7 @@ func TestGatePiLoadsToolGuardOnlyInOpenShell(t *testing.T) {
 				}
 				exported := false
 				for _, call := range h.gateCalls("pane", "run") {
-					if strings.Contains(fmt.Sprint(call.Extra["script"]), "\nexport ORCH_TOOL_GUARD_HINT='pattern'\n") {
+					if strings.Contains(fmt.Sprint(call.Extra["script"]), "\nexport ORCH_TOOL_GUARD_SKIP='pattern'\n") {
 						exported = true
 					}
 				}
@@ -1041,13 +1041,13 @@ func TestGuardKnobsReachBothPiPaths(t *testing.T) {
 	h := setup(t)
 	t.Setenv("ORCH_TOOL_GUARD", "off")
 	t.Setenv("ORCH_TOOL_GUARD_SKIP", "find")
-	t.Setenv("ORCH_TOOL_GUARD_HINT", "")
+	t.Setenv("ORCH_TOOL_GUARD_STATE_DIR", "/tmp/guard-state")
 	p, err := gateAgentPass(h.repo, "pi", gatePass{name: "a", shared: "s", task: "t", prompt: "st", ctxTool: true})
 	if err != nil {
 		t.Fatal(err)
 	}
 	env := agentEnv(piEnv(""), p.cli.Env)
-	for _, want := range []string{"ORCH_TOOL_GUARD=off", "ORCH_TOOL_GUARD_SKIP=find", "ORCH_TOOL_GUARD_HINT="} {
+	for _, want := range []string{"ORCH_TOOL_GUARD=off", "ORCH_TOOL_GUARD_SKIP=find", "ORCH_TOOL_GUARD_STATE_DIR=/tmp/guard-state"} {
 		if !slices.Contains(env, want) || !slices.Contains(p.cli.Env, want) {
 			t.Errorf("%s missing from the pass env", want)
 		}
@@ -1058,6 +1058,16 @@ func TestGuardKnobsReachBothPiPaths(t *testing.T) {
 	}
 	if len(guardEnv(only.cli.Env)) != 0 {
 		t.Errorf("ctx-only pass exports guard env: %v", only.cli.Env)
+	}
+}
+
+// A user environment that still sets a removed guard switch is ignored: the
+// pass env does not carry it.
+func TestGuardEnvDropsRemovedSwitches(t *testing.T) {
+	got := guardEnv([]string{"ORCH_TOOL_GUARD_HINT=pattern", "ORCH_TOOL_GUARD_LOG=/tmp/x", "ORCH_CTX_PROFILE=lean", "ORCH_TOOL_GUARD=off", "ORCH_TOOL_GUARD_SKIP=find", "ORCH_TOOL_GUARD_STATE_DIR=/s", "HOME=/h"})
+	want := []string{"ORCH_TOOL_GUARD=off", "ORCH_TOOL_GUARD_SKIP=find", "ORCH_TOOL_GUARD_STATE_DIR=/s"}
+	if !slices.Equal(got, want) {
+		t.Errorf("guardEnv = %v, want %v", got, want)
 	}
 }
 

@@ -55,7 +55,7 @@ BUILTIN_HOOK = "deny-builtin-search.sh"
 BUILTIN_HOOK_TOOL = {"content-search": "Grep", "file-search": "Glob"}
 BUILTIN_REPLACEMENT = {"builtin-grep": "orch ctx batch", "builtin-glob": "orch ctx batch"}
 
-# The two generic reasons, byte for byte, and the line each pattern mode adds.
+# The two built-in reasons, byte for byte.
 GENERIC_BUILTIN = {
     "Grep": (
         "orch tool guard (deny-builtin-grep): the built-in Grep tool is blocked; "
@@ -70,20 +70,6 @@ GENERIC_BUILTIN = {
         '-q "text:pattern glob=dir/**" (--compact shortens it).'
     ),
 }
-BUILTIN_TAILORED = [
-    ("Grep", "Normalize", "internal", 'Use orch ctx batch -q "symbol:Normalize refs=3".'),
-    (
-        "Grep",
-        "cannot find user",
-        "internal",
-        "Use orch ctx batch -q \"text:'cannot find user' glob=internal/**\".",
-    ),
-    ("Grep", "/api/users", "", "Use orch ctx batch -q \"text:'/api/users'\"."),
-    ("Grep", "refund.*failed", "src", 'Use orch ctx batch -q "find:Code that refund failed".'),
-    ("Glob", "*.go", "internal", "Use orch ctx batch -q \"text:'*.go' glob=internal/**\"."),
-    ("Glob", "refund.*failed", "src", 'Use orch ctx batch -q "find:Code that refund failed".'),
-]
-
 # The replacement a block must name, given the PATH situation and the rule.
 REPLACEMENT = {
     "orch": {
@@ -146,32 +132,12 @@ REQUIRED = [
 ]
 
 
-# The line a kind renders, and the generic reason that must survive byte for
-# byte when the pattern hint is off.
-KIND_MARKERS = {"symbol": "orch ctx sym", "text": "orch ctx batch -q \"text:'", "concept": "orch ctx find"}
-
+# The deny-grep-rg reason, byte for byte.
 GENERIC_ORCH_GREP = (
     "orch tool guard (deny-grep-rg): a plain grep, rg, ag or git grep over files is blocked.\n"
     'One orch ctx batch replaces it: orch ctx batch -q "text:pattern glob=dir/**" '
     '-q "symbol:Name refs=3" (a concept: find:...).'
 )
-
-# The three examples the task names, with the whole tailored line they must add.
-TAILORED = [
-    (
-        'grep -rn "refund.*failed" src',
-        'Use orch ctx find "Code that refund failed" '
-        "(a broader search; use it when no name or string is known).",
-    ),
-    ("grep -rn Normalize src", "Use orch ctx sym Normalize --refs 3."),
-    (
-        'rg "cannot find user" internal/',
-        "Use orch ctx batch -q \"text:'cannot find user' glob=internal/**\".",
-    ),
-    ("grep -rn 'a$b' .", "Use orch ctx batch -q \"text:'a\\$b'\"."),
-    ("grep -rn \"it's here\" lib", "Use orch ctx text --glob 'lib/**' -- 'it'\\''s here'."),
-]
-
 
 def repository_root(start):
     """The git repository a path is in, by walking up, or ""."""
@@ -227,99 +193,25 @@ def grep_hook(checker, command, situation, extra):
     )
 
 
-def check_pattern_hints(checker, kinds, workdir):
-    """The classifier table and the one line ORCH_TOOL_GUARD_HINT=pattern adds.
-
-    Every patternKinds case runs through the real deny-grep-rg hook with a stub
-    orch on PATH, so pattern extraction, the kind and the line it renders are
-    checked together. Returns the failures and the count per kind.
-    """
+def check_generic_reasons(checker):
+    """The deny-grep-rg reason, byte for byte, with orch, and without it."""
     failures = []
-    counts = {"symbol": 0, "text": 0, "concept": 0}
-    pattern = {"ORCH_TOOL_GUARD_HINT": "pattern"}
-    for case in kinds:
-        command = f"grep -rn '{case['pattern']}' src"
-        label = f"pattern kind {case['pattern']!r}"
-        wanted = case["kind"]
-        if wanted not in KIND_MARKERS:
-            failures.append(f"{label}: unknown kind {wanted!r}")
-            continue
-        done = grep_hook(checker, command, "orch", pattern)
-        if done.returncode != 2:
-            failures.append(f"{label}: exit {done.returncode}, want 2: {done.stderr.strip()}")
-            continue
-        counts[wanted] += 1
-        reason = done.stderr.strip()
-        for kind, marker in KIND_MARKERS.items():
-            if (marker in reason) != (kind == wanted):
-                failures.append(f"{label}: must render the {wanted} line and no other: {reason}")
-                break
-        lines = [line for line in reason.splitlines() if line.strip()]
-        if len(lines) != 3:
-            failures.append(f"{label}: the tailored line must be one extra line, got {len(lines)}: {reason}")
-    # At least eight cases per kind, so neither implementation can be right by
-    # accident on a thin table.
-    for wanted, count in counts.items():
-        if count < 8:
-            failures.append(f"only {count} classification cases for {wanted}, want 8 or more")
-
-    # The three named examples, whole line.
-    for command, line in TAILORED:
-        done = grep_hook(checker, command, "orch", pattern)
-        reason = done.stderr.strip()
-        if line not in reason.splitlines():
-            failures.append(f"{command}: missing the tailored line {line!r}: {reason}")
-
-    # generic and unset keep today's text byte for byte.
-    for extra in ({"ORCH_TOOL_GUARD_HINT": "generic"}, {}):
-        done = grep_hook(checker, "grep -rn Normalize src", "orch", extra)
-        label = "generic" if extra else "unset"
-        if done.returncode != 2 or done.stderr.strip() != GENERIC_ORCH_GREP:
-            failures.append(f"{label}: the reason is not the old text byte for byte: {done.stderr.strip()!r}")
-    # Without orch, the pattern hint has nothing to name, so both modes agree.
+    done = grep_hook(checker, "grep -rn Normalize src", "orch", {})
+    if done.returncode != 2 or done.stderr.strip() != GENERIC_ORCH_GREP:
+        failures.append(f"the reason is not the fixed text byte for byte: {done.stderr.strip()!r}")
     for situation in ("fd-rg", "none"):
-        for extra in (pattern, {}):
-            done = grep_hook(checker, "grep -rn Normalize src", situation, extra)
-            lines = [line for line in done.stderr.strip().splitlines() if line.strip()]
-            if done.returncode != 2 or len(lines) != 2:
-                failures.append(f"{situation}: a pattern hint without orch added a line: {done.stderr.strip()!r}")
-            if any(marker in done.stderr for marker in KIND_MARKERS.values()):
-                failures.append(f"{situation}: named orch ctx without orch on PATH: {done.stderr.strip()!r}")
-
-    # The A/B log: one JSON line per block, off unless asked for.
-    log = os.path.join(workdir, "guard.log")
-    long_command = "grep -rn " + "A" * 300 + " src"
-    for command in ("grep -rn Normalize src", long_command):
-        grep_hook(checker, command, "orch", dict(pattern, ORCH_TOOL_GUARD_LOG=log))
-    # An allowed call writes nothing.
-    grep_hook(checker, "orch ctx text Normalize", "orch", dict(pattern, ORCH_TOOL_GUARD_LOG=log))
-    try:
-        with open(log, encoding="utf-8") as handle:
-            entries = [json.loads(line) for line in handle if line.strip()]
-    except OSError as error:
-        failures.append(f"the log was not written: {error}")
-        entries = []
-    if len(entries) != 2:
-        failures.append(f"the log must hold one line per block, got {len(entries)}")
-    for entry in entries:
-        if sorted(entry) != ["command", "harness", "hint", "kind", "rule", "ts"]:
-            failures.append(f"the log line has the wrong fields: {sorted(entry)}")
-        if entry.get("harness") != "claude" or entry.get("rule") != "grep-rg":
-            failures.append(f"the log line names the wrong block: {entry}")
-        if entry.get("hint") != "pattern" or entry.get("kind") != "symbol":
-            failures.append(f"the log line names the wrong hint or kind: {entry}")
-        if len(entry.get("command", "")) > 200:
-            failures.append("the log command is not cut at 200 chars")
-    return failures, counts
+        done = grep_hook(checker, "grep -rn Normalize src", situation, {})
+        if done.returncode != 2 or "orch ctx batch" in done.stderr:
+            failures.append(f"{situation}: named orch ctx without orch on PATH: {done.stderr.strip()!r}")
+    return failures
 
 
 def check_builtin_search(checker, workdir, cases):
-    """The built-in search hook: the shared table, the two generic reasons byte
-    for byte, the pattern hint, the log, the switches, the repository boundary and
-    the fail-open cases. Returns the failures and the shared table's counts."""
+    """The built-in search hook: the shared table, the two reasons byte for byte,
+    the switches, the repository boundary and the fail-open cases. Returns the
+    failures and the shared table's counts."""
     failures = []
     blocked = allowed = 0
-    pattern = {"ORCH_TOOL_GUARD_HINT": "pattern"}
 
     # The shared table: blocked while orch answers and the path is inside the
     # repository, allowed otherwise, and no retry escape on a block.
@@ -350,59 +242,18 @@ def check_builtin_search(checker, workdir, cases):
             if BUILTIN_REPLACEMENT[rule] not in reason:
                 failures.append(f"{label}: reason must name {BUILTIN_REPLACEMENT[rule]!r}: {reason}")
             entries = [entry for entry in reason.splitlines() if entry.strip()]
-            if not 2 <= len(entries) <= 3:
-                failures.append(f"{label}: reason is {len(entries)} lines, want 2 or 3: {reason}")
+            if len(entries) != 2:
+                failures.append(f"{label}: reason is {len(entries)} lines, want 2: {reason}")
             if done.stdout:
                 failures.append(f"{label}: block wrote to stdout: {done.stdout.strip()}")
 
-    # Generic and unset keep the fixed text byte for byte.
+    # The reason is the fixed text byte for byte.
     for tool, sample in (("Grep", "Gateway"), ("Glob", "*.go")):
-        for extra, label in (({"ORCH_TOOL_GUARD_HINT": "generic"}, "generic"), ({}, "unset")):
-            done = builtin_hook(checker, tool, sample, "internal", "orch", extra)
-            if done.returncode != 2 or done.stderr.strip() != GENERIC_BUILTIN[tool]:
-                failures.append(
-                    f"{tool} {label}: the reason is not the fixed text byte for byte: "
-                    f"{done.stderr.strip()!r}"
-                )
-
-    # The pattern hint is exactly one extra line, the one that fits the pattern.
-    for tool, pattern_text, path, line in BUILTIN_TAILORED:
-        done = builtin_hook(checker, tool, pattern_text, path, "orch", pattern)
-        reason = done.stderr.strip()
-        if done.returncode != 2:
-            failures.append(f"{tool} {pattern_text!r}: exit {done.returncode}, want 2: {reason}")
-            continue
-        entries = [entry for entry in reason.splitlines() if entry.strip()]
-        if len(entries) != 3 or entries[2] != line:
-            failures.append(f"{tool} {pattern_text!r}: the tailored line is not {line!r}: {reason}")
-
-    # The A/B log names the built-in rule and the arguments the model typed, and
-    # a call the guard lets through writes nothing.
-    log = os.path.join(workdir, "builtin.log")
-    log_env = dict(pattern, ORCH_TOOL_GUARD_LOG=log)
-    builtin_hook(checker, "Grep", "Normalize", "internal", "orch", log_env)
-    builtin_hook(checker, "Glob", "*.go", "", "orch", log_env)
-    builtin_hook(checker, "Grep", "Normalize", "internal", "orch", dict(log_env, ORCH_TOOL_GUARD="off"))
-    try:
-        with open(log, encoding="utf-8") as handle:
-            entries = [json.loads(line) for line in handle if line.strip()]
-    except (OSError, ValueError) as error:
-        failures.append(f"the built-in log was not written: {error}")
-        entries = []
-    want_log = [
-        ("builtin-grep", "symbol", "Grep pattern=Normalize path=internal"),
-        ("builtin-glob", "text", "Glob pattern=*.go"),
-    ]
-    if len(entries) != len(want_log):
-        failures.append(f"the log must hold one line per block, got {len(entries)}")
-    for entry, want in zip(entries, want_log, strict=False):
-        if sorted(entry) != ["command", "harness", "hint", "kind", "rule", "ts"]:
-            failures.append(f"the log line has the wrong fields: {sorted(entry)}")
-            continue
-        if entry.get("harness") != "claude" or entry.get("hint") != "pattern":
-            failures.append(f"the log line names the wrong harness or hint: {entry}")
-        if (entry.get("rule"), entry.get("kind"), entry.get("command")) != want:
-            failures.append(f"the log line names the wrong block: {entry}, want {want}")
+        done = builtin_hook(checker, tool, sample, "internal", "orch")
+        if done.returncode != 2 or done.stderr.strip() != GENERIC_BUILTIN[tool]:
+            failures.append(
+                f"{tool}: the reason is not the fixed text byte for byte: {done.stderr.strip()!r}"
+            )
 
     # The switches: ORCH_TOOL_GUARD=off, the group name, and one rule's name.
     for extra, label in (
@@ -457,31 +308,6 @@ def check_builtin_search(checker, workdir, cases):
             done = builtin_hook(checker, tool, sample, target, "orch", cwd=cwd)
             if done.returncode != want or (want == 0 and done.stderr.strip()):
                 failures.append(f"{tool} {target!r} from {cwd}: exit {done.returncode}, want {want}: {done.stderr.strip()}")
-
-    # Execute the generated hint to check shell arguments, not just its wording.
-    for sample, target, argv in (
-        ("$(printf EXPANDED)", "", ["ctx", "batch", "-q", "text:'$(printf EXPANDED)'"]),
-        ("`printf EXPANDED`", "", ["ctx", "batch", "-q", "text:'`printf EXPANDED`'"]),
-        ("it's $HOME", "", ["ctx", "text", "--", "it's $HOME"]),
-        ('a"b\\c', "", ["ctx", "batch", "-q", 'text:\'a"b\\c\'']),
-        ("/api/users", "dir space'\"\\$HOME`printf EXPANDED`", ["ctx", "text", "--glob", "dir space'\"\\$HOME`printf EXPANDED`/**", "--", "/api/users"]),
-        ("refund.*`printf EXPANDED`", "", ["ctx", "batch", "-q", "find:Code that refund `printf EXPANDED`"]),
-        ("--bad'query", "", ["ctx", "text", "--", "--bad'query"]),
-        ("--scoped'query", "dir space", ["ctx", "text", "--glob", "dir space/**", "--", "--scoped'query"]),
-    ):
-        done = builtin_hook(checker, "Grep", sample, target, "orch", pattern)
-        hints = [line[4:-1] for line in done.stderr.splitlines() if line.startswith("Use ") and line.endswith(".")]
-        if done.returncode != 2 or len(hints) != 1:
-            failures.append(f"no generated hint for {sample!r}: {done.stderr.strip()}")
-            continue
-        captured = subprocess.run(
-            ["/bin/sh", "-c", "orch() { printf '%s\\000' \"$@\"; }; " + hints[0]],
-            text=True,
-            capture_output=True,
-        )
-        want = "\0".join(argv) + "\0"
-        if captured.returncode != 0 or captured.stdout != want:
-            failures.append(f"hint for {sample!r} at {target!r}: argv {captured.stdout!r}, want {want!r}: {captured.stderr}")
 
     # Fail open on anything but a Grep or Glob call that carries a pattern.
     payloads = [
@@ -763,16 +589,14 @@ def probe_count(path):
 
 def check_orch_health(checker, workdir):
     """A broken orch is not a replacement: a search block says so, rg stays
-    allowed, the probe is cached for a minute and a broken probe is logged once."""
+    allowed, and the probe is cached for a minute."""
     failures = []
     probes = os.path.join(workdir, "broken-probes.log")
-    log = os.path.join(workdir, "broken-health.log")
     # A state directory of its own, so the cases above cannot have warmed it.
     state = os.path.join(workdir, "health-state")
     cache = os.path.join(state, "toolguard-health.json")
     extra = {
         "ORCH_PROBE_LOG": probes,
-        "ORCH_TOOL_GUARD_LOG": log,
         "ORCH_TOOL_GUARD_STATE_DIR": state,
     }
 
@@ -794,28 +618,6 @@ def check_orch_health(checker, workdir):
             failures.append(f"broken orch {attempt} grep: did not name rg: {reason!r}")
     if probe_count(probes) != 1:
         failures.append(f"two calls within the minute probed {probe_count(probes)} times, want 1")
-
-    # One JSON line per probe, next to the blocks: the event, the harness and
-    # the probe's first error line.
-    try:
-        with open(log, encoding="utf-8") as handle:
-            entries = [json.loads(line) for line in handle if line.strip()]
-    except (OSError, ValueError) as error:
-        failures.append(f"the broken probe was not logged: {error}")
-        entries = []
-    probes_logged = [entry for entry in entries if "event" in entry]
-    blocks = [entry for entry in entries if "rule" in entry]
-    if len(probes_logged) != 1:
-        failures.append(f"the log must hold one health line per probe, got {len(probes_logged)}")
-    if len(blocks) != 2:
-        failures.append(f"the log must still hold one line per block, got {len(blocks)}")
-    for entry in probes_logged:
-        if sorted(entry) != ["detail", "event", "harness", "ts"]:
-            failures.append(f"the health log line has the wrong fields: {sorted(entry)}")
-        elif entry["event"] != "orch-unhealthy" or entry["harness"] != "claude":
-            failures.append(f"the health log line names the wrong event: {entry}")
-        elif entry["detail"] != BROKEN_DETAIL:
-            failures.append(f"the health log detail is not the probe's first error line: {entry}")
 
     # rg is the preferred grep when orch cannot answer, so it is not blocked.
     done = grep_hook(checker, "rg Foo internal/", "orch broken", extra)
@@ -870,7 +672,6 @@ def main():
     situations = data["pathSituations"]
 
     workdir = tempfile.mkdtemp(prefix="toolguard-")
-    kind_counts = {}
     try:
         support = os.path.join(workdir, "support")
         support_bin(support)
@@ -893,8 +694,7 @@ def main():
             checker, workdir, data["builtinCases"]
         )
         failures.extend(builtin_failures)
-        kind_failures, kind_counts = check_pattern_hints(checker, data["patternKinds"], workdir)
-        failures.extend(kind_failures)
+        failures.extend(check_generic_reasons(checker))
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
 
@@ -906,8 +706,6 @@ def main():
         f"{builtin_allowed} allowed; "
         f"{len(SCRIPTS)} scripts checked with bash -n"
         + (" and shellcheck" if shutil.which("shellcheck") else "")
-        + "; pattern kinds: "
-        + ", ".join(f"{kind} {count}" for kind, count in kind_counts.items())
         + f"; {len(failures)} failure(s)"
     )
     return 1 if failures else 0
