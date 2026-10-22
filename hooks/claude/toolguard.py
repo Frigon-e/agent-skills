@@ -15,6 +15,11 @@ the shell rules and point at the same ctx query; with no usable `orch` they are
 the fallback. `orch ctx` is pinned to a git repository root, so a search whose
 path is outside the session's repository has no replacement and is allowed.
 
+`deny-big-read.sh` is the seventh script and carries one rule for Claude's own
+Read tool: deny-big-read blocks a whole-file read of a regular file over
+BIG_READ_BYTES, because every token read stays in context for the rest of the
+session. A read with an offset or a limit always passes.
+
 Each script passes its group name as the only argument. The hook JSON arrives
 on stdin, and a block is exit 2 with the reason on stderr, which is how Claude
 Code's PreToolUse hooks hand a refusal back to the model.
@@ -28,6 +33,7 @@ answer is treated as absent, and a search block says it is broken.
 import json
 import os
 import re
+import stat
 import subprocess
 import sys
 import time
@@ -47,6 +53,13 @@ DETAIL_MAX = 120
 # The result lives in a small cache for a minute instead.
 HEALTH_TTL = 60
 HEALTH_FILE = "toolguard-health.json"
+
+# A whole-file Read of a regular file over this many bytes is blocked; a range
+# (offset or limit) always passes.
+BIG_READ_BYTES = 30720
+
+# Files Claude Code's Read tool opens specially, so a size limit does not apply.
+READ_EXEMPT_SUFFIXES = frozenset({".png", ".jpg", ".jpeg", ".gif", ".webp", ".pdf", ".ipynb"})
 
 # The rules that name a search replacement, and so say when orch is broken. The
 # two rules that always name a built-in tool (Edit, Read) never do, because
@@ -673,6 +686,60 @@ def builtin_search(event):
     return 2
 
 
+def big_read_reason(path, size, tools):
+    """The block text: the size, then how to read only the part needed."""
+    kilobytes = max(1, round(size / 1024))
+    if tools["orch"]:
+        lookup = (
+            'Get the line numbers first: orch ctx text "pattern" --glob <file> or orch ctx sym Name '
+            '(a doc: its headings with orch ctx text "^#{1,3} " --glob <file>).'
+        )
+    else:
+        lookup = 'Get the line numbers first: rg -n "pattern" <file> (a doc: rg -n "^#{1,3} " <file>).'
+    return (
+        f"{GUARD_MARKER} (deny-big-read): {path} is {kilobytes} KB; reading it whole floods the context.\n"
+        "Use Read with offset and limit and take only the section you need.\n" + lookup
+    )
+
+
+def big_read_skipped():
+    """ORCH_TOOL_GUARD=off disables the rule; ORCH_TOOL_GUARD_SKIP takes its short
+    or full name."""
+    if os.environ.get("ORCH_TOOL_GUARD") == "off":
+        return True
+    skip = {name.strip() for name in (os.environ.get("ORCH_TOOL_GUARD_SKIP") or "").split(",") if name.strip()}
+    return "big-read" in skip or "deny-big-read" in skip
+
+
+def big_read(event):
+    """A Read of a big file with no range, so the whole file lands in context.
+
+    Fail open: a payload that is not a Read of a path, a range of any kind, a
+    PDF page selection, a file Read opens specially, and a path that is not a
+    regular file over the limit (missing, a directory, unreadable) all pass.
+    """
+    if big_read_skipped() or event.get("tool_name") != "Read":
+        return 0
+    tool_input = event.get("tool_input")
+    if not isinstance(tool_input, dict):
+        return 0
+    path = tool_input.get("file_path")
+    if not isinstance(path, str) or not path.strip():
+        return 0
+    if any(tool_input.get(key) not in (None, "") for key in ("offset", "limit", "pages")):
+        return 0
+    if os.path.splitext(path)[1].lower() in READ_EXEMPT_SUFFIXES:
+        return 0
+    try:
+        info = os.stat(os.path.expanduser(path))
+    except (OSError, ValueError):
+        return 0
+    if not stat.S_ISREG(info.st_mode) or info.st_size <= BIG_READ_BYTES:
+        return 0
+    sys.stderr.write(big_read_reason(path, info.st_size, installed()) + "\n")
+    return 2
+
+
 def active_rules(script):
     """ORCH_TOOL_GUARD=off disables every rule; ORCH_TOOL_GUARD_SKIP disables
     single rules by short name or by full name."""
@@ -696,6 +763,8 @@ def main(argv):
         return 0
     if script == "builtin-search":
         return builtin_search(event)
+    if script == "big-read":
+        return big_read(event)
     tool = event.get("tool_name")
     if tool is not None and tool != "Bash":
         return 0

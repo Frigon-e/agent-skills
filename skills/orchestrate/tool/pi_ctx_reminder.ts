@@ -16,10 +16,12 @@
 // session's repository has no replacement and is allowed. A grep filtering
 // another command's output and plain fd are not blocked; the note is appended
 // to their result instead, and to a built-in search that does run.
+// deny-big-read refuses pi's read of a file over 30 KB when it has no offset and
+// no limit, whatever is installed; it names a ranged read and how to get the lines.
 import type { ExtensionAPI, ToolCallEvent, ToolResultEvent } from "@earendil-works/pi-coding-agent";
 import { spawnSync } from "node:child_process";
 import { accessSync, constants, realpathSync, statSync } from "node:fs";
-import { delimiter, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { delimiter, dirname, extname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 const marker = "orch ctx reminder";
 const guardMarker = "orch tool guard";
@@ -581,6 +583,40 @@ const builtinRules: builtinRule[] = [
 	},
 ];
 
+// deny-big-read: a whole-file read of a regular file over this many bytes floods
+// the context for the rest of the session, so it is refused; a range (offset or
+// limit) always passes. Images, PDFs and notebooks are read specially and stay.
+// This is the pi side of hooks/claude/deny-big-read.sh.
+const bigReadBytes = 30720;
+const readExempt = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp", ".pdf", ".ipynb"]);
+
+// The block reason for a big read, or "" when the call is not one. Any path it
+// cannot stat is allowed: a missing file or a directory is not a big read.
+function bigReadReason(input: Record<string, unknown>, ready: tools): string {
+	const path = input.path;
+	if (typeof path !== "string" || !path.trim()) return "";
+	const ranged = (key: string) => input[key] !== undefined && input[key] !== null && input[key] !== "";
+	if (ranged("offset") || ranged("limit") || ranged("pages")) return "";
+	if (readExempt.has(extname(path).toLowerCase())) return "";
+	let size: number;
+	try {
+		const info = statSync(path);
+		if (!info.isFile()) return "";
+		size = info.size;
+	} catch {
+		return "";
+	}
+	if (size <= bigReadBytes) return "";
+	const lookup = ready.orch
+		? `Get the line numbers first: orch ctx text "pattern" --glob <file> or orch ctx sym Name (a doc: its headings with orch ctx text "^#{1,3} " --glob <file>).`
+		: `Get the line numbers first: rg -n "pattern" <file> (a doc: rg -n "^#{1,3} " <file>).`;
+	return (
+		`${guardMarker} (deny-big-read): ${path} is ${Math.max(1, Math.round(size / 1024))} KB; reading it whole floods the context.\n` +
+		`Use read with offset and limit and take only the section you need.\n` +
+		lookup
+	);
+}
+
 // The rules and the built-in rules ORCH_TOOL_GUARD_SKIP disables, by short name,
 // by full name, or by group (`builtin-search` for both built-in rules at once).
 function skipped(): Set<string> {
@@ -662,6 +698,14 @@ export default function (pi: ExtensionAPI) {
 		if (builtin) {
 			blocksInRow += 1;
 			return { block: true, reason: blockReason(builtin.reason) };
+		}
+		const bigRead =
+			guard && event.toolName === "read" && !skipped().has("big-read") && !skipped().has("deny-big-read")
+				? bigReadReason(input, ready)
+				: "";
+		if (bigRead) {
+			blocksInRow += 1;
+			return { block: true, reason: blockReason(bigRead) };
 		}
 		const line = event.toolName === "bash" ? String(input.command ?? "").trim() : "";
 		if (!line) {
