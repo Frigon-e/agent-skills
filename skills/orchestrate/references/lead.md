@@ -71,8 +71,9 @@ crowds out what matters. Route by context as well as by model (`route-work`,
 - **Never drive the browser yourself.** Every browser call, screenshot, E2E
   run and visual check goes to `ui-verifier`; you get its verdict and
   defects.
-- **Let a scout size the work.** Have `context-explorer` report change
-  sites and a size guess (`Mode: scope`) instead of reading code to find out.
+- **Let a scout size the work.** Have an `Explore` agent report change
+  sites and a size guess (the sizing prompt in `route-work`) instead of
+  reading code to find out.
 - **Delegate single-use output:** wide reads, log digging, searches.
 - **Search with `orch ctx` first** (`references/context.md`), cheapest option
   first: `text` with `--glob` and `--word` for scoped pattern matches,

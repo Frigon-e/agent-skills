@@ -38,8 +38,9 @@ that builds the Go tool on first use). Always call it by that full path.
 For each user message, decide which of these it is before acting:
 
 - **A question you can answer** from the board, a lead's report or one or
-  two file reads: answer it. A wider search goes to a `context-explorer`
-  scout (the only in-process subagents you run), never to your own reads.
+  two file reads: answer it. A wider search goes to an `Explore` agent
+  (`Explore` and `claude-code-guide` are the only in-process subagents you
+  run), never your own reads.
 - **A decision a lead is waiting on**: send it (see Loop).
 - **A task**: work that changes a repo or needs sustained investigation.
   Give each one a lead. Choose:

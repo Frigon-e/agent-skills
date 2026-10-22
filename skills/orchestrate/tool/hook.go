@@ -19,7 +19,7 @@ import (
 // session: errors are printed and the tool call goes ahead.
 
 var (
-	scoutAgents   = []string{"context-explorer", "Explore", "claude-code-guide"}
+	scoutAgents   = []string{"Explore", "claude-code-guide"}
 	gitMutationRe = regexp.MustCompile(`\bgit\s+(?:-C\s+\S+\s+)?(?:commit|merge|push|rebase|reset|cherry-pick|am|apply|stash|checkout\s+-[bB]|switch\s+-[cC]|worktree\s+add|branch\s+-[dDmM])\b|\bgh\s+pr\s+(?:merge|create)\b`)
 )
 
