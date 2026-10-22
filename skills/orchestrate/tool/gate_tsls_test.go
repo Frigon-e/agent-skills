@@ -252,6 +252,11 @@ func TestTSFactsMissingServerNoNativeServerAndTimeoutLeaveValidCards(t *testing.
 	t.Run("no native server", func(t *testing.T) {
 		e := newTSEnv(t)
 		t.Setenv("ORCH_TSLS", "")
+		// Own PATH: only the JavaScript tsc of TypeScript 5, so the result does
+		// not depend on a TypeScript 7 tsc installed on the machine.
+		bin := t.TempDir()
+		os.WriteFile(filepath.Join(bin, "tsc"), []byte("#!/bin/sh\necho 'Version 5.6.3'\n"), 0o755)
+		t.Setenv("PATH", bin)
 		check(t, e, "no native TypeScript 7 server found")
 	})
 	t.Run("timeout", func(t *testing.T) {
