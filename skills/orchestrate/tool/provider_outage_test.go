@@ -48,7 +48,7 @@ func TestOutageGateConnectionRefusedUsesFallback(t *testing.T) {
 	rr, _ := roleSite(profile{Harness: "pi", Model: "test"}, profile{Harness: "claude", Model: "haiku"}).newRoleRun("gate", modelOptions{})
 	rec := gateBudgetRecord(gateRunLimits([]gatePass{{budget: 40}}, nil))
 	p := gatePass{name: "group:test", class: "package", prompt: "review", apply: func(string, *gateRecord, string, *spec) error { return nil }}
-	runGatePasses(filepath.Join(h.tmp, "gate"), h.repo, "test", []gatePass{p}, rec, nil, nil, gateOpts{runner: rr, headless: true})
+	runGatePasses(filepath.Join(h.tmp, "gate"), h.repo, "test", []gatePass{p}, rec, nil, gateOpts{runner: rr, headless: true})
 	if !exists(log) {
 		t.Fatalf("provider outage did not fall back: %+v", rec.PassErrors)
 	}
@@ -275,7 +275,7 @@ func TestOutageSpecQueriesCLIUsesConfiguredRole(t *testing.T) {
 }
 
 func TestOutageOptionalRolesNeverReturnSilentEmpty(t *testing.T) {
-	for _, role := range []string{"spec_queries", "shadow_flash"} {
+	for _, role := range []string{"spec_queries"} {
 		for _, mode := range []string{"refused", "429", "503", "401", "empty"} {
 			t.Run(role+"/"+mode, func(t *testing.T) {
 				h := setup(t)
@@ -438,48 +438,6 @@ printf '%s' '{"packages":[{"id":"api","claims":[],"questions":[],"will_change":[
 			}
 			if exists(healthPath()) {
 				t.Fatal("direct provider outage wrote health")
-			}
-		})
-	}
-}
-
-func TestOutageShadowFlashRecordOnly(t *testing.T) {
-	for _, mode := range outageModes {
-		t.Run(mode, func(t *testing.T) {
-			h := setup(t)
-			dir := t.TempDir()
-			script := "echo 'HTTP " + mode + "' >&2; exit 1"
-			switch mode {
-			case "refused":
-				script = "echo 'connection refused' >&2; exit 1"
-			case "empty":
-				script = "exit 0"
-			case "malformed":
-				script = "printf '{broken'"
-			case "timeout":
-				script = "echo 'request timed out' >&2; exit 1"
-			}
-			t.Setenv("ORCH_PI", fakeRunner(t, "pi", script))
-			s := roleSite(profile{Harness: "pi", Model: "test"})
-			s.repo = h.repo
-			s.cfg.Roles["shadow_flash"] = modelRole{Use: []profile{{Harness: "pi", Model: "test"}}}
-			before := map[string]string{"gate.json": `{"status":"pass"}`, "report.md": "unchanged gate report\n"}
-			writeFiles(t, dir, before)
-			sh := shadowRun{dir: dir, root: t.TempDir(), code: h.repo, mode: "flash", sp: &spec{packages: []*specPackage{{id: "api"}}}, dos: &dossierSet{cands: map[string][]itemCands{"api": {{Item: gateItem{ID: "api#1"}, Cands: []reuseCand{{Path: "app.py", Start: 1}}}}}}, runPass: func(p gatePass, _ string) (string, error) { return s.runModel("shadow_flash", p.prompt) }}
-			rows, note, err := sh.run()
-			if err != nil {
-				t.Fatal(err)
-			}
-			if len(rows) != 1 || rows[0].Error == "" || rows[0].Verdict != "" || !strings.Contains(note, "record only") {
-				t.Fatalf("shadow outage was hidden or authoritative: %+v %s", rows, note)
-			}
-			if !exists(filepath.Join(shadowDir(dir, ""), "items.jsonl")) {
-				t.Fatal("unavailable shadow record missing")
-			}
-			for path, want := range before {
-				if string(mustRead(t, filepath.Join(dir, path))) != want {
-					t.Fatalf("shadow outage changed %s", path)
-				}
 			}
 		})
 	}
@@ -679,7 +637,7 @@ printf '%s\n' '{"type":"result","result":"{\"packages\":[{\"id\":\"api\",\"claim
 						}
 					}
 				}
-				_, out := h.run("gate", "spec.md", "--json", "--dossier", "code", "--runner", strings.Join(order, ","))
+				_, out := h.run("gate", "spec.md", "--json", "--runner", strings.Join(order, ","))
 				rec := readRecord(t, dir)
 				if rec.Review == nil || rec.Reduction == nil {
 					t.Fatalf("missing v2 records: %s", out)

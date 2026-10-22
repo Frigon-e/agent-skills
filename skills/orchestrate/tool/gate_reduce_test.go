@@ -2,7 +2,6 @@ package main
 
 import (
 	"encoding/json"
-	"os"
 	"reflect"
 	"slices"
 	"strings"
@@ -496,44 +495,6 @@ func TestGateStateLocatorIsNotSemanticSupport(t *testing.T) {
 	}
 }
 
-func TestGateStateSupportingRepairCompletesTheSameClaim(t *testing.T) {
-	for _, conflict := range []bool{false, true} {
-		t.Run(map[bool]string{false: "same claim", true: "changed judgment"}[conflict], func(t *testing.T) {
-			h := setup(t)
-			dir := verdictRepo(t, h)
-			group := `{"packages":[{"id":"api","will_change":[],"claims":[],"questions":[],"items":[{"item":"api#1","verdict":"reuse","candidate":"internal/store.go:3","why":"Put stores records","matching_behavior":"Put stores records"}]}]}`
-			retry := `{"packages":[{"id":"api","items":[{"item":"api#1","verdict":"reuse","candidate":"internal/store.go:3","why":"Put stores records","matching_behavior":"Put stores records","support_assessment":{"schema_version":1,"state":"supported","rationale":"The source implements storage"}},{"item":"api#2","verdict":"extend","candidate":"internal/store.go:3","why":"Add the endpoint beside Put","matching_behavior":"Put stores records","missing_behavior":"Add the endpoint","support_assessment":{"schema_version":1,"state":"supported","rationale":"Storage exists; endpoint behavior is missing"}}]}]}`
-			if conflict {
-				retry = strings.Replace(retry, `"item":"api#1","verdict":"reuse"`, `"item":"api#1","verdict":"extend","missing_behavior":"Change storage"`, 1)
-			}
-			scriptPi(t, h, group, retry)
-			code, out := h.run("gate", "spec.md", "--dossier", "code", "--verdicts")
-			rec := readRecord(t, dir)
-			if conflict {
-				if code != 1 || rec.State != "incomplete" || len(rec.Review.Repairs) != 0 {
-					t.Fatalf("newer conflicting verdict erased the old claim: %+v", rec.Reduction)
-				}
-				return
-			}
-			if code != 0 || rec.State != "pass" {
-				t.Fatalf("supporting the same claim in bounded repair did not complete it: %s\n%+v", out, rec.Reduction)
-			}
-			if len(rec.Review.Repairs) != 1 || rec.Review.Repairs[0].Previous.Support != nil || rec.Review.Repairs[0].Actor != "group:api" {
-				t.Fatal("repair lost the original unsupported answer or attribution")
-			}
-			found := false
-			for _, a := range rec.Review.Answers {
-				if a.ID == rec.Review.Repairs[0].ReplacementID {
-					found = true
-				}
-			}
-			if !found {
-				t.Fatal("repair does not identify its replacement answer")
-			}
-		})
-	}
-}
-
 func TestGateStateOutputQuoting(t *testing.T) {
 	values := []string{"plain words", "true", "null", "", "group:api", " left ", "a,b", "line\nnext", `a"b\c`}
 	for _, audience := range []outputAudience{outputAgent, outputHuman, outputJSON} {
@@ -661,39 +622,6 @@ func TestGateStateOutputAudiencesShareV2Selection(t *testing.T) {
 				t.Fatal("human report omitted next action")
 			}
 		})
-	}
-}
-
-func TestGateStateIgnoredEvidenceIsRevalidatedForApproval(t *testing.T) {
-	h := setup(t)
-	verdictRepo(t, h)
-	if err := os.MkdirAll(h.repo+"/ignored", 0755); err != nil {
-		t.Fatal(err)
-	}
-	writeFiles(t, h.repo, map[string]string{".gitignore": "ignored/\n", "ignored/writer.py": "def write_output():\n    return 1\n"})
-	h.git("add", ".gitignore")
-	h.git("commit", "-qm", "Ignore runtime artifacts")
-	reply := `{"packages":[{"id":"api","will_change":[],"claims":[],"questions":[],"items":[{"item":"api#1","verdict":"reuse","candidate":"ignored/writer.py:1","why":"Writer exists","matching_behavior":"Writes output","support_assessment":{"schema_version":1,"state":"supported","rationale":"The writer implements output"}},{"item":"api#2","verdict":"extend","candidate":"ignored/writer.py:1","why":"Add the endpoint beside the writer","matching_behavior":"Writes output","missing_behavior":"Add the endpoint","support_assessment":{"schema_version":1,"state":"supported","rationale":"Writer exists but endpoint behavior is missing"}}]}]}`
-	scriptPi(t, h, reply, reply)
-	h.must("gate", "spec.md", "--dossier", "code", "--verdicts")
-	src := mustRead(t, h.repo+"/spec.md")
-	before, err := captureGateSubject(h.repo, src)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !gatePassed(h.a.siteRoot(t), h.repo, src) {
-		t.Fatal("fresh source evidence refused")
-	}
-	writeFiles(t, h.repo, map[string]string{"ignored/writer.py": "def write_output():\n    raise RuntimeError('unavailable')\n"})
-	after, err := captureGateSubject(h.repo, src)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if before.ID != after.ID {
-		t.Fatal("fixture must isolate evidence freshness from checkout identity")
-	}
-	if gatePassed(h.a.siteRoot(t), h.repo, src) {
-		t.Fatal("changed ignored source retained approval from old saved hashes")
 	}
 }
 

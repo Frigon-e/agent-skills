@@ -398,7 +398,7 @@ func TestGateWithoutRunnersStillWritesDossier(t *testing.T) {
 	t.Setenv("ORCH_PI", filepath.Join(h.tmp, "missing-pi"))
 	t.Setenv("ORCH_CLAUDE", filepath.Join(h.tmp, "missing-claude"))
 	t.Setenv("HERDR_ENV", "")
-	code, out := h.run("gate", "spec.md", "--dossier", "code")
+	code, out := h.run("gate", "spec.md")
 	rec := readRecord(t, gdir)
 	if code != 1 || rec.State != "incomplete" || !strings.Contains(rec.PassErrors["all"], "not available") {
 		t.Fatalf("%s: %#v", out, rec)

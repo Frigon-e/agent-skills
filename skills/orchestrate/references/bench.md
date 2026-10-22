@@ -27,7 +27,7 @@ subjects/<subject-id>.json          repo, commit evidence, dirty state, spec
 <suite>/keys/key-N.original.json    immutable source JSON
 <suite>/keys/key-N.md               provenance and prompt text
 <suite>/runs/<id>/run.json          schema 2 record, subject and object references
-<suite>/runs/<id>/snapshot/         gate, items, checklist, dossiers, report, subject
+<suite>/runs/<id>/snapshot/         gate, items, checklist, report, subject (old runs also carry dossiers)
 <suite>/runs/<id>/shadow.jsonl      stored shadow rows
 <suite>/runs/<id>/score-key-N.json   preserved old unversioned rescore, if present
 <suite>/runs/<id>/scores/<sha>.json  new versioned score envelope, content addressed

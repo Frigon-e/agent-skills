@@ -18,9 +18,6 @@ use = [
 [roles.spec_queries]
 use = [{ harness = "claude", model = "haiku", effort = "low" }]
 
-[roles.shadow_flash]
-use = [{ harness = "pi", model = "openrouter/~deepseek/deepseek-flash-latest" }]
-
 [roles.decider]
 enabled = true
 use = [{ harness = "api", provider = "openrouter", model = "perplexity/pplx-decider-v1.2-20261016" }]
@@ -42,9 +39,9 @@ same typed questions/answers contract; this is not a chat-completions adapter.
 ## Defaults and overrides
 
 On a Claude-only machine, gate and spec-query roles use `claude haiku low`.
-Shadow Flash is off. The Decider is off unless an API key is independently
+The Decider is off unless an API key is independently
 available. With both harnesses installed, gate/spec-query roles offer pi
-DeepSeek Flash followed by Claude Haiku; shadow Flash offers pi Flash.
+DeepSeek Flash followed by Claude Haiku.
 Choices are filtered by their connector health and credential readiness.
 A missing role gets its defaults even when other roles are explicitly set.
 
@@ -65,11 +62,11 @@ all pi children; an OpenAI limit does not disable Claude or OpenRouter.
 
 | Component | Provider unavailable |
 |---|---|
-| Gate reviewers and adversaries | Skip a failed lane for this run and try one configured fallback. With no completed review, the v2 result is incomplete, never pass. Deterministic checks and dossiers remain. |
+| Gate reviewers and adversaries | Skip a failed lane for this run and try one configured fallback. With no completed review, the v2 result is incomplete, never pass. Deterministic checks and items remain. |
 | Triage, auto dispatch and quick | Record a sanitized skipped triage result, never invent a tier. Shadow proceeds; enforce refuses. Auto gives manual-profile/`--tier` guidance and starts no lead. |
 | Question classifier | Keep deterministic cards and gate outputs unchanged. Record unavailability; bounded retries and late-result rejection remain in force. |
 | Optional gate adjudicator | Leave the check incomplete. Charge attempts to its local and shared gate budget; no indefinite retries. |
-| Spec queries and shadow Flash | Report the unavailable optional work. No independent authority to pass a gate. |
+| Spec queries | Report the unavailable optional work. No independent authority to pass a gate. |
 | Offline sweep | Missing, unreadable or insufficient independent passes cannot settle a card. Human-only questions stay human-only. |
 | Lead dispatch | Refuse limited lanes. Use an allowed healthy profile; a degraded profile requires consent and `--degraded`. An already-running lead can be explicitly respawned on another harness. |
 
@@ -209,8 +206,7 @@ output_reserve = 4096
 
 Defaults preserve the existing normal path: for each main pass, four route
 invocations times its existing hard turn allowance (`ceil(1.4 * soft_turns)`)
-plus two answer turns, two additional invocations per optional planner, and
-two for optional adjudication. The total input allowance is that request count
+plus two answer turns, and two for optional adjudication. The total input allowance is that request count
 times 600000 (four UTF-8 bytes per 150000-token context allowance); output is
 that count times 32768. The total wall cap is 45 minutes times the number of
 main passes plus 180 seconds. Repairs default to twice the number of main passes plus one, fallbacks to
@@ -223,8 +219,8 @@ remain unchanged.
 First attempts, schema repairs, coverage/stall retries and provider fallbacks
 admit against this same object. Pane stop/answer prompts also require admission.
 Concurrent invocations reserve input/output allowance atomically. Admission
-uses the complete prepared prompt, including the shared prefix and selected
-dossier, not only the changing suffix. Reported usage includes cached input,
+uses the complete prepared prompt, including the shared prefix and the
+checklist, not only the changing suffix. Reported usage includes cached input,
 tool-loop requests and output before a reply can be accepted. Retry sessions
 retain earlier usage; a fresh conversation or compaction cannot reset spend.
 An opaque invocation without request telemetry costs at least one request and
@@ -348,7 +344,7 @@ one retry on the next usable connector. The exact manual hint is printed:
 `orch health set <lane> limited --for 3h`. Timeouts/stalls are not provider-down
 and keep the existing pass-limit retry behavior.
 
-With no usable gate runner, deterministic checks, dossiers, items and the gate
+With no usable gate runner, deterministic checks, items and the gate
 record are still written; a normal gate run has state `incomplete` when its
 subject and required system records are valid. `pass_runners`, the
 report, and compare output show actual pass runners.
@@ -378,7 +374,7 @@ agent's turn to begin.
 passes only; a pane uses its own PATH),
 `ORCH_CTX_ROOT`, harness-specific tools and a notice placed first in the
 shared prefix. Agents call `orch ctx find|sym|text|batch` through the shell.
-The notice bytes are shared across passes of a class; dossiers remain in the
+The notice bytes are shared across passes of a class; the checklist remains in the
 per-pass task. Pi defaults to `--ctx-shell ctx-only`: native read plus bash
 limited to one `orch ctx` command. It starts with read alone; the guard activates
 bash only after loading. Missing activation or extension-write failure fails the
@@ -390,8 +386,8 @@ Task A's installed-harness probe also allowed `cat file` as a safe read, so the
 pattern is not an exclusive
 shell-command allowlist. Its stricter requested cat refusal remains an
 integration limitation for the parent to resolve. Off keeps the original read/search
-tools without adding the notice or ctx environment. Tool-less planner and
-shadow passes stay tool-less even with ctx enabled.
+tools without adding the notice or ctx environment. Tool-less passes stay
+tool-less even with ctx enabled.
 
 `--context-files on|off` defaults to off. Pi gets `--no-context-files` when
 off, and omits it when on. Claude gets
@@ -407,9 +403,9 @@ spells out the defaults; no config key changes this default.
 Before any model pass, the gate fingerprints Git status (NUL-separated,
 including every non-ignored untracked file), the diff against HEAD, HEAD
 identity, and content hashes of dirty/untracked paths. After every runner
-attempt, including planner/coverage retries and shadow Flash, it compares
+attempt, including schema repairs and retries, it compares
 against the same baseline. A changed checkout discards model findings,
-questions and item verdicts, cancels remaining passes, sets state to `stale`,
+questions, cancels remaining passes, sets state to `stale`,
 and warns in stdout/report. An unidentifiable subject or corrupt required
 system data takes precedence as `error`. `tree_changed` lists paths;
 `tree_changed_passes` lists passes in flight, not a proven writer. Failure to

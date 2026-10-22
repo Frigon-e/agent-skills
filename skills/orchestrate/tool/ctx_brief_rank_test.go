@@ -9,6 +9,9 @@ import (
 	"testing"
 )
 
+// briefTestTotal is the byte budget the brief tests render with.
+const briefTestTotal = 24 * 1024
+
 // rankRepo is a committed repo of the given files, with rg required and no
 // language servers.
 func rankRepo(t *testing.T, files map[string]string) string {
@@ -66,7 +69,7 @@ func TestBriefRankingKeepsDocsBelowCodeAndCountsTextOnlyWhenRare(t *testing.T) {
 	if !strings.Contains(docs, "docs/rare.md") || !strings.Contains(docs, "(score 1: text)") || strings.Contains(docs, "common") {
 		t.Errorf("docs section:\n%s", docs)
 	}
-	if out := b.Render("", "package", dossierTotal); !strings.Contains(out, "### 1b. Docs that mention it\n") {
+	if out := b.Render("", "package", briefTestTotal); !strings.Contains(out, "### 1b. Docs that mention it\n") {
 		t.Errorf("the docs section is not rendered:\n%s", out)
 	}
 }
@@ -289,12 +292,9 @@ func TestLookAlikesNeedAWordInCommonWithThePackageAndEmptyTreesAreSaid(t *testin
 func conceptFixture() *briefPlan {
 	return &briefPlan{in: briefInput{Title: "Gateway v1, Stripe App, bank debits and PayPal through Stripe", Owns: []string{"pay/registry.go", "pay/fake/", "pay/stripe/"}},
 		goSyms: []string{"Gateway", "Registry"}, facts: map[string]*symFact{},
-		builds: []string{
-			"Code that charges a saved payment method off-session, when an invoice is due, producing a ledger event. Extra detail goes here.",
-			"Build the `Gateway` interface for v1: off-session charge of a saved method, refund (full and partial), setup session for a new method (hosted), list and detach methods, and a few more words to pass the cap of thirty words in total",
-		},
 		accept: []string{
-			"Refund of a partial amount returns the remaining balance to the customer and records an event in the ledger",
+			"Refund of a partial amount returns the remaining balance to the customer and records an event in the ledger. Extra detail goes here.",
+			"Setup session for a new method is hosted and returns a url to the customer who then saves the method",
 			"cd skills/orchestrate/tool && go test ./...",
 			"`pay/stripe/gateway_test.go`",
 			"go vet passes",
@@ -315,17 +315,14 @@ func TestConceptQueriesAreFullSentencesNotKeywordFragments(t *testing.T) {
 	}
 }
 
-func TestBuildsBulletIsSentWholeToItsFirstSentence(t *testing.T) {
+func TestAcceptanceBulletIsSentWholeToItsFirstSentence(t *testing.T) {
 	pl := conceptFixture()
 	pl.makeQueries()
-	if !contains(pl.concepts, "Code that charges a saved payment method off-session, when an invoice is due, producing a ledger event.") {
-		t.Errorf("the first sentence of a Builds bullet is not sent whole: %q", pl.concepts)
+	if !contains(pl.concepts, "Refund of a partial amount returns the remaining balance to the customer and records an event in the ledger.") {
+		t.Errorf("the first sentence of a behaviour acceptance bullet is not sent whole: %q", pl.concepts)
 	}
 	if strings.Contains(strings.Join(pl.concepts, "|"), "Extra detail") {
 		t.Errorf("text past the first sentence was sent: %q", pl.concepts)
-	}
-	if !contains(pl.concepts, "Refund of a partial amount returns the remaining balance to the customer and records an event in the ledger") {
-		t.Errorf("a behaviour acceptance bullet is not sent whole: %q", pl.concepts)
 	}
 	for _, q := range pl.concepts {
 		if strings.Contains(q, "go test") || strings.Contains(q, "gateway_test.go") || q == "go vet passes" {
@@ -342,23 +339,11 @@ func TestOwnedDirectoriesAloneProduceNoConceptQuery(t *testing.T) {
 	}
 }
 
-func TestConceptQueriesFallBackToTheTitleWhenThereAreNoBuilds(t *testing.T) {
+func TestConceptQueriesFallBackToTheTitleWhenThereAreNoAcceptanceBullets(t *testing.T) {
 	pl := &briefPlan{in: briefInput{Title: "Let staff create CRM API keys with selected permissions"}, facts: map[string]*symFact{}}
 	pl.makeQueries()
 	if len(pl.concepts) != 1 || pl.concepts[0] != "Let staff create CRM API keys with selected permissions" {
 		t.Errorf("title fallback = %q", pl.concepts)
-	}
-}
-
-func TestSearchLinesDoNotChangeTheConceptQueries(t *testing.T) {
-	// search: lines belong to the Builds item, not to its text: buildTexts gives the bullet alone.
-	sp := parseSpec("# S\n\n## Packages\n\n### p: P\n\nBody.\n\n#### Builds\n- Charge a saved payment method off-session when an invoice is due\n  search: Code that charges a saved method\n")
-	with := &briefPlan{in: briefInput{Title: "P"}, facts: map[string]*symFact{}, builds: buildTexts(sp.packages[0])}
-	with.makeQueries()
-	without := &briefPlan{in: briefInput{Title: "P"}, facts: map[string]*symFact{}, builds: []string{"Charge a saved payment method off-session when an invoice is due"}}
-	without.makeQueries()
-	if strings.Join(with.concepts, "|") != strings.Join(without.concepts, "|") {
-		t.Errorf("search: lines changed the queries:\n%q\n%q", with.concepts, without.concepts)
 	}
 }
 

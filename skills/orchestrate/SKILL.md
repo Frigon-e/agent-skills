@@ -88,7 +88,7 @@ questions and reuse, plus two adversaries; a pass is capped at 45 minutes, ends
 early when its session shows no activity for 6, and a timed-out or stalled group
 pass is retried once; token use per pass is logged in `gate.json` `pass_tokens`)
 and keeps only claims whose `path:line` evidence exists. `orch gate <spec>
---dry-run` lists the passes, their sizes and the dossier sizes without calling a model. `orch plan` refuses a spec
+--dry-run` lists the passes and their sizes without calling a model. `orch plan` refuses a spec
 whose current text has not passed the gate; never use `--skip-gate` without
 the user's agreement. Read `gate/<hash>/report.md` (short), judge the
 findings yourself, add a Claude adversarial pass on the Design rules when
@@ -132,7 +132,7 @@ retired and rejected with a migration hint. This does not change `orch ctx`
 output or its legacy JSON contract.
 
 Model roles live in the user config next to dispatch rules: `[roles.gate]`,
-`[roles.spec_queries]`, `[roles.shadow_flash]`, `[roles.decider]`. Each role has
+`[roles.spec_queries]`, `[roles.decider]`. Each role has
 an ordered `use = [{harness, model, effort, degraded}, ...]` list; first usable
 wins. `enabled = false` turns a role off. Without roles, installed harnesses
 supply defaults: pi Flash where pi is present, Claude Haiku otherwise; optional
@@ -152,7 +152,7 @@ weaker choices. `ORCH_PI` and `ORCH_CLAUDE` override headless binary paths.
 Provider-down errors skip that connector lane for the run and retry the pass once on
 the next choice, without writing health; the report prints the exact manual
 `orch health set <lane> limited --for 3h` hint. Stalls keep their existing retry
-rules. With no usable runner, deterministic checks and dossiers are still
+rules. With no usable runner, deterministic checks and items are still
 written and the gate state is `incomplete` when its subject and system records are valid. `gate.json` `pass_runners`, the report and
 compare output identify each pass's runner.
 If triage is off, `orch spawn <id> --auto` gives one short message, invents no
@@ -177,7 +177,7 @@ and search tools remain and the ctx notice/env are absent.
 `--context-files on|off` defaults to off: pi keeps `--no-context-files`; Claude
 uses `--settings '{"claudeMdExcludes":["**"]}'` instead of `--bare`, so disabling
 CLAUDE.md discovery does not disable subscription authentication. On removes
-those exclusions. The dossier stays in the task text, not in a context file.
+those exclusions. The checklist stays in the task text, not in a context file.
 These settings, including the effective `ctx_shell` (`open` with ctx off), are
 in gate/experiment records, reports, and compare output. Old records without
 `ctx_shell` still display `open`.
@@ -195,20 +195,14 @@ files or use the network. Native read can still read outside the repo in either
 mode. The guard, prompt, pinned read-only ctx mode and post-pass check are not
 an operating-system sandbox.
 
-Gate options. The dossier is off by default (`--dossier off`, the plain prompt):
-a blind comparison (n=3 per arm) found no quality gain from the code-built
-dossier and about double the wall time. With `--dossier code` the gate puts a
-code-built dossier after the package text before each group pass (`plan` adds a
-tool-less planner pass whose lookups code runs): ranked files, an
-interface sheet, existing look-alikes outside the package's `owns`, and names
-found nowhere, written to `gate/<hash>/dossier/<package>.md`. Each pass is given a turn budget (10 plus 5 per
+Gate options. The gate puts the plain package text and the reuse checklist in each group prompt; there is no dossier (removed after two blind comparisons, reports: `~/Development/.worktrees/.agents/.orchestrate/dossier-value/report.md` and `dossier-value-2/report.md`; `--dossier` is rejected with a one-line error). Each pass is given a turn budget (10 plus 5 per
 package, 40 for adversaries): at the budget a pane agent is told once to answer,
 at 1.4 times it, or when its context passes 150000 tokens, it is interrupted and
 asked for the answer; `gate.json` `pass_tokens` records turns, budget hits, cost
 and context. `--cache long` sets `PI_CACHE_RETENTION=long` for the pi passes,
 `--keep-sessions` keeps the sessions of passes that succeeded. To compare
 settings without touching the real record: `orch gate <spec> --only <group-key>
---dossier off|code|plan [--cache short|long] --experiment <name>` runs just those
+[--cache short|long] --experiment <name>` runs just those
 group passes into `gate/<hash>/experiments/<name>/` (sessions kept), and `orch
 gate compare <spec> <expA> <expB>` prints requests, tokens, cost, seconds,
 findings, questions and their overlap, with an exploration profile per pass.
@@ -243,37 +237,16 @@ Reuse checklist. Items are only Builds bullets (ids `<package>#<n>`, saved in
 `items.json` with `queries` and `reuse` arrays); nothing is guessed from body
 or acceptance. A ship package without Builds gets a warning and skips its
 checklist; scouts are exempt. More than 8 bullets warns to split the package.
-Only explicit search lines retrieve candidates; items without them still
-appear. With `--dossier off` the same checklist (ids, bullet text, author
-pointers, search lines as plain text) is still put in the group prompt and
-saved in `items.json`, with no lookups and no candidates; `gate.json`
-`checklist: plain` marks it. `--verdicts` and `--dump-decider` need
-`--dossier code`. With the dossier on, the default is three candidates per query for
-small packages; larger ones divide a 24-body package budget over queries,
-clamped to 2..5. Repeated locations show once with `also for #2, #5`.
-Section 3a of the dossier shows path:range, enclosing symbol,
-signature, doc line, body up to 40 lines, callers; at most two per project root;
-tests, generated files, docs and the package's own files never count; items past
-12 come after a "treat them the same" line; the section is capped and says what
-was cut. The model is only given facts. Record-only shadow judges
-(`--shadow decider|flash|both`, or `reuse_shadow` in the config; default off)
-answer behavioral questions (`trigger_and_inputs`, `outputs_and_effects`,
-`relation`, `best_candidate`, `placement`) with classes `duplicate`,
-`variation_site`, or `none`. The `other` class was dropped. Shadow evidence adds
-resolvable author reuse hints after searched candidates, marks them as author
-hints, and caps the total at six per item. Derived duplicate and consistency
-checks are information only. Answers log to
-`gate/<hash>/shadow/<experiment or run>/items.jsonl`; they never change the gate.
-`orch gate probe-decider` measures the largest state the decisions API takes
-(paid requests; run by hand), `--dry-run --dump-decider <item|first>` prints a
-request without sending it. `orch gate compare <spec> <a> <b> --reference
-<file.json>` adds per-item columns, agreement between judges and precision/recall
-against an answer key (format: `[{"package","item" (id or text),"verdict"
-(duplicate|extend|new|unclear),"candidate","note"}]`). Per-item display matches
-by id or 60% word overlap; reference scoring uses locations, not item text.
-Compare also shows items with queries, queries run, distinct candidate
-locations and bodies shown. `--verdicts` (experimental, off) asks the group pass for a
-reuse|extend|new|unclear verdict per item and retries the items it skipped.
+The checklist (ids, bullet text, author pointers, search lines as plain text) is
+put in the group prompt and saved in `items.json`, with no lookups and no
+candidates; `gate.json` `checklist: plain` marks it. Search lines and `reuse:`
+pointers are the spec author's hints for the reviewer, shown as written.
+`orch gate compare <spec> <a> <b> --reference <file.json>` adds per-item columns
+and precision/recall against an answer key (format: `[{"package","item" (id or
+text),"verdict" (duplicate|extend|new|unclear),"candidate","note"}]`). Per-item
+display matches by id or 60% word overlap; reference scoring uses locations, not
+item text. Runs made before the dossier was removed keep their shadow-judge
+rows and checklist candidates; compare and bench still read them.
 
 **Code facts for any repo: `orch ctx`** (`references/context.md`). `orch ctx
 find` (semantic candidates), `sym` (exact or candidate-labelled definitions,
@@ -490,7 +463,7 @@ other way.
   to change it (rarely, with evidence and the user's approval) and setup.
   Settings a repo must not control live in
   `~/.config/orchestrate/config.toml`: `max_leads`, `lead_context_limit`,
-  `claude_args` and `pi_args` (extra CLI flags for leads), `triage_mode` (shadow, enforce or off), `quick_mode` (same values; for `orch quick`), `triage_model`, `weak_models`, `reuse_shadow` (off, decider, flash or both: record-only judges of the gate's reuse checklist), `ctx_index` (`full`, the default, builds a missing jbcontext index and refreshes a stale one; `incremental` only refreshes; `off` never calls jbcontext), `ctx_deny` (repos that never use jbcontext) and `dispatch`
+  `claude_args` and `pi_args` (extra CLI flags for leads), `triage_mode` (shadow, enforce or off), `quick_mode` (same values; for `orch quick`), `triage_model`, `weak_models`, `ctx_index` (`full`, the default, builds a missing jbcontext index and refreshes a stale one; `incremental` only refreshes; `off` never calls jbcontext), `ctx_deny` (repos that never use jbcontext) and `dispatch`
   rules (a profile may set `degraded = true` for a weaker fallback). orch refuses them in a repo file, so a commit can't change how
   leads launch.
 - Run state lives next to the repo's Herdr worktrees:

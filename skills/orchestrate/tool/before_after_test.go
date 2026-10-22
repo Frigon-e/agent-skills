@@ -102,7 +102,7 @@ func beforeAfterEmit(t *testing.T, name, side, result string) {
 
 func beforeAfterGate(t *testing.T, h *harness, bin string, before bool, extra ...string) (int, map[string]any) {
 	t.Helper()
-	args := append([]string{"gate", "spec.md", "--headless", "--dossier", "off", "--ctx-tool", "off", "--shadow", "off"}, extra...)
+	args := append([]string{"gate", "spec.md", "--headless", "--ctx-tool", "off"}, extra...)
 	if !before {
 		args = append(args, "--json")
 	}
@@ -160,22 +160,6 @@ func TestBeforeAfter(t *testing.T) {
 			h.fakePi(gatePasses(map[string]string{"group": cleanPackageReply, "adv-a": reply.text}))
 			code, rec := beforeAfterGate(t, h, bin, before)
 			return beforeAfterGateStatus(t, code, rec, before, reply.name)
-		}})
-	}
-	for _, kind := range []string{"missing-verdict", "unsupported-candidate"} {
-		kind := kind
-		cases = append(cases, beforeAfterCase{kind, func(t *testing.T, h *harness, bin string, before bool) string {
-			pkg := planPkg("api", "kind: ship\nowns: internal/api.go", "")
-			pkg = strings.Replace(pkg, "Code that builds api.", "Code that writes rows.", 1)
-			h.commitSpec(planHeader + pkg + planTail)
-			item := `{"item":"api#1","candidate":null,"why":"new behavior"}`
-			if kind == "unsupported-candidate" {
-				item = `{"item":"api#1","verdict":"reuse","candidate":"missing.py#WriteRows","why":"already exists"}`
-			}
-			group := strings.Replace(cleanPackageReply, `"reuse":[]`, `"reuse":[],"items":[`+item+`]`, 1)
-			h.fakePi(gatePasses(map[string]string{"group": group}))
-			code, rec := beforeAfterGate(t, h, bin, before, "--dossier", "code", "--verdicts")
-			return beforeAfterGateStatus(t, code, rec, before, kind)
 		}})
 	}
 	cases = append(cases, beforeAfterCase{"future-file-ownership", func(t *testing.T, h *harness, bin string, before bool) string {

@@ -90,17 +90,6 @@ func TestFixtureGateTrust(t *testing.T) {
 					})
 				}
 			})
-			t.Run("invalid-candidate-does-not-cover", func(t *testing.T) {
-				items := []gateItem{{ID: "api#normalize", Package: "api", Text: "Normalize file names"}}
-				rec := &gateRecord{}
-				reply := `{"packages":[{"id":"api","items":[{"item":"api#normalize","verdict":"reuse","candidate":"` + f.path + `#MissingNormalizer","why":"existing utility"}]}]}`
-				if err := applyItemsOnly("fixture", []string{"api"}, items)(reply, rec, h.repo, nil); err != nil {
-					t.Fatal(err)
-				}
-				if len(rec.missingItems(items)) != 1 {
-					t.Fatalf("invalid candidate covered item: %+v", rec)
-				}
-			})
 			if f.name == "go" {
 				t.Run("product-answer-needs-owner", func(t *testing.T) {
 					s, cs, as, p := fixtureReview(t, h, f)
@@ -186,7 +175,7 @@ func TestFixtureMixedDirtyIntegration(t *testing.T) {
 	rec := &gateRecord{PassErrors: map[string]string{}, PassSeconds: map[string]int{}, PassKept: map[string]string{}, PassTokens: map[string]passTokens{}}
 	var applied atomic.Int32
 	passes := []gatePass{{name: "fixture", class: "package", prompt: "review", apply: func(_ string, _ *gateRecord, _ string, _ *spec) error { applied.Add(1); return nil }}}
-	runGatePasses(filepath.Join(h.tmp, "gate"), h.repo, "fixture", passes, rec, nil, nil, gateOpts{runner: runner, headless: true})
+	runGatePasses(filepath.Join(h.tmp, "gate"), h.repo, "fixture", passes, rec, nil, gateOpts{runner: runner, headless: true})
 	if applied.Load() != 0 || len(rec.TreeChanged) != 1 || rec.TreeChanged[0] != "cli/reader.ts" || rec.PassErrors["all"] == "" {
 		t.Fatalf("dirty integration trusted changed tree: %+v", rec)
 	}
