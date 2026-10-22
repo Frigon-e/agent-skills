@@ -106,7 +106,7 @@ func jbSearchOnce(bin, dir, cache, rev, pathFilter string, limit int, query stri
 // ---- rate limit ----
 
 const (
-	jbSlots         = 16               // jbcontext searches running at once, machine-wide; ORCH_JB_SLOTS overrides (1 to 32)
+	jbSlots         = 5                // jbcontext searches running at once, machine-wide; ORCH_JB_SLOTS overrides (1 to 32)
 	jbSlotsMax      = 32               // largest accepted ORCH_JB_SLOTS
 	jbColdAfter     = 10 * time.Minute // no jbcontext answer this long: the token may be stale, so one call goes first
 	jbRetries       = 3                // retries after a rate limited answer
