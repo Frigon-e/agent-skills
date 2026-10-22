@@ -37,7 +37,7 @@ func processCommandContext(ctx context.Context, name string, args ...string) *ex
 	return cmd
 }
 
-var modelRoles = []string{"gate", "spec_queries", "shadow_flash", "decider", "gate_adjudicator", "question_classifier"}
+var modelRoles = []string{"gate", "spec_queries", "decider", "gate_adjudicator", "question_classifier"}
 
 type modelRole struct {
 	Enabled          *bool               `toml:"enabled"`
@@ -89,7 +89,7 @@ func (s site) role(name string) modelRole {
 	if installed("pi") {
 		r.Use = append(r.Use, profile{Harness: "pi", Model: gateModelDef})
 	}
-	if name != "shadow_flash" && installed("claude") {
+	if installed("claude") {
 		r.Use = append(r.Use, profile{Harness: "claude", Model: "haiku", Effort: "low"})
 	}
 	return r
@@ -297,15 +297,6 @@ func (r *roleRun) runAfter(after string, fn func(profile) (string, string, error
 		r.mu.Unlock()
 	}
 	return "", "", used, last
-}
-
-func (r *roleRun) postDecisions(_ string, state, questions map[string]any) (answers map[string]decAnswer, served string, usage shadowUsage, err error) {
-	_, _, _, err = r.run(func(p profile) (string, string, error) {
-		var e error
-		answers, served, usage, e = postDecisionsWith(p, state, questions)
-		return "", "", e
-	})
-	return
 }
 
 // runModel is the tool-less, read-only entry point for small model tasks.

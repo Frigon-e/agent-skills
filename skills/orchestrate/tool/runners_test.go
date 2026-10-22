@@ -49,7 +49,7 @@ func TestRoleConfigAndClaudeOnlyDefaults(t *testing.T) {
 			t.Fatalf("%s: %v %v", name, ps, skips)
 		}
 	}
-	for _, name := range []string{"shadow_flash", "decider"} {
+	for _, name := range []string{"decider"} {
 		r, _ := s.newRoleRun(name, modelOptions{})
 		if ps, _ := r.available(); len(ps) != 0 {
 			t.Fatalf("%s unexpectedly available: %v", name, ps)
@@ -75,6 +75,23 @@ enabled = false
 	}
 }
 
+func TestRemovedShadowRoleIsIgnoredOnLoad(t *testing.T) {
+	h := setup(t)
+	path := filepath.Join(h.tmp, "roles.toml")
+	t.Setenv("ORCH_CONFIG", path)
+	raw := "reuse_shadow = \"all\"\n[roles.shadow_flash]\nuse = [{harness=\"api\", provider=\"openrouter\", model=\"test-model\"}]\n"
+	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := loadConfig(h.repo)
+	if err != nil {
+		t.Fatalf("removed keys must load without error: %v", err)
+	}
+	if _, ok := cfg.Roles["shadow_flash"]; ok {
+		t.Fatal("removed role kept after load")
+	}
+}
+
 func TestRoleAdjudicatorAPIConfigIsScoped(t *testing.T) {
 	h := setup(t)
 	path := filepath.Join(h.tmp, "adjudicator-roles.toml")
@@ -88,7 +105,6 @@ func TestRoleAdjudicatorAPIConfigIsScoped(t *testing.T) {
 		{"gate_adjudicator", "claude", "", true},
 		{"gate", "api", "openrouter", false},
 		{"spec_queries", "api", "openrouter", false},
-		{"shadow_flash", "api", "openrouter", false},
 		{"decider", "claude", "", false},
 		{"gate_adjudicator", "api", "", false},
 		{"gate_adjudicator", "api", "bad/provider", false},
@@ -367,12 +383,11 @@ func TestGateProviderFailureFallsBackToFakeClaude(t *testing.T) {
 	}
 }
 
-func TestDisabledDeciderSkipsTriageAndProbe(t *testing.T) {
+func TestDisabledDeciderSkipsTriage(t *testing.T) {
 	h := setup(t)
 	h.task("t1")
 	os.WriteFile(os.Getenv("ORCH_CONFIG"), []byte("[roles.decider]\nenabled = false\n"), 0o644)
 	wantContains(t, h.must("triage", "t1"), "decider off:", "disabled")
-	wantContains(t, h.must("gate", "probe-decider"), "decider off:", "disabled")
 	if h.dec.count() != 0 {
 		t.Fatal("disabled role made an API request")
 	}
@@ -392,19 +407,16 @@ func TestSessionProviderErrorAndRecoveredError(t *testing.T) {
 	}
 }
 
-func TestGateWithoutRunnersStillWritesDossier(t *testing.T) {
+func TestGateWithoutRunnersStillWritesChecklist(t *testing.T) {
 	h := setup(t)
 	gdir := h.gateRepo(1)
 	t.Setenv("ORCH_PI", filepath.Join(h.tmp, "missing-pi"))
 	t.Setenv("ORCH_CLAUDE", filepath.Join(h.tmp, "missing-claude"))
 	t.Setenv("HERDR_ENV", "")
-	code, out := h.run("gate", "spec.md", "--dossier", "code")
+	code, out := h.run("gate", "spec.md")
 	rec := readRecord(t, gdir)
 	if code != 1 || rec.State != "incomplete" || !strings.Contains(rec.PassErrors["all"], "not available") {
 		t.Fatalf("%s: %#v", out, rec)
-	}
-	if _, err := os.Stat(filepath.Join(gdir, "dossier", "api.md")); err != nil {
-		t.Fatal(err)
 	}
 	if _, err := os.Stat(filepath.Join(gdir, "items.json")); err != nil {
 		t.Fatal(err)

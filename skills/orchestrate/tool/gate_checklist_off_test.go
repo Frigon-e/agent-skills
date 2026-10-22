@@ -17,7 +17,7 @@ func checklistOffRepo(t *testing.T, h *harness) string {
 	return filepath.Join(filepath.Dir(h.dir("x")), "gate", specHash(mustRead(t, filepath.Join(h.repo, "spec.md"))))
 }
 
-func TestGateOffCarriesAPlainReuseChecklistAndRunsNoLookup(t *testing.T) {
+func TestGateCarriesAPlainReuseChecklistAndRunsNoLookup(t *testing.T) {
 	h := setup(t)
 	jb, jbCalls, _ := fakeJbcontext(t)
 	t.Setenv("ORCH_JBCONTEXT", jb)
@@ -25,7 +25,7 @@ func TestGateOffCarriesAPlainReuseChecklistAndRunsNoLookup(t *testing.T) {
 	gdir := checklistOffRepo(t, h)
 	h.sessionPi(gatePasses(nil))
 	t.Setenv("HERDR_ENV", "")
-	h.must("gate", "spec.md", "--dossier", "off")
+	h.must("gate", "spec.md")
 
 	calls := piCalls(t, h)
 	wantContains(t, calls,
@@ -34,49 +34,26 @@ func TestGateOffCarriesAPlainReuseChecklistAndRunsNoLookup(t *testing.T) {
 		"- `api#2` Adds the PutRecord helper.",
 		"  author's pointer: `internal/store.go#PutRecord`",
 		"  search: `Code that stores records with `PutRecord`` (not run)")
-	if strings.Contains(calls, dossierTitle) || strings.Contains(calls, "Use the evidence dossier") || exists(filepath.Join(gdir, "dossier")) {
-		t.Errorf("--dossier off produced a dossier:\n%s", calls)
+	if strings.Contains(calls, "Use the evidence dossier") || exists(filepath.Join(gdir, "dossier")) {
+		t.Errorf("the gate produced a dossier:\n%s", calls)
 	}
 	if exists(jbCalls) {
-		t.Errorf("jbcontext ran in off mode:\n%s", mustRead(t, jbCalls))
+		t.Errorf("jbcontext ran:\n%s", mustRead(t, jbCalls))
 	}
 	items := string(mustRead(t, filepath.Join(gdir, "items.json")))
 	wantContains(t, items, `"id": "api#1"`, `"id": "api#2"`, `"internal/store.go#PutRecord"`)
 	if strings.Contains(items, "Cands") || strings.Contains(items, "candidates") {
 		t.Errorf("items.json holds candidates:\n%s", items)
 	}
-	rec := readRecord(t, gdir)
-	if rec.Dossier != "off" || rec.Checklist != "plain" {
-		t.Errorf("record: dossier %q checklist %q", rec.Dossier, rec.Checklist)
+	if rec := readRecord(t, gdir); rec.Checklist != "plain" {
+		t.Errorf("record: checklist %q", rec.Checklist)
 	}
 	wantContains(t, string(mustRead(t, filepath.Join(gdir, "report.md"))), "Reuse checklist: plain")
-}
 
-func TestGateCodeRecordHasNoPlainChecklistMark(t *testing.T) {
-	h := setup(t)
-	t.Setenv("ORCH_GOPLS", filepath.Join(h.tmp, "no-gopls"))
-	t.Setenv("ORCH_JBCONTEXT", filepath.Join(h.tmp, "no-jbcontext"))
-	gdir := checklistOffRepo(t, h)
-	h.sessionPi(gatePasses(nil))
-	t.Setenv("HERDR_ENV", "")
-	h.must("gate", "spec.md", "--dossier", "code")
-	if rec := readRecord(t, gdir); rec.Checklist != "" {
-		t.Errorf("code record marked checklist %q", rec.Checklist)
-	}
-	wantContains(t, piCalls(t, h), "### 3a. Reuse checklist", "Use the evidence dossier")
-}
-
-func TestGateOffKeepsTheVerdictsAndDeciderRefusalWithAClearMessage(t *testing.T) {
-	h := setup(t)
-	checklistOffRepo(t, h)
-	h.fakePi(gatePasses(nil))
-	for _, args := range [][]string{
-		{"gate", "spec.md", "--dossier", "off", "--verdicts"},
-		{"gate", "spec.md", "--dry-run", "--dossier", "off", "--dump-decider", "first"},
-	} {
-		code, out := h.run(args...)
-		if code == 0 || !strings.Contains(out, "--dossier code") {
-			t.Errorf("%v: exit %d, output:\n%s", args, code, out)
+	for _, mode := range []string{"off", "code"} {
+		code, out := h.run("gate", "spec.md", "--dossier", mode)
+		if code == 0 || !strings.Contains(out, "--dossier was removed") {
+			t.Errorf("--dossier %s: exit %d, output:\n%s", mode, code, out)
 		}
 	}
 }

@@ -150,7 +150,7 @@ func (e *groupEntry) UnmarshalJSON(b []byte) error {
 
 // validateEntries checks the entire reply before any of it can establish
 // coverage. Non-nil slices distinguish explicit [] from absent/null arrays.
-func validateEntries(entries []groupEntry, ids []string, items map[string][]gateItem, itemsOnly bool) error {
+func validateEntries(entries []groupEntry, ids []string) error {
 	if entries == nil {
 		return fmt.Errorf("packages must be an explicit array")
 	}
@@ -166,72 +166,21 @@ func validateEntries(entries []groupEntry, ids []string, items map[string][]gate
 			return fmt.Errorf("duplicate package id %q", e.ID)
 		}
 		seen[e.ID] = true
-		if !itemsOnly {
-			if e.WillChange == nil || e.Claims == nil || e.Questions == nil {
-				return fmt.Errorf("package %s: will_change, claims and questions must be explicit arrays", e.ID)
-			}
-			if items == nil && e.Reuse == nil {
-				return fmt.Errorf("package %s: reuse must be an explicit array", e.ID)
-			}
+		if e.WillChange == nil || e.Claims == nil || e.Questions == nil {
+			return fmt.Errorf("package %s: will_change, claims and questions must be explicit arrays", e.ID)
+		}
+		if e.Reuse == nil {
+			return fmt.Errorf("package %s: reuse must be an explicit array", e.ID)
 		}
 		for _, q := range e.Questions {
 			if q.Package != "" && q.Package != e.ID {
 				return fmt.Errorf("package %s: question has unknown package id %q", e.ID, q.Package)
 			}
 		}
-		if items == nil && len(e.Items) > 0 {
-			return fmt.Errorf("package %s: unexpected item verdicts without a requested checklist", e.ID)
-		}
-		if items != nil {
-			if e.Items == nil {
-				return fmt.Errorf("package %s: items must be an explicit array", e.ID)
-			}
-			if err := validateVerdicts(e.ID, items[e.ID], e.Items); err != nil {
-				return err
-			}
-		}
 	}
 	for _, id := range ids {
 		if !seen[id] {
 			return fmt.Errorf("no entry for %s", id)
-		}
-	}
-	return nil
-}
-
-func validateVerdicts(pkg string, items []gateItem, vs []itemVerdict) error {
-	expected, seen := map[string]bool{}, map[string]bool{}
-	for _, it := range items {
-		expected[it.ID] = true
-	}
-	for _, v := range vs {
-		id := itemKey(pkg, v.Item)
-		if !expected[id] {
-			return fmt.Errorf("unknown item id %q in package %s", v.Item, pkg)
-		}
-		if seen[id] {
-			return fmt.Errorf("duplicate item id %q", id)
-		}
-		seen[id] = true
-		switch v.Verdict {
-		case verdictReuse, verdictExtend, verdictNew, verdictUnclr:
-		default:
-			return fmt.Errorf("item %s: invalid verdict %q", id, v.Verdict)
-		}
-		if v.fields != nil {
-			for _, k := range []string{"item", "verdict", "candidate", "why"} {
-				raw, ok := v.fields[k]
-				if !ok {
-					return fmt.Errorf("item %s: missing %s", id, k)
-				}
-				if k == "candidate" && string(raw) == "null" {
-					continue
-				}
-				var s string
-				if string(raw) == "null" || json.Unmarshal(raw, &s) != nil {
-					return fmt.Errorf("item %s: invalid %s type", id, k)
-				}
-			}
 		}
 	}
 	return nil

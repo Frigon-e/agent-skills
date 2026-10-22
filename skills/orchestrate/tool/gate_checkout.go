@@ -102,8 +102,8 @@ func (g *checkoutGuard) finish(rec *gateRecord) {
 	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	// Recheck even when no pass detected a change: dossier/shadow work and
-	// the interval after the last pass are also part of the review.
+	// Recheck even when no pass detected a change: the interval after the last
+	// pass is also part of the review.
 	if g.ctx.Err() == nil {
 		after, err := checkoutFingerprint(g.root)
 		if err != nil {

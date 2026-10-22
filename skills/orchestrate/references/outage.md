@@ -41,7 +41,6 @@ API roles use their configured decisions connector, normally OpenRouter.
 | Question classifier | Bounded unavailable record; published cards, gate JSON and report bytes stay identical; no gate-budget use | Only its own configured connector health matters | Existing terminal manifests do not retry automatically; a new decision input can queue a new job |
 | Enabled adjudicator | Check stays incomplete; attempts consume local and shared budget; no endless retry | Existing configured authorized routes retain their eligibility | A later explicitly budgeted attempt can resume unresolved work |
 | Spec queries | Explicit `--generate` reports a skip and exits unsuccessfully; no invented query text; dry run makes no call | Existing role filtering is unchanged | The next generation uses the recovered configured role |
-| Shadow Flash | Persist an error row and a visible record-only summary; gate files and status stay unchanged | Its configured healthy route remains eligible | A new shadow run can execute normally |
 | Offline sweep | Fewer/missing/unreadable pass files stay `recheck`; no settlement below the independent-pass requirement | Does not dispatch providers or read health | Re-run after the required pass files exist; human-only cards stay human-only |
 | Lead `new`, `spawn`, `plan` | Refuse a manually limited lane; degraded choices still require consent | Independent healthy lanes remain usable | Clear health and preflight again; a running lead can explicitly respawn on another allowed harness |
 
@@ -75,7 +74,7 @@ explicit `ok` recovery. An OpenAI limit does not disable Claude or OpenRouter.
 ## Verification boundary
 
 `tool/provider_outage_test.go` exercises the real command handlers, scheduler,
-classifier worker, typed API adapters, shadow recorder and lead preflight.
+classifier worker, typed API adapters and lead preflight.
 `tool/provider_outage_transport_test.go` supplies a reusable `RoundTripper` that
 intercepts every request, including readiness probes. No injected HTTP request
 opens a socket. Conversational models are executable shell fakes, not installed

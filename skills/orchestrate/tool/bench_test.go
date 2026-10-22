@@ -320,7 +320,7 @@ func TestBenchGateCaptureAndAutoRecordWithFakes(t *testing.T) {
 	h.git("commit", "-qm", "fixture spec")
 	h.sessionPi(gatePasses(nil))
 	t.Setenv("HERDR_ENV", "")
-	out := h.must("gate", "spec.md", "--only", "api", "--experiment", "captured", "--bench-suite", "fixture", "--dossier", "off")
+	out := h.must("gate", "spec.md", "--only", "api", "--experiment", "captured", "--bench-suite", "fixture")
 	wantContains(t, out, "bench: fixture/")
 	dir := filepath.Join(gdir, "experiments", "captured")
 	var c benchCapture

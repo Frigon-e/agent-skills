@@ -287,33 +287,26 @@ func TestGateRunBudgetFallbackRefusedAtScheduler(t *testing.T) {
 	l.Requests = 1
 	rec := gateBudgetRecord(l)
 	p := gatePass{name: "group:test", class: "package", prompt: "review", apply: func(string, *gateRecord, string, *spec) error { t.Error("unreviewed result applied"); return nil }}
-	runGatePasses(filepath.Join(h.tmp, "gate"), h.repo, "test", []gatePass{p}, rec, nil, nil, gateOpts{runner: runner, headless: true})
+	runGatePasses(filepath.Join(h.tmp, "gate"), h.repo, "test", []gatePass{p}, rec, nil, gateOpts{runner: runner, headless: true})
 	if exists(log) || rec.Budget.Requests != 1 || rec.PassAnswerStates[p.name] != reviewAnswerBudget || !strings.Contains(rec.PassErrors[p.name], "budget_exhausted") {
 		t.Fatalf("fallback escaped: %+v", rec)
 	}
 }
 
 func TestGateRunBudgetSchedulerRetriesShareUsage(t *testing.T) {
-	for _, kind := range []string{"schema", "coverage", "stall"} {
+	for _, kind := range []string{"schema", "stall"} {
 		t.Run(kind, func(t *testing.T) {
 			h := setup(t)
-			var dir string
 			args := []string{"gate", "spec.md", "--runner", "pi:" + gateModelDef}
-			if kind == "coverage" {
-				dir = verdictRepo(t, h)
-				scriptPi(t, h, strings.Replace(cleanPackageReply, `"reuse":[]`, `"reuse":[],"items":[]`, 1), `{"packages":[{"id":"api","items":[]}]}`)
-				args = append(args, "--dossier", "code", "--verdicts")
+			dir := h.gateRepo(1)
+			if kind == "schema" {
+				h.fakePi(gatePasses(map[string]string{"group": `{}`}))
 			} else {
-				dir = h.gateRepo(1)
-				if kind == "schema" {
-					h.fakePi(gatePasses(map[string]string{"group": `{}`}))
-				} else {
-					h.sessionPi(gatePasses(nil))
-					writeFiles(t, filepath.Join(h.tmp, "fakepi"), map[string]string{"group.sleep.once": ""})
-					gateStall = 300 * time.Millisecond
-				}
-				t.Setenv("HERDR_ENV", "")
+				h.sessionPi(gatePasses(nil))
+				writeFiles(t, filepath.Join(h.tmp, "fakepi"), map[string]string{"group.sleep.once": ""})
+				gateStall = 300 * time.Millisecond
 			}
+			t.Setenv("HERDR_ENV", "")
 			code, out := h.run(args...)
 			if kind == "stall" && code != 0 {
 				t.Fatal(out)
@@ -350,7 +343,7 @@ func TestGateRunBudgetCompletedGroupsRetained(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	passes := buildGatePasses(h.repo, gs.src, gs.rel, gs.sp, rec.Groups, nil, false, nil)
+	passes := buildGatePasses(h.repo, gs.src, gs.rel, gs.sp, rec.Groups, nil)
 	slices.SortStableFunc(passes, func(a, b gatePass) int {
 		if a.class == b.class {
 			return 0
@@ -361,7 +354,7 @@ func TestGateRunBudgetCompletedGroupsRetained(t *testing.T) {
 		return 1
 	})
 	initGateReview(rec, gs.sp, gs.src, passes)
-	runGatePasses(filepath.Join(h.tmp, "gate"), h.repo, "test", passes, rec, gs.sp, nil, gateOpts{guard: guard, headless: true})
+	runGatePasses(filepath.Join(h.tmp, "gate"), h.repo, "test", passes, rec, gs.sp, gateOpts{guard: guard, headless: true})
 	prepareGateReview(rec, h.repo)
 	reduceGateRecord(rec)
 	if rec.State != "incomplete" || rec.Budget.Requests != 2 {
@@ -388,31 +381,6 @@ func TestGateRunBudgetCompletedGroupsRetained(t *testing.T) {
 		if reason.Reason != reviewBudgetExhausted || reason.Action == "" {
 			t.Fatalf("unfinished check lacks budget reason/action: %+v", reason)
 		}
-	}
-}
-
-func TestGateRunBudgetPartialCoverageKeepsCompletedChecks(t *testing.T) {
-	h := setup(t)
-	dir := verdictRepo(t, h)
-	scriptPi(t, h, strings.Replace(cleanPackageReply, `"reuse":[]`, `"reuse":[],"items":[]`, 1), `{"packages":[{"id":"api","items":[]}]}`)
-	writeFiles(t, filepath.Dir(userConfigPath()), map[string]string{filepath.Base(userConfigPath()): "[gate_budget]\nrepairs=0\n"})
-	code, out := h.run("gate", "spec.md", "--dossier", "code", "--verdicts")
-	if code != 1 {
-		t.Fatalf("partial review passed: %s", out)
-	}
-	rec := readRecord(t, dir)
-	if rec.State != "incomplete" || rec.Budget.Requests != 3 || rec.Budget.Repairs != 0 {
-		t.Fatalf("bad partial budget state: %+v", rec)
-	}
-	pending := 0
-	for _, reason := range rec.Reduction.Reasons {
-		if reason.Actor != "group:api" || !strings.HasSuffix(reason.Check, "/reuse") || reason.Reason != reviewBudgetExhausted || !strings.Contains(reason.Action, "Resume group:api") {
-			t.Fatalf("completed check lost its result: %+v", reason)
-		}
-		pending++
-	}
-	if pending != 2 || rec.Completion.Incomplete != 2 {
-		t.Fatalf("want only two unfinished item checks, got %+v", rec.Reduction)
 	}
 }
 

@@ -32,7 +32,7 @@ func acceptanceBullets(text string) []string {
 		if strings.HasPrefix(strings.TrimSpace(l), "#") {
 			break
 		}
-		if m := bulletRe.FindStringSubmatch(l); m != nil && len(out) < dossierAccept {
+		if m := bulletRe.FindStringSubmatch(l); m != nil && len(out) < briefAccept {
 			out = append(out, flat(m[1]))
 		}
 	}
@@ -182,8 +182,7 @@ func (e *ctxEnv) assemble(pl *briefPlan) *ctxBrief {
 			if ln < 1 || ln > len(ls) {
 				continue
 			}
-			er := dossierSource(e, path, ln, ln)
-			d.Evidence = append(d.Evidence, er)
+			er := lookupSource(e, path, ln, ln)
 			callers := fmt.Sprint(df.Total)
 			if (!df.Func && !df.ByName) || df.RefsUnknown || len(df.Errors) > 0 {
 				callers = "unknown"
@@ -291,12 +290,12 @@ func (e *ctxEnv) assemble(pl *briefPlan) *ctxBrief {
 	notFound := map[string]bool{}
 	for _, n := range pl.names {
 		hits := pl.rg[n]
-		if len(hits) > 0 && len(hits) <= dossierRare {
+		if len(hits) > 0 && len(hits) <= briefRare {
 			for _, h := range hits {
 				mark(h.Path, "text `"+short(n, 40)+"`", "text")
 			}
 		}
-		if len(hits) > 0 && len(hits) <= dossierTextLike {
+		if len(hits) > 0 && len(hits) <= briefTextLike {
 			for _, h := range hits {
 				if inOwns(h.Path, owns) || !lookAlikePath(h.Path, ownL) || e.Skip[h.Path] || e.isGenerated(h.Path) {
 					continue
@@ -355,7 +354,7 @@ func (e *ctxEnv) assemble(pl *briefPlan) *ctxBrief {
 			} else if tree != t {
 				continue
 			}
-			if n >= dossierLikeTree || shown >= dossierLike {
+			if n >= briefLikeTree || shown >= briefLikeMax {
 				cut++
 				continue
 			}
@@ -380,8 +379,7 @@ func (e *ctxEnv) assemble(pl *briefPlan) *ctxBrief {
 			if start >= 1 && start <= len(ls) {
 				end = min(len(ls), min(end, start+ctxSnippet-1))
 				preview = append([]string{}, ls[start-1:end]...)
-				er := dossierSource(e, en.path, start, end)
-				d.Evidence = append(d.Evidence, er)
+				er := lookupSource(e, en.path, start, end)
 				if d.nativeLike == nil {
 					d.nativeLike = map[string]briefNativeLike{}
 				}
@@ -395,7 +393,7 @@ func (e *ctxEnv) assemble(pl *briefPlan) *ctxBrief {
 		}
 	}
 	if cut > 0 {
-		d.Like = append(d.Like, fmt.Sprintf("- ... %d more cut (up to %d per tree and %d in all are kept; `orch ctx find` with -p narrows further)", cut, dossierLikeTree, dossierLike))
+		d.Like = append(d.Like, fmt.Sprintf("- ... %d more cut (up to %d per tree and %d in all are kept; `orch ctx find` with -p narrows further)", cut, briefLikeTree, briefLikeMax))
 	}
 	for _, ptr := range pl.ptrs {
 		if !ptr.exists {
@@ -443,11 +441,11 @@ func (e *ctxEnv) assemble(pl *briefPlan) *ctxBrief {
 	line := func(r ranked) string {
 		return fmt.Sprintf("- `%s` (score %d: %s): %s", r.path, r.score, r.ev.kindList(), strings.Join(r.ev.why[:min(4, len(r.ev.why))], "; "))
 	}
-	for _, r := range code[:min(dossierFiles, len(code))] {
+	for _, r := range code[:min(briefFiles, len(code))] {
 		d.FileRows = append(d.FileRows, briefFile{r.path, r.score, r.ev.why[:min(4, len(r.ev.why))]})
 		d.Files = append(d.Files, line(r))
 	}
-	for _, r := range docs[:min(dossierDocs, len(docs))] {
+	for _, r := range docs[:min(briefDocs, len(docs))] {
 		d.Docs = append(d.Docs, line(r))
 	}
 	return d
@@ -641,18 +639,10 @@ func (pl *briefPlan) makeQueries() {
 	}
 	pl.qnames = names
 	pl.purpose = keyPhrase(pl.in.Title, 8)
-	if pl.purpose == "" && len(pl.builds) > 0 {
-		pl.purpose = keyPhrase(pl.builds[0], 8)
-	}
 	var qs []string
 	push := func(q string) {
 		if len(strings.Fields(q)) >= queryMinWords {
 			qs = addUniq(qs, q, 40)
-		}
-	}
-	for i, l := range pl.builds {
-		if i < 3 {
-			push(sentenceQuery(l))
 		}
 	}
 	for i, l := range pl.accept {
@@ -660,14 +650,12 @@ func (pl *briefPlan) makeQueries() {
 			push(behaviourQuery(l))
 		}
 	}
-	if len(pl.builds) == 0 {
-		if push(sentenceQuery(pl.in.Title)); len(qs) == 0 {
-			body := pl.in.Body
-			if body == "" {
-				body = pl.in.Text
-			}
-			push(sentenceQuery(body))
+	if push(sentenceQuery(pl.in.Title)); len(qs) == 0 {
+		body := pl.in.Body
+		if body == "" {
+			body = pl.in.Text
 		}
+		push(sentenceQuery(body))
 	}
 	pl.concepts = qs
 }

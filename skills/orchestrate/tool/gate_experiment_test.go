@@ -24,74 +24,38 @@ func piCalls(t *testing.T, h *harness) string {
 	return string(b)
 }
 
-func TestGateDossierCodeGoesAfterThePackageBlocksAndOffIsToday(t *testing.T) {
-	h := setup(t)
-	gdir := h.gateRepo(2)
-	h.sessionPi(gatePasses(nil))
-	t.Setenv("HERDR_ENV", "")
-	out := h.must("gate", "spec.md", "--dossier", "code")
-	wantContains(t, wantGateState(t, out, "pass").Dossier, "code, 2 package(s),", "chars (~")
-	calls := piCalls(t, h)
-	var group string
-	for _, l := range strings.Split(calls, "\n") {
-		if strings.Contains(l, "GATE-GROUP") {
-			group = l
-		}
-	}
-	// the fake pi logs "$*" on several lines; use the whole log from the first package line
-	i, j, k := strings.Index(calls, "PACKAGES UNDER REVIEW"), strings.Index(calls, dossierTitle), strings.Index(calls, "GATE-GROUP")
-	if group == "" || i < 0 || j < i || k < j {
-		t.Fatalf("order must be package blocks, dossier, tag (%d %d %d):\n%s", i, j, k, calls)
-	}
-	wantContains(t, calls, "## Package api", "Absence of a hit is not proof of absence.", "### 3a. Reuse checklist", "Use the evidence dossier", "Budget: about 20 turns.", "Budget: about 40 turns.")
-	if b := mustRead(t, filepath.Join(gdir, "dossier", "api.md")); !strings.Contains(string(b), "### Search notes\nLookups: ") || strings.Contains(string(b), "### 1. Ranked files") {
-		t.Errorf("dossier file:\n%s", b)
-	}
-	rec := readRecord(t, gdir)
-	if rec.Dossier != "code" || rec.DossierChars["api"] == 0 || rec.Cache != "short" {
-		t.Errorf("record: dossier %q chars %v cache %q", rec.Dossier, rec.DossierChars, rec.Cache)
-	}
-	wantContains(t, string(mustRead(t, filepath.Join(gdir, "report.md"))), "Dossier: code, 2 package(s)")
-
-	// --dossier off: no dossier section, no sentence, no files.
-	os.RemoveAll(filepath.Join(gdir, "dossier"))
-	h.sessionPi(gatePasses(nil))
-	out = h.must("gate", "spec.md", "--dossier", "off")
-	calls = piCalls(t, h)
-	if strings.Contains(calls, dossierTitle) || strings.Contains(calls, "Use the evidence dossier") || gateView(t, out).Dossier != "" || exists(filepath.Join(gdir, "dossier")) {
-		t.Errorf("--dossier off still produced a dossier:\n%s\n%s", out, calls)
-	}
-	if code, _ := h.run("gate", "spec.md", "--dossier", "maybe"); code == 0 {
-		t.Error("a bad --dossier value was accepted")
-	}
-}
-
-func TestGateWithoutDossierFlagUsesOffAndWritesNoDossierFiles(t *testing.T) {
+func TestGatePutsThePackageBlocksBeforeTheTagAndHasNoDossier(t *testing.T) {
 	h := setup(t)
 	gdir := h.gateRepo(2)
 	h.sessionPi(gatePasses(nil))
 	t.Setenv("HERDR_ENV", "")
 	out := h.must("gate", "spec.md")
 	calls := piCalls(t, h)
-	if strings.Contains(calls, dossierTitle) || strings.Contains(calls, "Use the evidence dossier") || gateView(t, out).Dossier != "" || exists(filepath.Join(gdir, "dossier")) {
-		t.Errorf("a run without --dossier produced a dossier:\n%s\n%s", out, calls)
+	// the fake pi logs "$*" on several lines; use the whole log from the first package line
+	i, k := strings.Index(calls, "PACKAGES UNDER REVIEW"), strings.Index(calls, "GATE-GROUP")
+	if i < 0 || k < i {
+		t.Fatalf("order must be package blocks, tag (%d %d):\n%s", i, k, calls)
 	}
-	if rec := readRecord(t, gdir); rec.Dossier != "off" {
-		t.Errorf("record dossier %q, want off", rec.Dossier)
+	wantContains(t, calls, "api: Package api", "Budget: about 20 turns.", "Budget: about 40 turns.")
+	if strings.Contains(calls, "Use the evidence dossier") || strings.Contains(calls, "dossier-manifest.json") || exists(filepath.Join(gdir, "dossier")) {
+		t.Errorf("the gate produced a dossier:\n%s\n%s", out, calls)
+	}
+	if rec := readRecord(t, gdir); rec.Cache != "short" {
+		t.Errorf("record: cache %q", rec.Cache)
+	}
+	if code, _ := h.run("gate", "spec.md", "--dossier", "maybe"); code == 0 {
+		t.Error("a --dossier value was accepted")
 	}
 }
 
-func TestGateDryRunShowsDossierSizesAndPlannerPass(t *testing.T) {
+func TestGateDryRunShowsNoDossierSizesAndRunsNothing(t *testing.T) {
 	h := setup(t)
 	h.gateRepo(2)
 	dir := h.fakePi(gatePasses(nil))
-	out := h.must("gate", "spec.md", "--dry-run", "--dossier", "code")
-	wantContains(t, out, "dossier: code; cache: short", "  dossier: code, 2 package(s),", "    api: ", "turn budget: 20 soft, 28 hard")
-	out = h.must("gate", "spec.md", "--dry-run", "--dossier", "plan", "--cache", "long")
-	wantContains(t, out, "dossier: plan; cache: long", "planner: plan:group:api+1", "tools: none", "section 5")
-	out = h.must("gate", "spec.md", "--dry-run", "--dossier", "off")
-	if strings.Contains(out, "    api: ") {
-		t.Errorf("--dossier off showed dossier sizes:\n%s", out)
+	out := h.must("gate", "spec.md", "--dry-run")
+	wantContains(t, out, "cache: short", "turn budget: 20 soft, 28 hard")
+	if strings.Contains(out, "    api: ") || strings.Contains(out, "dossier") {
+		t.Errorf("the dry run showed a dossier:\n%s", out)
 	}
 	if exists(filepath.Join(dir, "calls.log")) {
 		t.Error("pi was called")
@@ -107,88 +71,6 @@ func TestGateDryRunShowsDossierSizesAndPlannerPass(t *testing.T) {
 	}
 }
 
-func planReply(lookups string) map[string]string {
-	return gatePasses(map[string]string{"plan": `{"lookups":[` + lookups + `]}`})
-}
-
-func TestGatePlanArmRunsAToolLessPlannerThenTheLookups(t *testing.T) {
-	for _, mode := range []string{"headless", "pane"} {
-		t.Run(mode, func(t *testing.T) {
-			h := setup(t)
-			gdir := h.gateRepo(2)
-			h.sessionPi(planReply(`{"package":"api","kind":"text","query":"Put","why":"who calls it"},{"package":"p1","kind":"read","path":"internal/store.go","from":1,"to":3}`))
-			if mode == "headless" {
-				t.Setenv("HERDR_ENV", "")
-			}
-			out := h.must("gate", "spec.md", "--dossier", "plan")
-			calls := piCalls(t, h)
-			wantContains(t, calls, "GATE-PLAN", "### 5. Lookups the planner asked for", "- [text] `Put` - who calls it", "- [read] `internal/store.go:1-3`", "1: package internal")
-			if mode == "headless" {
-				b, _ := os.ReadFile(filepath.Join(h.tmp, "fakepi", "plan.log"))
-				if strings.TrimSpace(string(b)) != "no-tools" {
-					t.Errorf("the planner ran with tools or not once: %q", b)
-				}
-			} else {
-				plans := 0
-				for _, c := range h.gateCalls("agent", "start") {
-					if strings.Contains(fmt.Sprint(c.Extra["prompt"]), "GATE-PLAN") {
-						plans++
-						if !strings.Contains(strings.Join(c.Args, " "), "--no-tools") || strings.Contains(strings.Join(c.Args, " "), "--tools") {
-							t.Errorf("planner start args: %v", c.Args)
-						}
-					}
-				}
-				if plans != 1 {
-					t.Errorf("planner passes = %d, want 1", plans)
-				}
-			}
-			rec := readRecord(t, gdir)
-			if _, ok := rec.PassSeconds["plan:group:api+1"]; !ok {
-				t.Errorf("no planner seconds: %v", rec.PassSeconds)
-			}
-			if rec.PassTokens["plan:group:api+1"].Input == 0 {
-				t.Errorf("no planner tokens: %v", rec.PassTokens)
-			}
-			if rec.State != "pass" {
-				t.Errorf("state %s: %v", rec.State, rec.PassErrors)
-			}
-			wantContains(t, gateView(t, out).Dossier, "plan,")
-			if b := mustRead(t, filepath.Join(gdir, "dossier", "p1.md")); !strings.Contains(string(b), "### 5.") {
-				t.Errorf("dossier file lacks section 5:\n%s", b)
-			}
-		})
-	}
-}
-
-func TestGatePlanArmFallsBackToTheCodeDossier(t *testing.T) {
-	h := setup(t)
-	gdir := h.gateRepo(1)
-	h.sessionPi(gatePasses(map[string]string{"plan": "I cannot decide"}))
-	t.Setenv("HERDR_ENV", "")
-	out := h.must("gate", "spec.md", "--dossier", "plan")
-	view := wantGateState(t, out, "pass")
-	found := false
-	for _, note := range view.Notes {
-		found = found || note == "plan:group:api: the reply held no lookups; the pass used the code dossier only"
-	}
-	if !found {
-		t.Fatalf("missing exact planner fallback note: %+v", view.Notes)
-	}
-	if strings.Contains(piCalls(t, h), "### 5.") {
-		t.Error("section 5 appeared without lookups")
-	}
-	rec := readRecord(t, gdir)
-	var retrievalNotes []string
-	for _, note := range rec.Notes {
-		if !strings.Contains(note, " coverage:") {
-			retrievalNotes = append(retrievalNotes, note)
-		}
-	}
-	if len(retrievalNotes) != 2 || !strings.HasPrefix(retrievalNotes[1], "plan:group:api: ") {
-		t.Errorf("retrieval notes: %v", retrievalNotes)
-	}
-}
-
 func TestGateExperimentIsolatedAndCompared(t *testing.T) {
 	h := setup(t)
 	gdir := h.gateRepo(3)
@@ -196,12 +78,11 @@ func TestGateExperimentIsolatedAndCompared(t *testing.T) {
 	h.sessionPi(gatePasses(over))
 	t.Setenv("HERDR_ENV", "")
 
-	out := h.must("gate", "spec.md", "--only", "api+2", "--dossier", "code", "--experiment", "e1")
+	out := h.must("gate", "spec.md", "--only", "api+2", "--experiment", "e1")
 	view := wantGateState(t, out, "experiment")
-	if view.Experiment != "e1 (dossier code, cache short, groups group:api+2)" || view.Tokens == "" {
+	if view.Experiment != "e1 (cache short, groups group:api+2)" || view.Tokens == "" {
 		t.Fatalf("experiment metadata/tokens missing: %+v", view)
 	}
-	wantContains(t, view.Dossier, "code, 3 package(s)")
 	if strings.Contains(piCalls(t, h), "GATE-ADVERSARY") {
 		t.Error("an experiment ran an adversary")
 	}
@@ -218,7 +99,7 @@ func TestGateExperimentIsolatedAndCompared(t *testing.T) {
 	if rec.Experiment != "e1" || rec.State != "experiment" || len(rec.Only) != 1 || len(rec.Questions) != 1 || len(rec.Findings) != 1 || rec.Findings[0].Source != "reuse" {
 		t.Errorf("experiment record: %+v", rec)
 	}
-	for _, p := range []string{"report.md", "dossier/api.md", "sessions/group-api+2"} {
+	for _, p := range []string{"report.md", "sessions/group-api+2"} {
 		if !exists(filepath.Join(exp, p)) {
 			t.Errorf("experiment lacks %s", p)
 		}
@@ -226,9 +107,9 @@ func TestGateExperimentIsolatedAndCompared(t *testing.T) {
 	wantContains(t, string(mustRead(t, filepath.Join(exp, "report.md"))), "Exploration per pass")
 
 	h.sessionPi(gatePasses(over))
-	h.must("gate", "spec.md", "--only", "group:api+2", "--dossier", "off", "--cache", "long", "--experiment", "e2")
+	h.must("gate", "spec.md", "--only", "group:api+2", "--cache", "long", "--experiment", "e2")
 	cmp := h.must("gate", "compare", "spec.md", "e1", "e2")
-	wantContains(t, cmp, "experiment A: e1 (dossier code, cache short, groups group:api+2)", "experiment B: e2 (dossier off, cache long, groups group:api+2)",
+	wantContains(t, cmp, "experiment A: e1 (cache short, groups group:api+2)", "experiment B: e2 (cache long, groups group:api+2)",
 		"requests 1; tokens: input 100, cache read 300 (75% of input), cache write 5, output 10; max context 400 in group:api+2",
 		"cost $0.00 (incomplete: 1 request(s) without cost)", "findings: 1 (1 verified; by source: reuse 1); questions: 1 (1 need a decision)",
 		"pass group:api+2: ", "exploration: requests 1;", "overlap of findings: 1 matched, 1 in e1, 1 in e2, Jaccard 1.00", "overlap of questions: 1 matched")
@@ -498,30 +379,6 @@ func TestGateKeepSessionsKeepsTheSessionsOfPassesThatSucceeded(t *testing.T) {
 		}
 	}
 	wantContains(t, string(mustRead(t, filepath.Join(gdir, "report.md"))), "Exploration per pass", "group:api: requests 1;")
-}
-
-func TestGateDryRunDumpsTheDossierFilesARealPassGets(t *testing.T) {
-	h := setup(t)
-	gdir := h.gateRepo(2)
-	h.sessionPi(gatePasses(nil))
-	t.Setenv("HERDR_ENV", "")
-	dump := filepath.Join(h.tmp, "dump")
-	out := h.must("gate", "spec.md", "--dry-run", "--dossier", "code", "--only", "group:api+1", "--experiment", "x", "--dump-dossier", dump)
-	wantContains(t, out, "dossier files (2):", filepath.Join(dump, "api.md"), filepath.Join(dump, "p1.md"))
-	names, _ := os.ReadDir(dump)
-	if len(names) != 2 || exists(gdir) {
-		t.Errorf("the dump wrote %d files, gate dir exists: %v", len(names), exists(gdir))
-	}
-	h.must("gate", "spec.md", "--dossier", "code", "--only", "group:api+1", "--experiment", "x")
-	for _, id := range []string{"api", "p1"} {
-		want := mustRead(t, filepath.Join(gdir, "experiments", "x", "dossier", id+".md"))
-		if got := mustRead(t, filepath.Join(dump, id+".md")); string(got) != string(want) || len(got) == 0 {
-			t.Errorf("%s: the dumped dossier differs from the one a real pass got", id)
-		}
-	}
-	if code, out := h.run("gate", "spec.md", "--only", "group:api+1", "--experiment", "y", "--dump-dossier", dump); code == 0 || !strings.Contains(out, "needs --dry-run") {
-		t.Errorf("--dump-dossier without --dry-run: %d %s", code, out)
-	}
 }
 
 func TestSessionProfileSeparatesOrchCtxFromRawShellAndRangedReads(t *testing.T) {

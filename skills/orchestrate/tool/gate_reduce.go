@@ -448,20 +448,8 @@ func initGateReview(rec *gateRecord, sp *spec, src string, passes []gatePass) {
 			for _, id := range ids {
 				for _, pkg := range sp.packages {
 					if pkg.id == id {
-						var items []gateItem
-						for _, it := range p.items {
-							if it.Package == id {
-								items = append(items, it)
-							}
-						}
-						checks := []string{"scope", "questions"}
-						if len(items) == 0 {
-							checks = append(checks, "reuse")
-						}
+						checks := []string{"scope", "questions", "reuse"}
 						add(id+"@package", id, "Package scope, decisions and reuse", subjectDigest([]byte(packageBlocks(sp, src)[id])), checks, p.name)
-						for _, it := range items {
-							add(it.ID, it.Package, it.Text, it.Revision, []string{"reuse"}, p.name)
-						}
 						if pkg.kind == "scout" {
 							for i := range rec.Review.Checks {
 								c := &rec.Review.Checks[i]
@@ -558,20 +546,18 @@ func recordGateAnswer(rec *gateRecord, itemID, check, actor, raw string, judgmen
 	}
 }
 
-func recordGateGroup(rec *gateRecord, key, raw string, e groupEntry, withItems bool) {
+func recordGateGroup(rec *gateRecord, key, raw string, e groupEntry) {
 	if rec.Review == nil {
 		return
 	}
 	recordGateAnswer(rec, e.ID+"@package", "scope", key, raw, reviewJudgmentSatisfied, "Explicit scope and claims arrays were reviewed", "", "")
 	recordGateAnswer(rec, e.ID+"@package", "questions", key, raw, reviewJudgmentSatisfied, "Explicit decision questions were reviewed", "", "")
-	if !withItems {
-		for _, c := range rec.Review.Checks {
-			if c.Item.ID == e.ID+"@package" && c.ID == "reuse" && len(c.NotApplicableReasons) > 0 {
-				return
-			}
+	for _, c := range rec.Review.Checks {
+		if c.Item.ID == e.ID+"@package" && c.ID == "reuse" && len(c.NotApplicableReasons) > 0 {
+			return
 		}
-		recordGateAnswer(rec, e.ID+"@package", "reuse", key, raw, reviewJudgmentSatisfied, "Explicit package reuse assessment", "", "")
 	}
+	recordGateAnswer(rec, e.ID+"@package", "reuse", key, raw, reviewJudgmentSatisfied, "Explicit package reuse assessment", "", "")
 }
 
 // Normalize legacy findings without upgrading locator validity to semantic

@@ -274,3 +274,60 @@ func proposedRequirementID(text string) string {
 	}
 	return id
 }
+
+// The relation of an owning package to the package under review.
+const (
+	relDownstream = "which uses this package" // it depends on pkg: it wires pkg's exports in
+	relUpstream   = "which this package uses" // pkg depends on it: it should already provide this
+	relUnrelated  = "unrelated to this package"
+)
+
+// ownerOf is the package that owns file: the one with the longest matching
+// owns entry, or nil when none does.
+func (sp *spec) ownerOf(file string) *specPackage {
+	var best *specPackage
+	n := -1
+	for _, p := range sp.packages {
+		for _, o := range p.owns {
+			if ownedPath([]string{o}, file) && len(strings.TrimSuffix(o, "/")) > n {
+				best, n = p, len(strings.TrimSuffix(o, "/"))
+			}
+		}
+	}
+	return best
+}
+
+// dependsOn reports whether a depends on b, directly or through other packages.
+func (sp *spec) dependsOn(a, b *specPackage) bool {
+	seen := map[string]bool{}
+	var walk func(p *specPackage) bool
+	walk = func(p *specPackage) bool {
+		for _, d := range p.deps {
+			if d == b.id {
+				return true
+			}
+			if seen[d] {
+				continue
+			}
+			seen[d] = true
+			for _, q := range sp.packages {
+				if q.id == d && walk(q) {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	return walk(a)
+}
+
+// relation says how the owner relates to the package under review.
+func (sp *spec) relation(pkg, owner *specPackage) string {
+	switch {
+	case sp.dependsOn(owner, pkg):
+		return relDownstream
+	case sp.dependsOn(pkg, owner):
+		return relUpstream
+	}
+	return relUnrelated
+}

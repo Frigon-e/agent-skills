@@ -30,16 +30,10 @@ func TestExplicitBuildQueriesAndPointers(t *testing.T) {
 	wantContains(t, task, "store.go#Save, data.sql:2-4", "search: Code that refreshes display details")
 }
 
-func TestItemsAreNeverInferredAndNoQueriesMeansNoSearch(t *testing.T) {
+func TestItemsAreNeverInferred(t *testing.T) {
 	p := &specPackage{id: "p", body: "Builds a queue", acceptance: "- Add a sender"}
 	if len(packageItems(p)) != 0 {
 		t.Fatal("inferred items")
-	}
-	code := reuseRepo(t)
-	e := newCtxEnv(code, ctxOpts{})
-	got := e.reuseCandidates([]gateItem{{ID: "p#1", Package: "p", Text: "Build `Alpha`"}}, nil, "")
-	if len(got) != 1 || len(got[0].Cands) != 0 || len(got[0].Queries) != 0 {
-		t.Fatalf("unrequested search: %+v", got)
 	}
 }
 
@@ -70,21 +64,6 @@ func TestSymbolAndRangePointers(t *testing.T) {
 	if strings.Join(files, ",") != "store.go,view.ts" {
 		t.Fatal(files)
 	}
-}
-
-func TestAdaptiveCandidatesAndDeduplicatedBodies(t *testing.T) {
-	for n, want := range map[int]int{0: 3, 1: 3, 8: 3, 9: 2, 20: 2} {
-		if got := candidatesPerQuery(n); got != want {
-			t.Errorf("%d: %d want %d", n, got, want)
-		}
-	}
-	c := reuseCand{Path: "x.go", Start: 2, End: 3, Lines: []string{"func Save() {", "}"}, Total: 2}
-	ics := []itemCands{{Item: gateItem{ID: "p#1", Text: "one"}, Cands: []reuseCand{c}}, {Item: gateItem{ID: "p#2", Text: "two"}, Cands: []reuseCand{c}}, {Item: gateItem{ID: "p#5", Text: "five"}, Cands: []reuseCand{c}}}
-	got := renderChecklist(ics, nil, "")
-	if strings.Count(got, "| func Save()") != 1 {
-		t.Fatal(got)
-	}
-	wantContains(t, got, "`p#1`", "`p#2`", "`p#5`", "also for #2, #5", "also: `x.go:2-3` (listed under #1)")
 }
 
 func TestSpecQueriesParserGenerationAndSelection(t *testing.T) {
@@ -134,20 +113,6 @@ func TestSpecQueriesParserGenerationAndSelection(t *testing.T) {
 	}
 	if b, err := os.ReadFile(filepath.Join(dir, "spec.md")); err != nil || string(b) != src {
 		t.Fatal("spec edited", err)
-	}
-}
-
-func TestMultipleQueriesUnionCandidatesWithoutSearchingProse(t *testing.T) {
-	code := reuseRepo(t)
-	e := newCtxEnv(code, ctxOpts{})
-	items := []gateItem{{ID: "p#1", Package: "p", Text: "Use `Gamma`.", Queries: []string{"Code that invokes `Alpha`", "Code that invokes `Delta`"}}}
-	got := e.reuseCandidates(items, []string{"mine/"}, "")
-	paths := map[string]bool{}
-	for _, c := range got[0].Cands {
-		paths[c.Path] = true
-	}
-	if !paths["app/a.go"] || !paths["zlib/z.go"] || paths["app/c.go"] {
-		t.Fatalf("candidates from wrong source: %+v", got)
 	}
 }
 
@@ -330,12 +295,6 @@ func TestSpecStableItemsPythonAndTypeScriptFixtures(t *testing.T) {
 			if _, err := checkPointer(repo, strings.Replace(fixture.pointer, "Store.save", "Wrong.save", 1)); err == nil {
 				t.Fatal("wrong class qualified method accepted")
 			}
-			candidate := reuseCand{Path: fixture.path, Start: 1, End: 3, Lines: strings.Split(strings.TrimSpace(fixture.code), "\n"), Total: 3}
-			text := renderChecklist([]itemCands{{Item: items[0], Cands: []reuseCand{candidate}}, {Item: items[1], Cands: []reuseCand{candidate}}}, nil, "")
-			wantContains(t, text, "`api#save`", "`api#validate`", "also for #validate", "also: `"+fixture.path+":1-3` (listed under #save)")
-			if strings.Count(text, "| "+strings.Split(fixture.code, "\n")[0]) != 1 {
-				t.Fatalf("shared candidate body must appear once: %s", text)
-			}
 			var out, errs strings.Builder
 			a := &app{cwd: repo, out: &out, errw: &errs}
 			if code := a.run([]string{"spec", "queries", "spec.md", "--item", "api#validate", "--generate", "--dry-run"}); code != 0 {
@@ -424,28 +383,5 @@ func TestSpecCompareRecoversExplicitRequirementIDs(t *testing.T) {
 	got := legacyChecklist(dir)["api"]
 	if len(got) != 3 || got[0].Item.ID != "api#1" || got[1].Item.ID != "api#save.v1" || got[2].Item.ID != "api#load_state-2" || len(got[1].Cands) != 1 {
 		t.Fatalf("lost legacy or explicit requirement IDs: %+v", got)
-	}
-}
-
-func TestItemsExplicitVerdictsDoNotAliasOrdinals(t *testing.T) {
-	builds, _ := parseBuilds("- Saves.\n  id: save\n- Validates.\n  id: validate\n")
-	items := packageItems(&specPackage{id: "api", builds: builds})
-	if err := validateVerdicts("api", items, []itemVerdict{{Item: "1", Verdict: verdictNew}}); err == nil {
-		t.Fatal("a display ordinal was accepted as an explicit requirement identity")
-	}
-	verdicts := []itemVerdict{{Item: "save", Verdict: verdictNew}, {Item: "#validate", Verdict: verdictUnclr}}
-	if err := validateVerdicts("api", items, verdicts); err != nil {
-		t.Fatal(err)
-	}
-	rec := &gateRecord{}
-	rec.ensureItems(items)
-	rec.applyVerdicts("group", t.TempDir(), items, verdicts[:1])
-	missing := rec.missingItems(items)
-	if len(missing) != 1 || missing[0].ID != "api#validate" {
-		t.Fatalf("one requirement's answer covered another: %+v", rec.Items)
-	}
-	rec.applyVerdicts("retry", t.TempDir(), items, verdicts[1:])
-	if missing := rec.missingItems(items); len(missing) != 0 {
-		t.Fatal(missing)
 	}
 }

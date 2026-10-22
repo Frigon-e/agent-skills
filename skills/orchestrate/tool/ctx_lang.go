@@ -17,7 +17,7 @@ import (
 )
 
 // The language registry: the one table every language-specific rule of
-// `orch ctx` and the dossier reads. A language is its extensions, how a symbol
+// `orch ctx` and the brief reads. A language is its extensions, how a symbol
 // is declared (to read the enclosing declaration of a line and to verify that a
 // name is a symbol at all), its comment markers, test and generated file
 // patterns, entry points that never count as look-alikes, what "exported"

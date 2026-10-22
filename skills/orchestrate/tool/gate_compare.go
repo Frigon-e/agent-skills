@@ -61,9 +61,6 @@ func cmdGateCompare(a *app, args []string) error {
 		if cl := r.coverageLine(); cl != "" {
 			fmt.Fprintf(a.out, "coverage %s: %s\n", string(rune('A'+i)), cl)
 		}
-		if r.Shadow != "" {
-			fmt.Fprintf(a.out, "%s: %s\n", string(rune('A'+i)), r.Shadow)
-		}
 	}
 	var ref map[string]refEntry
 	if *refPath != "" {
@@ -112,7 +109,7 @@ func legacyCtxProfile(rec *gateRecord) string {
 }
 
 func describeExperiment(w io.Writer, label, name string, rec *gateRecord, dir string) {
-	fmt.Fprintf(w, "experiment %s: %s (dossier %s, cache %s, groups %s)\n", label, name, orDefault(rec.Dossier, "off"), orDefault(rec.Cache, "short"), strings.Join(rec.Only, ", "))
+	fmt.Fprintf(w, "experiment %s: %s (cache %s, groups %s)\n", label, name, orDefault(rec.Cache, "short"), strings.Join(rec.Only, ", "))
 	fmt.Fprintf(w, "  ctx_tool: %s; context_files: %s; ctx_shell: %s%s\n", orDefault(rec.CtxTool, "off (legacy)"), orDefault(rec.ContextFiles, "off (legacy)"), orDefault(rec.CtxShell, "open"), legacyCtxProfile(rec))
 	if warning := treeWarning(rec); warning != "" {
 		fmt.Fprintf(w, "  %s\n", warning)
@@ -154,9 +151,6 @@ func describeExperiment(w io.Writer, label, name string, rec *gateRecord, dir st
 		}
 	}
 	fmt.Fprintf(w, "  findings: %d (%d verified; by source: %s); questions: %d (%d need a decision)\n", len(rec.Findings), verified, orNone(srcs), len(rec.Questions), blocking)
-	if len(rec.DossierChars) > 0 {
-		fmt.Fprintf(w, "  dossier: %s\n", dossierSummary(rec.Dossier, rec.DossierChars))
-	}
 	if rec.Checklist == "plain" {
 		fmt.Fprintln(w, "  reuse checklist: plain (spec text only; no lookups, no candidates)")
 	}

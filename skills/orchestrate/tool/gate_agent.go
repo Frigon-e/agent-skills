@@ -330,9 +330,6 @@ func gateRunLimits(passes []gatePass, cfg *gateBudgetConfig) adjudicationLimits 
 	requests := 2 // leave room for the optional adjudicator's default two calls
 	for _, p := range passes {
 		requests += 4 * (int(math.Ceil(float64(max(1, p.budget))*gateBudgetHard)) + 2)
-		if p.planner != nil {
-			requests += 2
-		}
 	}
 	l := adjudicationLimits{Requests: requests, InputTokens: int64(requests) * int64(max(gateContextSoft, 150000)) * 4,
 		OutputTokens: int64(requests) * 32768, Seconds: max(1, int((time.Duration(len(passes))*gateTimeout + 180*time.Second).Seconds())),

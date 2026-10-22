@@ -104,8 +104,9 @@ None.
     completes, producing a stored method row`. Good (short): `Code that lists
     payment gateways`. Bad (noun list): `payments, customers, checkout, gateways`.
     Omit `search:` for tiny bullets without a search target, or near-duplicates
-    that would only repeat candidates and skew counts. Without it the item still
-    appears in the checklist, but gets no searched candidates.
+    that would only repeat each other. The gate shows `search:` lines in the
+    checklist as written and runs no lookup for them; `orch spec queries`
+    reads them.
   - A ship package without Builds gets a warning, not an error: its reuse
     checklist is skipped. Scouts are exempt. More than 8 bullets warns to split
     the package. An explicit `id:` must match `[a-z][a-z0-9._-]*` and be unique
@@ -210,13 +211,9 @@ It uses role `spec_queries`, never edits the spec, and prints text to paste.
 `--dry-run` prints the prompt without calling a model. Whole-spec generation
 requires explicit `--all`; a package or item selector is the normal use.
 
-Candidates are retrieved only from explicit queries. The default is three per
-query for small packages; larger packages divide a 24-body budget over their
-queries, clamped to 2..5 per query. A location answering several items is shown
-once with `also for #2, #5` for legacy items or qualified explicit IDs.
-Compare reports items with queries, queries run, distinct locations and bodies
-shown; reference precision/recall scores
-locations rather than item wording.
+The gate runs no lookup for the checklist: it shows each item, its `reuse:`
+pointers and its `search:` lines as written. Reference precision/recall in
+`orch gate compare` scores locations rather than item wording.
 
 ## What `orch plan` does
 

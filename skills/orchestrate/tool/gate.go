@@ -93,7 +93,6 @@ func (q gateQuestion) blocks() bool { return q.Decisive && q.AnsweredBy == "" }
 
 type gateRecord struct {
 	historicalGateResult
-	DossierManifest   *dossierManifest             `json:"dossier_manifest,omitempty"`
 	Budget            *RunBudget                   `json:"budget,omitempty"`
 	SchemaVersion     int                          `json:"schema_version,omitempty"`
 	State             string                       `json:"state,omitempty"`
@@ -131,12 +130,9 @@ type gateRecord struct {
 	Groups            map[string][]string          `json:"groups,omitempty"`       // package ids covered by each group pass
 	PassKept          map[string]string            `json:"pass_kept,omitempty"`    // files kept for a pass that did not run, to read afterwards
 	PassTokens        map[string]passTokens        `json:"pass_tokens,omitempty"`  // model usage per pass, when its session recorded any
-	Dossier           string                       `json:"dossier,omitempty"`      // off, code or plan
-	DossierChars      map[string]int               `json:"dossier_chars,omitempty"`
-	Checklist         string                       `json:"checklist,omitempty"` // plain: the reuse checklist of --dossier off, spec text only, no candidates
-	Cache             string                       `json:"cache,omitempty"`     // short or long: the provider prompt-cache retention asked for
-	Items             []gateItemResult             `json:"items,omitempty"`     // one result per item of a package, with its verdict
-	Shadow            string                       `json:"shadow,omitempty"`    // the shadow judges that ran (record only)
+	Checklist         string                       `json:"checklist,omitempty"`    // plain: the reuse checklist is the spec text only, no candidates
+	Cache             string                       `json:"cache,omitempty"`        // short or long: the provider prompt-cache retention asked for
+	Items             []gateItemResult             `json:"items,omitempty"`        // one result per item of a package, with its verdict
 	Notes             []string                     `json:"notes,omitempty"`
 	Experiment        string                       `json:"experiment,omitempty"`
 	Only              []string                     `json:"only,omitempty"`
@@ -862,15 +858,6 @@ type gatePass struct {
 	sessionDir   string           // invocation-local session; retries retain earlier usage
 	admission    *budgetAdmission // shared run ticket for pane continuation requests
 	budget       int              // soft tool-call budget; 0 means none
-	// A group pass of the plan arm has a planner pass that runs first; once
-	// its lookups are in the dossier, rebuild makes the pass with them.
-	planner *gatePass
-	rebuild func() gatePass
-	planIDs []string
-	// A group pass with a reuse checklist must return a verdict for each of
-	// its items; retry makes the pass that asks for the ones it left out.
-	items []gateItem
-	retry func(missing []gateItem) gatePass
 }
 
 // Turn budget of a pass: gateTurnsBase plus gateTurnsPerPackage for each
@@ -906,7 +893,7 @@ func budgetSentence(n int, ctxOn ...bool) string {
 // buildGatePasses makes the passes in the order they are queued: the two
 // first ones warm the cache for the two prefix classes. groups gets the
 // package ids of each group pass.
-func buildGatePasses(code, src, rel string, sp *spec, groups map[string][]string, dos *dossierSet, plan bool, only map[string]bool) []gatePass {
+func buildGatePasses(code, src, rel string, sp *spec, groups map[string][]string, only map[string]bool) []gatePass {
 	scope := adversaryScope(specFiles(code, src))
 	specCtx := gateSpecContext(src, rel)
 	supportInstructions := ` For each semantic blocker provide support_assessment with schema_version 1, state supported|unsupported|conflicting|unknown, rationale, an exact source excerpt, and a concrete failure_scenario. A locator or confidence alone is not support. Use unsupported when the behavior cannot be established; do not label model interpretations structural.`
@@ -926,81 +913,29 @@ func buildGatePasses(code, src, rel string, sp *spec, groups map[string][]string
 	pkgShared := gatePackageShared(sp, src, rel)
 	blocks := packageBlocks(sp, src)
 	var pkgPasses []gatePass
-	var chosen [][]*specPackage
-	var allIDs []string
 	for _, g := range gateGroups(sp, gateGroupMax, gateGroupChars, gateParallel) {
 		if only != nil && !only[groupKey(g)] {
 			continue
 		}
-		chosen = append(chosen, g)
-		for _, pkg := range g {
-			allIDs = append(allIDs, pkg.id)
-		}
-	}
-	if dos != nil {
-		dos.build(allIDs)
-	}
-	for _, g := range chosen {
 		var ids, texts []string
+		var gitems []gateItem
 		for _, pkg := range g {
 			ids = append(ids, pkg.id)
 			texts = append(texts, blocks[pkg.id])
+			gitems = append(gitems, packageItems(pkg)...)
 		}
 		key := groupKey(g)
 		groups[key] = ids
 		joined := strings.Join(texts, "\n\n")
-		var gitems []gateItem
-		// Package-level scope, questions and reuse are always required. Per-item
-		// verdicts remain an explicitly requested experimental review mode.
-		if dos != nil && dos.verdicts && dos.hasItems(ids) {
-			gitems = dos.itemsOf(ids)
-		}
-		plain := ""
-		if dos == nil {
-			var gi []gateItem
-			for _, pkg := range g {
-				gi = append(gi, packageItems(pkg)...)
-			}
-			plain = plainChecklist(gi)
-		}
-		mk := func() gatePass {
-			own, with := gatePackageOwn(joined), ""
-			if dos != nil {
-				own += dos.section(ids)
-				with = dossierSentence
-			}
-			own += plain
-			reuseTask := ` (3) reuse: for each package, list the things it says it will newly build (files, functions, tables, endpoints, templates, jobs) for which the repo already has something that does the same job. Search with grep and find before you claim it, and cite the existing code as path:line. An empty list is a valid answer. Do not list things the package is told to modify or extend.`
-			schema := `{"packages":[{"id":"","will_change":["path"],"claims":[{"claim":"","evidence":"path:line"}],"questions":[{"question":"","answered_by":"","changes_result":false}],"reuse":[{"builds":"","existing":"","evidence":"path:line","why":""}]}]}`
-			budget := budgetSentence(gateTurnsBase + gateTurnsPerPackage*len(ids))
-			if len(gitems) > 0 {
-				if dos == nil || !dos.verdicts {
-					own += "\n\n" + requiredReviewChecklist(gitems)
-				}
-				reuseTask = reuseItemsTask + ` Packages without Builds items must give an explicit reuse array and items: []; do not omit their package-level reuse review.`
-				schema = `{"packages":[{"id":"","will_change":["path"],"claims":[{"claim":"","evidence":"path:line"}],"questions":[{"question":"","answered_by":"","changes_result":false}],"reuse":[],"items":[{"item":"<package>#<id>","verdict":"reuse|extend|new|unclear","candidate":"path:line or null","why":"","matching_behavior":"","missing_behavior":"","evidence_ids":[],"support_assessment":{"schema_version":1,"state":"supported","rationale":""}}]}]}`
-				budget = budgetSentenceItems(gateTurnsBase + gateTurnsPerPackage*len(ids))
-			}
-			p := newGatePass(key, "package", pkgShared, own, "GATE-GROUP",
-				`Do three things for EACH package under review. (1) scope: say which files this package's work will really have to change, found by reading the code, and give claims about the code with evidence. (2) questions: list the questions a developer would have to answer before building this package. Mark a question answered_by "path:line" when the code or the spec already answers it; leave answered_by empty when it needs a decision. Set changes_result to true ONLY if two reasonable answers would give behaviour that a user or a test could tell apart; style, naming, placement and other details a developer can settle alone are false.`+fromSpec+
-					reuseTask+with+
-					` Give one entry in "packages" for each package under review, with its id, and no entry for any other package. Packages in this pass: `+strings.Join(ids, ", ")+`.`+budget,
-				schema, applyGroupItems(key, ids, itemMap(gitems)))
-			p.budget = gateTurnsBase + gateTurnsPerPackage*len(ids)
-			p.items = gitems
-			if len(gitems) > 0 {
-				p.retry = func(missing []gateItem) gatePass {
-					return retryItemsPass(key, pkgShared, joined, missing, dos)
-				}
-			}
-			return p
-		}
-		p := mk()
-		if plan && dos != nil {
-			pl := newGatePass("plan:"+key, "package", pkgShared, gatePackageOwn(joined), "GATE-PLAN", planTask(ids), planSchema, nil)
-			pl.noTools = true
-			p.planner, p.rebuild, p.planIDs = &pl, mk, ids
-		}
+		own := gatePackageOwn(joined) + plainChecklist(gitems)
+		reuseTask := ` (3) reuse: for each package, list the things it says it will newly build (files, functions, tables, endpoints, templates, jobs) for which the repo already has something that does the same job. Search with grep and find before you claim it, and cite the existing code as path:line. An empty list is a valid answer. Do not list things the package is told to modify or extend.`
+		schema := `{"packages":[{"id":"","will_change":["path"],"claims":[{"claim":"","evidence":"path:line"}],"questions":[{"question":"","answered_by":"","changes_result":false}],"reuse":[{"builds":"","existing":"","evidence":"path:line","why":""}]}]}`
+		p := newGatePass(key, "package", pkgShared, own, "GATE-GROUP",
+			`Do three things for EACH package under review. (1) scope: say which files this package's work will really have to change, found by reading the code, and give claims about the code with evidence. (2) questions: list the questions a developer would have to answer before building this package. Mark a question answered_by "path:line" when the code or the spec already answers it; leave answered_by empty when it needs a decision. Set changes_result to true ONLY if two reasonable answers would give behaviour that a user or a test could tell apart; style, naming, placement and other details a developer can settle alone are false.`+fromSpec+
+				reuseTask+
+				` Give one entry in "packages" for each package under review, with its id, and no entry for any other package. Packages in this pass: `+strings.Join(ids, ", ")+`.`+budgetSentence(gateTurnsBase+gateTurnsPerPackage*len(ids)),
+			schema, applyGroup(key, ids))
+		p.budget = gateTurnsBase + gateTurnsPerPackage*len(ids)
 		pkgPasses = append(pkgPasses, p)
 	}
 	if only != nil {
@@ -1086,13 +1021,10 @@ func cmdGateEnrich(a *app, args []string) error {
 
 // gateOpts are the options of one gate run.
 type gateOpts struct {
-	dossier      string // off, code or plan
 	cache        string // "" leaves the environment alone, else short or long
 	keep         bool   // keep the sessions of passes that succeeded
 	headless     bool   // run passes without panes even inside herdr
 	runner       *roleRun
-	verdicts     bool   // ask the group pass for a verdict per checklist item and check coverage (off by default)
-	shadow       string // the shadow judges: off, decider, flash or both
 	ctxTool      bool
 	ctxOnly      bool
 	contextFiles bool
@@ -1135,9 +1067,6 @@ func cmdGate(a *app, args []string) (retErr error) {
 	if len(args) > 0 && args[0] == "enrich" {
 		return cmdGateEnrich(a, args[1:])
 	}
-	if len(args) > 0 && args[0] == "probe-decider" {
-		return cmdGateProbeDecider(a, args[1:])
-	}
 	if len(args) > 0 && args[0] == "compare" {
 		return cmdGateCompare(a, args[1:])
 	}
@@ -1153,7 +1082,6 @@ func cmdGate(a *app, args []string) (retErr error) {
 		}
 	}()
 	dry := fs.Bool("dry-run", false, "show the passes, their sizes and the deterministic checks; call no model and write nothing")
-	dossier := fs.String("dossier", "off", "off (default: the plain prompt), code (facts gathered by code, no model) or plan (code facts plus lookups a tool-less planner pass asked for)")
 	onlyF := fs.String("only", "", "experiment: run only these group passes (comma-separated keys); needs --experiment")
 	expF := fs.String("experiment", "", "experiment: write everything under the gate dir's experiments/<name>/ and leave the real gate record alone")
 	benchSuiteF := fs.String("bench-suite", "", "durable benchmark suite for experiment runs (default: user bench_suite, or none)")
@@ -1163,17 +1091,17 @@ func cmdGate(a *app, args []string) (retErr error) {
 	ctxTool := fs.String("ctx-tool", "on", "on or off: read-only orch ctx CLI in gate agents (default on)")
 	contextFiles := fs.String("context-files", "off", "on or off: load repository context files (default off)")
 	ctxShell := fs.String("ctx-shell", "ctx-only", "open or ctx-only: pi with ctx-tool on defaults to read plus an orch ctx-only shell; open opts out; ignored by Claude and with ctx-tool off")
-	verdicts := fs.Bool("verdicts", false, "experimental: the group pass returns a reuse|extend|new|unclear verdict for each reuse-checklist item, with a coverage retry (off: the checklist is only facts)")
 	runnerF := fs.String("runner", "", "ordered harness:model[:effort],... choices for this run")
 	degraded := fs.Bool("degraded", false, "allow degraded role choices approved by the user")
-	shadowF := fs.String("shadow", "", "record-only judges of the reuse checklist: off, decider, flash or both (comma-separated list works); overrides reuse_shadow in the config")
-	dumpDec := fs.String("dump-decider", "", "with --dry-run: print the decider request body (never sent) for this item id, or 'first'")
-	dump := fs.String("dump-dossier", "", "with --dry-run: write the dossier files a real pass would get into this directory, and nothing else")
 	for _, arg := range args {
 		if arg == "--" {
 			break
 		}
-		if name, _, _ := strings.Cut(strings.TrimLeft(arg, "-"), "="); name == "ctx-profile" && strings.HasPrefix(arg, "-") {
+		name, _, _ := strings.Cut(strings.TrimLeft(arg, "-"), "=")
+		if name == "dossier" && strings.HasPrefix(arg, "-") {
+			return fail("--dossier was removed; the gate runs without a dossier")
+		}
+		if name == "ctx-profile" && strings.HasPrefix(arg, "-") {
 			return fail("--ctx-profile was removed")
 		}
 	}
@@ -1187,7 +1115,7 @@ func cmdGate(a *app, args []string) (retErr error) {
 	if *schemaVersion != 2 {
 		return fail("--schema-version is 2, not %d; use --schema-version 2 (the default)", *schemaVersion)
 	}
-	if err := exactArgs(pos, 1, "gate <spec> [--dry-run] [--dossier off|code|plan] [--cache short|long] [--keep-sessions] [--headless] | gate <spec> --only <group-key>[,...] --experiment <name> | gate enrich <spec> | gate compare <spec> <experiment-a> <experiment-b>"); err != nil {
+	if err := exactArgs(pos, 1, "gate <spec> [--dry-run] [--cache short|long] [--keep-sessions] [--headless] | gate <spec> --only <group-key>[,...] --experiment <name> | gate enrich <spec> | gate compare <spec> <experiment-a> <experiment-b>"); err != nil {
 		return err
 	}
 	for name, value := range map[string]string{"ctx-tool": *ctxTool, "context-files": *contextFiles} {
@@ -1197,11 +1125,6 @@ func cmdGate(a *app, args []string) (retErr error) {
 	}
 	if *ctxShell != "open" && *ctxShell != "ctx-only" {
 		return fail("--ctx-shell is open or ctx-only, not %q", *ctxShell)
-	}
-	switch *dossier {
-	case "off", "code", "plan":
-	default:
-		return fail("--dossier is off, code or plan, not %q", *dossier)
 	}
 	switch *cacheF {
 	case "", "short", "long":
@@ -1214,7 +1137,7 @@ func cmdGate(a *app, args []string) (retErr error) {
 	if *expF != "" && !experimentRe.MatchString(*expF) {
 		return fail("--experiment %q: use lowercase letters, digits, '.', '_' and '-'", *expF)
 	}
-	opts := gateOpts{ctxTool: *ctxTool == "on", ctxOnly: *ctxShell == "ctx-only" && *ctxTool == "on", contextFiles: *contextFiles == "on", dossier: *dossier, cache: *cacheF, keep: *keep || *expF != "", headless: *headless || os.Getenv("ORCH_HEADLESS") == "1", verdicts: *verdicts}
+	opts := gateOpts{ctxTool: *ctxTool == "on", ctxOnly: *ctxShell == "ctx-only" && *ctxTool == "on", contextFiles: *contextFiles == "on", cache: *cacheF, keep: *keep || *expF != "", headless: *headless || os.Getenv("ORCH_HEADLESS") == "1"}
 	if err := paneOrchOnPath(opts, *dry); err != nil {
 		return fail("%v", err)
 	}
@@ -1227,12 +1150,6 @@ func cmdGate(a *app, args []string) (retErr error) {
 	if err != nil {
 		return err
 	}
-	if opts.shadow, err = shadowMode(*shadowF, s.cfg.ReuseShadow); err != nil {
-		return err
-	}
-	if opts.verdicts && opts.dossier == "off" {
-		return fail("--verdicts needs lookup results; use --dossier code or plan (off carries only the plain checklist)")
-	}
 	var only map[string]bool
 	var onlyList []string
 	if *onlyF != "" {
@@ -1240,11 +1157,8 @@ func cmdGate(a *app, args []string) (retErr error) {
 			return err
 		}
 	}
-	if *dump != "" && (!*dry || opts.dossier == "off") {
-		return fail("--dump-dossier needs --dry-run and a dossier (--dossier code or plan; off has no dossier files)")
-	}
 	if *dry {
-		return gateDryRun(a, pos[0], hash, code, src, rel, s.cfg, sp, opts, only, *dump, *dumpDec)
+		return gateDryRun(a, pos[0], hash, code, src, rel, s.cfg, sp, opts, only)
 	}
 	dir := gateDir(s.root, hash)
 	runDir, experiment := dir, *expF != ""
@@ -1260,16 +1174,15 @@ func cmdGate(a *app, args []string) (retErr error) {
 		cacheName = "short"
 	}
 	rec := &gateRecord{Spec: pos[0], Hash: hash, At: a.now().Unix(), PassErrors: map[string]string{}, PassSeconds: map[string]int{}, PassKept: map[string]string{}, PassTokens: map[string]passTokens{}, Groups: map[string][]string{},
-		Dossier: opts.dossier, Cache: cacheName, SpecRel: rel, CtxTool: onOff(opts.ctxTool), ContextFiles: onOff(opts.contextFiles)}
+		Cache: cacheName, SpecRel: rel, CtxTool: onOff(opts.ctxTool), ContextFiles: onOff(opts.contextFiles)}
 	rec.CtxShell = "open"
 	if opts.ctxOnly {
 		rec.CtxShell = "ctx-only"
 	}
-	rec.ReviewPolicy = &gateReviewPolicy{Version: gateReviewPolicyVersion, CtxTool: rec.CtxTool, ContextFiles: rec.ContextFiles, CtxShell: rec.CtxShell, Dossier: opts.dossier, Verdicts: opts.verdicts}
+	rec.ReviewPolicy = &gateReviewPolicy{Version: gateReviewPolicyVersion, CtxTool: rec.CtxTool, ContextFiles: rec.ContextFiles, CtxShell: rec.CtxShell}
 	rec.BenchBuild = benchBuildNow()
-	v := opts.verdicts
 	rec.BenchInputs = benchInputs{Repo: code, SpecPath: rel, SpecHash: hash, SpecSHA256: benchHash([]byte(src))}
-	rec.BenchConfig = benchConfig{Roles: s.cfg.Roles, Verdicts: &v, Shadow: opts.shadow, Flags: append([]string(nil), args...), Command: benchCommand(args), Budgets: map[string]int{}}
+	rec.BenchConfig = benchConfig{Roles: s.cfg.Roles, Flags: append([]string(nil), args...), Command: benchCommand(args), Budgets: map[string]int{}}
 	if experiment {
 		rec.Experiment, rec.Only = *expF, onlyList
 	} else {
@@ -1294,14 +1207,7 @@ func cmdGate(a *app, args []string) (retErr error) {
 		_ = os.WriteFile(filepath.Join(runDir, "subject.json"), b, 0600)
 	}
 	model := envOr("ORCH_GATE_MODEL", gateModelDef)
-	var dos *dossierSet
-	if opts.dossier != "off" {
-		env := newCtxEnv(code, ctxOpts{Cfg: s.cfg, Skip: []string{rel}})
-		dos = newDossierSet(env, sp, packageBlocks(sp, src))
-		dos.subject = rec.Subject
-		dos.verdicts = opts.verdicts
-	}
-	passes := buildGatePasses(code, src, rel, sp, rec.Groups, dos, opts.dossier == "plan", only)
+	passes := buildGatePasses(code, src, rel, sp, rec.Groups, only)
 	initGateReview(rec, sp, src, passes)
 	rec.Budget = newRunBudget(gateRunLimits(passes, s.cfg.GateBudget), runStarted)
 	for _, p := range passes {
@@ -1309,29 +1215,14 @@ func cmdGate(a *app, args []string) (retErr error) {
 			rec.BenchConfig.Budgets[p.name] = p.budget
 		}
 	}
-	if dos == nil {
-		items, order := specItems(sp)
-		if err := writeItems(runDir, items, order); err != nil {
-			rec.PassErrors["all"] = err.Error()
-		}
-		for _, its := range items {
-			if len(its) > 0 {
-				rec.Checklist = "plain"
-				break
-			}
-		}
+	items, order := specItems(sp)
+	if err := writeItems(runDir, items, order); err != nil {
+		rec.PassErrors["all"] = err.Error()
 	}
-	if dos != nil {
-		rec.Notes = append(rec.Notes, dos.e.Notes()...)
-		if err := dos.write(runDir); err != nil {
-			rec.PassErrors["all"] = err.Error()
-		}
-		var order []string
-		for _, p := range sp.packages {
-			order = append(order, p.id)
-		}
-		if err := writeItems(runDir, dos.items, order); err != nil {
-			rec.PassErrors["all"] = err.Error()
+	for _, its := range items {
+		if len(its) > 0 {
+			rec.Checklist = "plain"
+			break
 		}
 	}
 	if guardErr != nil {
@@ -1339,82 +1230,8 @@ func cmdGate(a *app, args []string) (retErr error) {
 		rec.PassErrors["all"] = guardErr.Error()
 	} else {
 		defer opts.guard.cancel()
-		runGatePasses(runDir, code, model, passes, rec, sp, dos, opts)
+		runGatePasses(runDir, code, model, passes, rec, sp, opts)
 	}
-	if dos != nil && opts.shadow != "off" && len(rec.PassErrors) == 0 {
-		dm := s.cfg.TriageModel
-		if dm == "" {
-			dm = triageModelDefault
-		}
-		decider, _ := s.newRoleRun("decider", modelOptions{})
-		flash, _ := s.newRoleRun("shadow_flash", modelOptions{})
-		var shadowMu sync.Mutex
-		var shadowPool *gatePool
-		shadowPane := ""
-		if gatePaneMode() && !opts.headless && (opts.shadow == "flash" || opts.shadow == "both") {
-			if choices, _ := flash.available(); len(choices) > 0 {
-				shadowPool, err = openGatePool(code, hash, 1)
-				if err != nil || len(shadowPool.panes) == 0 {
-					flash.enabled = false
-					rec.Notes = append(rec.Notes, fmt.Sprintf("shadow_flash off: could not open Herdr pane: %v", err))
-				} else {
-					shadowPane = shadowPool.panes[0]
-				}
-			}
-		}
-		sr := &shadowRun{dir: dir, name: rec.Experiment, root: s.root, code: code, model: dm, flash: model, cache: opts.cache, mode: opts.shadow, dos: dos, sp: sp,
-			post: decider.postDecisions,
-			runPass: func(p gatePass, sess string) (string, error) {
-				shadowMu.Lock()
-				defer shadowMu.Unlock()
-				start := time.Now()
-				p.ctxTool, p.ctxOnly, p.contextFiles, p.ctx = opts.ctxTool, opts.ctxOnly, opts.contextFiles, opts.guard.ctx
-				out, _, used, err := flash.run(func(choice profile) (string, string, error) {
-					return opts.guard.run(p.name, func() (string, string, error) {
-						if shadowPane != "" {
-							p.task = p.prompt
-							if err := writeSharedFile(runDir, p); err != nil {
-								return "", "", err
-							}
-							return runPaneChoice(&shadowPane, code, choice, runDir, p, opts.cache)
-						}
-						out, err := runHeadless(code, choice, p, sess, opts.cache)
-						return out, "", err
-					})
-				})
-				rec.PassSeconds[p.name] = int(time.Since(start).Seconds())
-				if rec.PassRunners == nil {
-					rec.PassRunners = map[string]string{}
-				}
-				if used.Harness != "" {
-					rec.PassRunners[p.name] = used.String()
-				}
-				return out, err
-			}}
-		for _, r := range []*roleRun{decider, flash} {
-			if choices, _ := r.available(); len(choices) == 0 {
-				rec.Notes = append(rec.Notes, r.unavailable().Error())
-			}
-		}
-		_, summary, shadowErr := sr.run()
-		rec.Shadow = summary
-		if shadowErr != nil {
-			diagnostic := "shadow persistence: " + shadowErr.Error()
-			rec.Shadow += "; " + diagnostic
-			rec.Notes = append(rec.Notes, diagnostic)
-		}
-		if shadowPool != nil {
-			shadowPool.close()
-		}
-	}
-	if dos != nil {
-		rec.DossierChars = dos.sizes()
-		rec.DossierManifest = dos.manifest(rec.Subject)
-		if err := dos.write(runDir); err != nil {
-			rec.PassErrors["all"] = "dossier persistence: " + err.Error()
-		}
-	}
-
 	prepareGateReview(rec, code)
 	offerGateAdjudication(s, rec, code, runDir, a.now(), modelOptions{AllowDegraded: *degraded})
 	if opts.guard != nil {
@@ -1457,7 +1274,7 @@ func cmdGate(a *app, args []string) (retErr error) {
 
 	view := gateInformation{Budget: rec.Budget, SchemaVersion: rec.SchemaVersion, State: rec.State, Completion: rec.Completion, Reasons: rec.Reduction.Reasons, NextActors: rec.NextActors, NextActions: rec.NextActions, Failures: rec.Reduction.Failures, Gate: rec.State, Spec: pos[0] + " (version " + hash + ")", Report: filepath.Join(runDir, "report.md"), Bench: benchID, Warning: treeWarning(rec), Cache: opts.cache, Tokens: rec.tokenSummary(), Notes: append([]string{}, rec.Notes...), PassErrors: rec.PassErrors}
 	if experiment {
-		view.Experiment = *expF + " (dossier " + opts.dossier + ", cache " + cacheName + ", groups " + strings.Join(onlyList, ", ") + ")"
+		view.Experiment = *expF + " (cache " + cacheName + ", groups " + strings.Join(onlyList, ", ") + ")"
 	}
 	concerns, unverified := 0, 0
 	for _, f := range rec.Findings {
@@ -1473,10 +1290,7 @@ func cmdGate(a *app, args []string) (retErr error) {
 	view.Concerns = fmt.Sprintf("%d verified, %d unverified", concerns, unverified)
 	view.Questions = fmt.Sprintf("%d need a decision", unanswered)
 	view.Dropped = fmt.Sprintf("%d claim(s) without real evidence", rec.Dropped)
-	if len(rec.DossierChars) > 0 {
-		view.Dossier = dossierSummary(opts.dossier, rec.DossierChars)
-	}
-	view.Coverage, view.Shadow = rec.coverageLine(), rec.Shadow
+	view.Coverage = rec.coverageLine()
 	if !experiment && (unanswered > 0 || len(rec.Questions) > 0) {
 		// Best effort: a failure here is a note and never changes the verdict.
 		if res, err := enrichGate(dir, code, src, rel, sp); err != nil {
@@ -1516,7 +1330,7 @@ func cmdGate(a *app, args []string) (retErr error) {
 // reply to rec. Inside herdr the workers are panes of one tab; if that tab
 // cannot be opened the passes do not run (a pass error), unless opts.headless
 // asks for headless passes. Outside herdr they run headless.
-func runGatePasses(dir, code, model string, passes []gatePass, rec *gateRecord, sp *spec, dos *dossierSet, opts gateOpts) {
+func runGatePasses(dir, code, model string, passes []gatePass, rec *gateRecord, sp *spec, opts gateOpts) {
 	if len(passes) == 0 {
 		return
 	}
@@ -1651,9 +1465,6 @@ func runGatePasses(dir, code, model string, passes []gatePass, rec *gateRecord, 
 					mu.Unlock()
 					return out, hit, err
 				}
-				if p.planner != nil && dos != nil {
-					p = planStage(p, run1, dir, rec, &mu, dos, opts)
-				}
 				start := time.Now()
 				hit := ""
 				run := func() (string, error) {
@@ -1695,7 +1506,6 @@ func runGatePasses(dir, code, model string, passes []gatePass, rec *gateRecord, 
 					}
 					err = schemaErr
 				}
-				missing := rec.missingItems(p.items)
 				mu.Unlock()
 				var repair *gatePass
 				if !retried && schemaErr != nil {
@@ -1704,9 +1514,6 @@ func runGatePasses(dir, code, model string, passes []gatePass, rec *gateRecord, 
 					rp.name = p.name + "#retry"
 					rp.task += "\nSchema repair: the earlier reply was incomplete or invalid: " + schemaErr.Error() + ". Return a complete replacement matching the schema above, with every required array explicitly present (use [] when empty)."
 					rp.prompt = rp.shared + rp.task
-					repair = &rp
-				} else if !retried && err == nil && len(missing) > 0 && p.retry != nil {
-					rp := p.retry(missing)
 					repair = &rp
 				}
 				if repair != nil {
@@ -1744,19 +1551,6 @@ func runGatePasses(dir, code, model string, passes []gatePass, rec *gateRecord, 
 					mu.Unlock()
 				}
 				mu.Lock()
-				if left := rec.missingItems(p.items); len(left) > 0 {
-					var ids []string
-					for _, it := range left {
-						ids = append(ids, it.ID)
-					}
-					incomplete := fmt.Sprintf("incomplete review: %d items had no verdict or unsupported candidates: %s", len(left), strings.Join(ids, ", "))
-					if err == nil {
-						answerState = reviewAnswerInvalid
-						err = errors.New(incomplete)
-					} else {
-						err = fmt.Errorf("%s; %w", incomplete, err)
-					}
-				}
 				if err != nil {
 					if rec.PassAnswerStates == nil {
 						rec.PassAnswerStates = map[string]reviewAnswerState{}
@@ -1798,38 +1592,6 @@ func runGatePasses(dir, code, model string, passes []gatePass, rec *gateRecord, 
 	}
 }
 
-// planStage runs the planner pass of a group pass, runs the lookups it asked
-// for and returns the group pass with them in its dossier. A planner that
-// fails, or whose reply holds no lookup, leaves the code dossier and a note.
-func planStage(p gatePass, run1 func(gatePass) (string, string, error), dir string, rec *gateRecord, mu *sync.Mutex, dos *dossierSet, opts gateOpts) gatePass {
-	pl := *p.planner
-	start := time.Now()
-	out, _, err := run1(pl)
-	var lks []lookup
-	if err == nil {
-		var ok bool
-		if lks, ok = decodeLookups(out); !ok {
-			err = fmt.Errorf("the reply held no lookups")
-		}
-	}
-	tokens, have := sessionTokens(filepath.Join(dir, "sessions", passFile(pl.name)))
-	mu.Lock()
-	rec.PassSeconds[pl.name] = int(time.Since(start).Seconds())
-	if have {
-		rec.PassTokens[pl.name] = tokens
-	}
-	if err != nil {
-		rec.Notes = append(rec.Notes, fmt.Sprintf("%s: %v; the pass used the code dossier only", pl.name, err))
-	}
-	mu.Unlock()
-	if err != nil {
-		return p
-	}
-	dropPassFiles(dir, pl.name, opts.keep)
-	dos.runLookups(p.planIDs, lks)
-	return p.rebuild()
-}
-
 // advisory reports a deterministic line that informs but never fails the gate.
 func advisory(d string) bool {
 	return strings.HasPrefix(d, "no `check` command") || strings.HasPrefix(d, "note: ")
@@ -1857,7 +1619,6 @@ type groupEntry struct {
 	Claims     []struct{ Claim, Evidence string }
 	Questions  []gateQuestion `json:"questions"`
 	Reuse      []struct{ Builds, Existing, Evidence, Why string }
-	Items      []itemVerdict `json:"items"`
 }
 
 // salvageEntries recovers answers from a reply that is not valid JSON as a
@@ -1898,7 +1659,6 @@ func salvageEntries(raw string, ids []string) (entries []groupEntry, ok bool) {
 		got = decode("claims", &e.Claims) || got
 		got = decode("questions", &e.Questions) || got
 		got = decode("reuse", &e.Reuse) || got
-		got = decode("items", &e.Items) || got
 		ok = ok || got
 		entries = append(entries, e)
 	}
@@ -1909,21 +1669,9 @@ func salvageEntries(raw string, ids []string) (entries []groupEntry, ok bool) {
 // scope and question checks only after validating the complete response.
 // Salvaged fragments remain diagnostic and cannot establish coverage.
 func applyGroup(key string, ids []string) func(string, *gateRecord, string, *spec) error {
-	return applyGroupItems(key, ids, nil)
-}
-
-// applyGroupItems is applyGroup for a pass with a reuse checklist: it also
-// records the verdict of each item of the packages (items by package id).
-func applyGroupItems(key string, ids []string, items map[string][]gateItem) func(string, *gateRecord, string, *spec) error {
-	if len(items) == 0 {
-		items = nil
-	}
 	return func(raw string, rec *gateRecord, repo string, sp *spec) error {
 		var r struct {
 			Packages []groupEntry `json:"packages"`
-		}
-		for _, id := range ids {
-			rec.ensureItems(items[id])
 		}
 		decodeErr := extractJSON(raw, &r)
 		if decodeErr != nil {
@@ -1932,15 +1680,8 @@ func applyGroupItems(key string, ids []string, items map[string][]gateItem) func
 				return decodeErr
 			}
 			rec.Salvaged = append(rec.Salvaged, key)
-		} else if err := validateEntries(r.Packages, ids, items, false); err != nil {
+		} else if err := validateEntries(r.Packages, ids); err != nil {
 			return err
-		}
-		if decodeErr == nil && items != nil {
-			for _, e := range r.Packages {
-				if len(items[e.ID]) == 0 && e.Reuse == nil {
-					return fmt.Errorf("package %s: reuse must be an explicit array without Builds items", e.ID)
-				}
-			}
 		}
 		for _, e := range r.Packages {
 			scopeFor(e.ID, scopeReply{WillChange: e.WillChange, Claims: e.Claims}, rec, repo, sp)
@@ -1962,8 +1703,7 @@ func applyGroupItems(key string, ids []string, items map[string][]gateItem) func
 				rec.Findings = append(rec.Findings, f)
 			}
 			if decodeErr == nil {
-				recordGateGroup(rec, key, raw, e, len(items[e.ID]) > 0)
-				rec.applyVerdicts(key, repo, items[e.ID], e.Items)
+				recordGateGroup(rec, key, raw, e)
 			}
 		}
 		if decodeErr != nil {
@@ -2113,9 +1853,6 @@ func writeGate(dir string, rec *gateRecord) error {
 	if t := rec.tokenSummary(); t != "" {
 		fmt.Fprintf(&r, "Tokens: %s\n\n", t)
 	}
-	if len(rec.DossierChars) > 0 {
-		fmt.Fprintf(&r, "Dossier: %s\n\n", dossierSummary(rec.Dossier, rec.DossierChars))
-	}
 	if rec.Checklist == "plain" {
 		r.WriteString("Reuse checklist: plain (spec text and author pointers; no lookups, no candidates)\n\n")
 	}
@@ -2214,58 +1951,10 @@ func slug(s string) string {
 // gateDryRun shows what a gate run would do without calling a model or
 // writing anything: the deterministic checks, then each pass with its
 // packages and prompt sizes (an estimated token is four characters).
-func gateDryRun(a *app, specArg, hash, code, src, rel string, cfg config, sp *spec, opts gateOpts, only map[string]bool, dump, dumpDec string) error {
+func gateDryRun(a *app, specArg, hash, code, src, rel string, cfg config, sp *spec, opts gateOpts, only map[string]bool) error {
 	det := gateDeterministic(code, cfg, sp, src)
 	groups := map[string][]string{}
-	var dos *dossierSet
-	if opts.dossier != "off" {
-		// The dossier is code, so it is built for real, but into a cache that is thrown away.
-		tmp, err := os.MkdirTemp("", "orch-dossier-")
-		if err != nil {
-			return err
-		}
-		defer os.RemoveAll(tmp)
-		env := newCtxEnv(code, ctxOpts{Cfg: cfg, Skip: []string{rel}})
-		env.CacheDir = tmp
-		dos = newDossierSet(env, sp, packageBlocks(sp, src))
-		dos.verdicts = opts.verdicts
-	}
-	passes := buildGatePasses(code, src, rel, sp, groups, dos, opts.dossier == "plan", only)
-	if dumpDec != "" {
-		if dos == nil {
-			return fail("--dump-decider needs candidates from lookups; use --dossier code or plan (off carries only the plain checklist)")
-		}
-		model := cfg.TriageModel
-		if model == "" {
-			model = triageModelDefault
-		}
-		root := ""
-		if s, err := a.site(); err == nil {
-			root = s.root
-		}
-		limit, how := shadowLimit(root)
-		body, line := deciderRequest(dos, sp, model, dumpDec, limit)
-		if body == nil {
-			return fail("--dump-decider: no item %q with candidates (use an item id such as api#1, or first)", dumpDec)
-		}
-		fmt.Fprintf(a.out, "decider request, NOT sent (%s; state limit: %s):\n%s\n", line, how, body)
-		return nil
-	}
-	if dump != "" {
-		dir := expandHome(dump)
-		if !filepath.IsAbs(dir) {
-			dir = filepath.Join(a.cwd, dir)
-		}
-		paths, err := dos.writeFiles(dir)
-		if err != nil {
-			return err
-		}
-		fmt.Fprintf(a.out, "dossier files (%d):\n", len(paths))
-		for _, p := range paths {
-			fmt.Fprintf(a.out, "  %s\n", p)
-		}
-		return nil
-	}
+	passes := buildGatePasses(code, src, rel, sp, groups, only)
 	tok := func(n int) int { return (n + 3) / 4 }
 	fmt.Fprintf(a.out, "gate dry run: %s (version %s); no model is called and nothing is written\n", agentScalar(specArg), hash)
 	fmt.Fprintf(a.out, "deterministic: %d issue(s)\n", len(det))
@@ -2276,27 +1965,13 @@ func gateDryRun(a *app, specArg, hash, code, src, rel string, cfg config, sp *sp
 	if cache == "" {
 		cache = "short"
 	}
-	fmt.Fprintf(a.out, "dossier: %s; cache: %s\n", opts.dossier, cache)
-	if dos == nil {
-		items, _ := specItems(sp)
-		n := 0
-		for _, its := range items {
-			n += len(its)
-		}
-		fmt.Fprintf(a.out, "reuse checklist: %d item(s), plain (spec text only; no lookups, no candidates)\n", n)
+	fmt.Fprintf(a.out, "cache: %s\n", cache)
+	items, _ := specItems(sp)
+	n := 0
+	for _, its := range items {
+		n += len(its)
 	}
-	if dos != nil {
-		n, withC := 0, 0
-		for _, p := range sp.packages {
-			for _, ic := range dos.cands[p.id] {
-				n++
-				if len(ic.Cands) > 0 {
-					withC++
-				}
-			}
-		}
-		fmt.Fprintf(a.out, "reuse checklist: %d item(s), %d with candidates; shadow judges: %s; group verdicts: %v\n", n, withC, opts.shadow, opts.verdicts)
-	}
+	fmt.Fprintf(a.out, "reuse checklist: %d item(s), plain (spec text only; no lookups, no candidates)\n", n)
 	total := 0
 	show := func(p gatePass, covers, label string) {
 		total += tok(len(p.shared) + len(p.task))
@@ -2314,30 +1989,9 @@ func gateDryRun(a *app, specArg, hash, code, src, rel string, cfg config, sp *sp
 		if ids, ok := groups[p.name]; ok {
 			covers = strings.Join(ids, ", ")
 		}
-		if p.planner != nil {
-			show(*p.planner, covers, "planner")
-		}
 		show(p, covers, "pass")
-		if dos != nil && groups[p.name] != nil {
-			sizes := map[string]int{}
-			for _, id := range groups[p.name] {
-				sizes[id] = len(dos.text(id))
-			}
-			fmt.Fprintf(a.out, "  dossier: %s\n", dossierSummary(opts.dossier, sizes))
-			for _, id := range groups[p.name] {
-				fmt.Fprintf(a.out, "    %s: %d chars (~%d tokens); %d item(s), reuse checklist %d chars\n", id, sizes[id], tok(sizes[id]), len(dos.items[id]), len(dos.docs[id].Reuse))
-			}
-		}
-	}
-	if opts.dossier == "plan" {
-		fmt.Fprintln(a.out, "note: the plan arm adds section 5 (the planner's lookups) to each dossier at run time; sizes above are the code part")
 	}
 	fmt.Fprintf(a.out, "totals: %d passes, %d workers, ~%d input tokens summed over the passes\n", len(passes), min(gateParallel, len(passes)), total)
-	if dos != nil {
-		for _, n := range dos.e.Notes() {
-			fmt.Fprintf(a.out, "note: %s\n", agentScalar(n))
-		}
-	}
 	return nil
 }
 
@@ -2355,4 +2009,12 @@ func explorationLines(dir string, rec *gateRecord) []string {
 		}
 	}
 	return out
+}
+
+var changeNoteRe = regexp.MustCompile(`\s*\([^)]*\)\s*$`)
+
+// changePath is the path in a model's will_change entry, without a trailing
+// remark such as "(new)" or "(new review queue, block list)".
+func changePath(f string) string {
+	return strings.Trim(changeNoteRe.ReplaceAllString(strings.TrimSpace(f), ""), "` ")
 }

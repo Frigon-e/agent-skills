@@ -126,7 +126,7 @@ func TestGateCheckoutMutationDiscardsAndStops(t *testing.T) {
 				}})
 			}
 			runner, _ := roleSite(profile{Harness: harness, Model: "test"}).newRoleRun("gate", modelOptions{})
-			runGatePasses(filepath.Join(h.tmp, "gate"), h.repo, "test", passes, rec, nil, nil, gateOpts{runner: runner, headless: true, ctxTool: ctxOn})
+			runGatePasses(filepath.Join(h.tmp, "gate"), h.repo, "test", passes, rec, nil, gateOpts{runner: runner, headless: true, ctxTool: ctxOn})
 			if kind == "none" {
 				if len(rec.TreeChanged) > 0 || applied.Load() != 12 || len(rec.PassErrors) > 0 {
 					t.Fatalf("unchanged: %+v, applied %d", rec, applied.Load())

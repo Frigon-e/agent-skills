@@ -20,9 +20,6 @@ const ctxQueryGuide = "guide: When you do not know where code lives, search one 
 	"  Weak: `authentication`, `upload service controller queue`. Better: `Code that checks a user's credentials and establishes a signed-in session.`\n" +
 	"  Read files with your native read tool (offset and limit for part of a file); orch ctx is for finding things, not for reading them; never use sed, cat, head or tail.\n" + ctxResultGuide
 
-// conceptQueryRule is the sentence of the plan-arm planner prompt.
-const conceptQueryRule = " A concept lookup's query must describe one behavior in the form `Code that <action> <entity>, when <trigger>, producing <result>`, with only what you know, and must not contain invented identifiers, frameworks or paths: use only names that appear in the spec or the dossier."
-
 const conceptTipText = `tip: describe the behavior: "Code that <action> <entity> ..." (one behavior per query)`
 
 var behaviorWords = map[string]bool{}
