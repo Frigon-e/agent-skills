@@ -1882,7 +1882,8 @@ func TestOrchestratorHooks(t *testing.T) {
 		deny  bool
 	}{
 		{"Write", map[string]any{"file_path": filepath.Join(h.tmp, "notes.md")}, false},
-		{"Agent", map[string]any{"subagent_type": "context-explorer"}, false},
+		{"Agent", map[string]any{"subagent_type": "context-explorer"}, true},
+		{"Agent", map[string]any{"subagent_type": "Explore"}, false},
 		{"Agent", map[string]any{"subagent_type": "implementer"}, true},
 		{"Agent", map[string]any{}, true},
 		{"Workflow", map[string]any{}, true},

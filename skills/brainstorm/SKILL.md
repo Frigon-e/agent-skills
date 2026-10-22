@@ -46,7 +46,7 @@ Do not start stage 2 on a frame the user has not accepted.
 Make many ideas before you judge any. Pick each agent's model from how hard
 its job is; do not move cheap work up a tier.
 
-1. **Facts (cheap):** one `context-explorer` (Haiku) collects what exists: related code, docs, earlier decisions,
+1. **Facts (cheap):** one `Explore` agent (Haiku) collects what exists: related code, docs, earlier decisions,
    parked ideas. Ask for a brief under 400 words, pointers not pasted
    code. Skip it when the topic does not touch existing code.
 2. **Lenses (mid tier):** three fresh agents in parallel, each with
