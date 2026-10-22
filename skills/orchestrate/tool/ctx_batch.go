@@ -16,7 +16,6 @@ import (
 // each answer capped. It is what an agent uses instead of a dozen turns.
 
 const (
-	ctxPlanMax    = 25   // lookups the gate lets a planner ask for, per package
 	ctxResultCaps = 1500 // characters kept of one lookup's answer in a batch
 	ctxReadLines  = 60
 )

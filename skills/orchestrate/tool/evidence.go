@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"slices"
 	"strings"
-	"time"
 )
 
 // These records are an additive contract, not a replacement for ctxView or the
@@ -65,25 +64,7 @@ type lookupCounts struct {
 	Total     *int `json:"total"`
 }
 
-// lookupTiming says when a dossier lookup started and how long it ran. It is
-// kept off the lookup's own JSON, so no record or digest of the lookup changes,
-// and written to the dossier manifest as lookup_timing.
-type lookupTiming struct {
-	ID        string `json:"id"`
-	StartedAt string `json:"started_at"`
-	ElapsedMS int64  `json:"elapsed_ms"`
-}
-
-// timed returns l with the time its search started and ran. Call it after the
-// lookup id is final.
-func (l evidenceLookup) timed(started time.Time, elapsed time.Duration) evidenceLookup {
-	l.Timing = &lookupTiming{ID: l.ID, StartedAt: started.UTC().Format(time.RFC3339Nano), ElapsedMS: elapsed.Milliseconds()}
-	return l
-}
-
 type evidenceLookup struct {
-	Timing *lookupTiming `json:"-"`
-
 	SchemaVersion   int                  `json:"schema_version"`
 	ID              string               `json:"id"`
 	SubjectID       string               `json:"subject_id,omitempty"`

@@ -68,9 +68,6 @@ type userConfig struct {
 	// AllowedWhenLimited adds models to the list only while a harness is
 	// limited, for example Haiku while pi is down.
 	AllowedWhenLimited []limitedAllow `toml:"allowed_when_limited"`
-	// ReuseShadow runs record-only judges of the gate's reuse checklist:
-	// off (default), decider, flash or both. They never change a verdict.
-	ReuseShadow string `toml:"reuse_shadow"`
 	// CtxLangs adds or overrides languages for `orch ctx` (see ctx_lang.go).
 	CtxLangs []langCfg `toml:"ctx_langs"`
 	// CtxIndex is the policy for the jbcontext index behind `orch ctx`: full
@@ -265,6 +262,14 @@ func userConfigPath() string {
 
 var userKeys = []string{"gate_budget", "ctx_trust", "roles", "max_leads", "claude_args", "pi_args", "lead_context_limit", "dispatch", "triage_model", "triage_mode", "quick_mode", "weak_models", "allowed_models", "allowed_when_limited"}
 
+// removedKeys are config keys of removed features. A file that still has one
+// loads as if it did not.
+var removedKeys = []string{"reuse_shadow"}
+
+func removedKey(k string) bool {
+	return slices.ContainsFunc(removedKeys, func(o string) bool { return strings.EqualFold(o, k) })
+}
+
 // decodeStrict refuses keys v has no field for. A key that belongs in the
 // other file gets a pointer there instead of "unknown key".
 func decodeStrict(path string, v any, otherKeys []string, otherFile string) error {
@@ -275,8 +280,11 @@ func decodeStrict(path string, v any, otherKeys []string, otherFile string) erro
 	if err != nil {
 		return fail("%s: %v", path, err)
 	}
-	if und := md.Undecoded(); len(und) > 0 {
-		k := und[0].String()
+	for _, key := range md.Undecoded() {
+		k := key.String()
+		if removedKey(k) {
+			continue
+		}
 		if slices.ContainsFunc(otherKeys, func(o string) bool { return strings.EqualFold(o, k) }) {
 			return fail("%s: %q is not allowed here; it belongs in %s", path, k, otherFile)
 		}
@@ -298,6 +306,9 @@ func readRepoConfig(path string, rc *repoConfig) error {
 			k := key.String()
 			if len(key) > 0 && strings.EqualFold(key[0], "bench_suite") {
 				rc.benchSuiteIgnored = true
+				continue
+			}
+			if removedKey(k) {
 				continue
 			}
 			if slices.ContainsFunc(userKeys, func(o string) bool { return strings.EqualFold(o, k) }) {
@@ -368,6 +379,10 @@ func loadConfig(repo string) (config, error) {
 		return cfg, fail("%s: ctx_index must be full, incremental or off, not %q", user, cfg.CtxIndex)
 	}
 	for name, r := range cfg.Roles {
+		if name == "shadow_flash" {
+			delete(cfg.Roles, name) // the role of the removed shadow judges
+			continue
+		}
 		if !slices.Contains(modelRoles, name) {
 			return cfg, fail("%s: unknown role %q", user, name)
 		}

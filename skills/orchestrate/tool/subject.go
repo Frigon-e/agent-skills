@@ -305,8 +305,6 @@ type gateReviewPolicy struct {
 	ContextFiles string `json:"context_files"`
 	CtxShell     string `json:"ctx_shell"`
 	CtxProfile   string `json:"ctx_profile"`
-	Dossier      string `json:"dossier"`
-	Verdicts     bool   `json:"verdicts"`
 }
 
 func (s gateSubject) digest() string { s.ID = ""; return subjectJSONDigest(s) }

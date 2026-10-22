@@ -183,7 +183,6 @@ func (e *ctxEnv) assemble(pl *briefPlan) *ctxBrief {
 				continue
 			}
 			er := dossierSource(e, path, ln, ln)
-			d.Evidence = append(d.Evidence, er)
 			callers := fmt.Sprint(df.Total)
 			if (!df.Func && !df.ByName) || df.RefsUnknown || len(df.Errors) > 0 {
 				callers = "unknown"
@@ -381,7 +380,6 @@ func (e *ctxEnv) assemble(pl *briefPlan) *ctxBrief {
 				end = min(len(ls), min(end, start+ctxSnippet-1))
 				preview = append([]string{}, ls[start-1:end]...)
 				er := dossierSource(e, en.path, start, end)
-				d.Evidence = append(d.Evidence, er)
 				if d.nativeLike == nil {
 					d.nativeLike = map[string]briefNativeLike{}
 				}
@@ -641,18 +639,10 @@ func (pl *briefPlan) makeQueries() {
 	}
 	pl.qnames = names
 	pl.purpose = keyPhrase(pl.in.Title, 8)
-	if pl.purpose == "" && len(pl.builds) > 0 {
-		pl.purpose = keyPhrase(pl.builds[0], 8)
-	}
 	var qs []string
 	push := func(q string) {
 		if len(strings.Fields(q)) >= queryMinWords {
 			qs = addUniq(qs, q, 40)
-		}
-	}
-	for i, l := range pl.builds {
-		if i < 3 {
-			push(sentenceQuery(l))
 		}
 	}
 	for i, l := range pl.accept {
@@ -660,14 +650,12 @@ func (pl *briefPlan) makeQueries() {
 			push(behaviourQuery(l))
 		}
 	}
-	if len(pl.builds) == 0 {
-		if push(sentenceQuery(pl.in.Title)); len(qs) == 0 {
-			body := pl.in.Body
-			if body == "" {
-				body = pl.in.Text
-			}
-			push(sentenceQuery(body))
+	if push(sentenceQuery(pl.in.Title)); len(qs) == 0 {
+		body := pl.in.Body
+		if body == "" {
+			body = pl.in.Text
 		}
+		push(sentenceQuery(body))
 	}
 	pl.concepts = qs
 }

@@ -1335,3 +1335,24 @@ func offerGateAdjudication(s site, rec *gateRecord, repo, dir string, now time.T
 		rec.Reasons = append(rec.Reasons, "adjudication audit write failed: "+err.Error())
 	}
 }
+
+// recordAdjudicationShadow is an explicit experiment hook, never called by the
+// ordinary gate. It owns a separate budget, records packets/replies/usage/later
+// outcomes and never applies a reply to the production review.
+func recordAdjudicationShadow(enabled bool, rr *roleRun, limits adjudicationLimits, env adjudicationEnvelope, run adjudicationRunner, path, laterOutcome string) (*adjudicationAudit, error) {
+	if !enabled || len(env.Packets) == 0 {
+		return nil, nil
+	}
+	budget := newRunBudget(limits, time.Now())
+	audit := executeAdjudication(rr, budget, env, run)
+	audit.LaterOutcome = laterOutcome
+	record := struct {
+		Budget *RunBudget        `json:"experiment_budget"`
+		Audit  adjudicationAudit `json:"adjudication"`
+	}{budget, audit}
+	raw, err := json.MarshalIndent(record, "", "  ")
+	if err == nil {
+		err = os.WriteFile(path, append(raw, '\n'), 0o600)
+	}
+	return &audit, err
+}

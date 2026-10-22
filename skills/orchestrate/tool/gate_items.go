@@ -16,7 +16,6 @@ import (
 // search lines retrieve candidates; the deliverable text is for humans.
 
 const (
-	itemPageMain  = 12 // items before "more items"
 	verdictReuse  = "reuse"
 	verdictExtend = "extend"
 	verdictNew    = "new"
@@ -197,44 +196,6 @@ func writeItems(dir string, items map[string][]gateItem, order []string) error {
 
 // ---- verdicts ----
 
-// flexStr decodes a JSON string, null or any other value into a string.
-type flexStr string
-
-func (f *flexStr) UnmarshalJSON(b []byte) error {
-	var s string
-	if json.Unmarshal(b, &s) == nil {
-		*f = flexStr(s)
-		return nil
-	}
-	if t := strings.TrimSpace(string(b)); t != "null" {
-		*f = flexStr(t)
-	} else {
-		*f = ""
-	}
-	return nil
-}
-
-// itemVerdict is the model's answer for one item.
-type itemVerdict struct {
-	EvidenceIDs      []string      `json:"evidence_ids,omitempty"`
-	MatchingBehavior string        `json:"matching_behavior,omitempty"`
-	MissingBehavior  string        `json:"missing_behavior,omitempty"`
-	Assessment       *claimSupport `json:"support_assessment,omitempty"`
-	Item             string        `json:"item"`
-	Verdict          string        `json:"verdict"`
-	Candidate        flexStr       `json:"candidate"`
-	Why              string        `json:"why"`
-	fields           map[string]json.RawMessage
-}
-
-func (v *itemVerdict) UnmarshalJSON(b []byte) error {
-	type plain itemVerdict
-	if err := json.Unmarshal(b, (*plain)(v)); err != nil {
-		return err
-	}
-	return json.Unmarshal(b, &v.fields)
-}
-
 // gateItemResult is one item in gate.json: its verdict and where it came from.
 type gateItemResult struct {
 	AnswerID    string `json:"review_answer_id,omitempty"`
@@ -275,118 +236,6 @@ func itemKey(pkg, id string) string {
 	return id
 }
 
-// ensureItems adds an empty result for each item not yet in the record.
-func (r *gateRecord) ensureItems(items []gateItem) {
-	have := map[string]bool{}
-	for _, it := range r.Items {
-		have[it.ID] = true
-	}
-	for _, it := range items {
-		if !have[it.ID] {
-			r.Items = append(r.Items, gateItemResult{ID: it.ID, Package: it.Package, Text: it.Text, Revision: it.Revision})
-		}
-	}
-}
-
-// itemFindings turns the verdicts of one package into results and findings.
-// reuse stays a "reuse" finding (a concern); extend is an "extend" finding of
-// severity note that names where the variation goes. An item that already has
-// a supported verdict is left alone, so a retry only fills gaps.
-func (r *gateRecord) applyVerdicts(pass, repo string, items []gateItem, vs []itemVerdict) {
-	byID := map[string]itemVerdict{}
-	for _, v := range vs {
-		if len(items) == 0 {
-			break
-		}
-		byID[itemKey(items[0].Package, v.Item)] = v
-	}
-	for _, it := range items {
-		v, ok := byID[it.ID]
-		verdict := normVerdict(v.Verdict)
-		if !ok || verdict == "" {
-			continue
-		}
-		for i := range r.Items {
-			res := &r.Items[i]
-			if res.ID != it.ID || res.covered() {
-				continue
-			}
-			previous := *res
-			res.Verdict, res.Candidate, res.Why, res.Pass = verdict, strings.TrimSpace(string(v.Candidate)), v.Why, pass
-			res.Verified = false
-			if res.Candidate == "null" {
-				res.Candidate = ""
-			}
-			switch verdict {
-			case verdictReuse, verdictExtend:
-				res.Verified = evidenceHolds(repo, res.Candidate)
-				f := gateFinding{Severity: "concern", Where: "package " + it.Package, Evidence: res.Candidate, Why: v.Why, Source: "reuse", Verified: res.Verified}
-				f.Claim = it.Text + " may duplicate " + res.Candidate
-				if verdict == verdictExtend {
-					f.Severity, f.Source = "note", "extend"
-					f.Claim = it.Text + " is a variation of " + res.Candidate
-				}
-				if !f.Verified {
-					r.Dropped++
-				}
-				r.Findings = append(r.Findings, f)
-			}
-			if r.Review != nil {
-				raw, _ := json.Marshal(v)
-				actor := strings.TrimSuffix(pass, "#retry")
-				recordGateAnswer(r, it.ID, "reuse", actor, string(raw), reviewJudgment(verdict), v.Why, v.MatchingBehavior, v.MissingBehavior)
-				answerID := "answer-" + subjectJSONDigest([]string{it.ID + "/reuse", string(raw), actor})
-				valid := false
-				for j := range r.Review.Answers {
-					a := &r.Review.Answers[j]
-					if a.ID != answerID {
-						continue
-					}
-					if v.Assessment == nil || v.Assessment.SchemaVersion != evidenceSchemaVersion || v.Assessment.State != claimSupported || strings.TrimSpace(v.Assessment.Rationale) == "" || (verdict == verdictReuse || verdict == verdictExtend) && !res.Verified {
-						a.Support = nil
-						continue
-					}
-					replyID := addGateObservation(r, it.ID+"/reuse", string(raw), actor)
-					a.EvidenceIDs = []string{replyID}
-					a.Support = &claimSupport{SchemaVersion: evidenceSchemaVersion, State: claimSupported, Assessor: actor, Method: "model", Rationale: v.Assessment.Rationale, EvidenceIDs: []string{replyID}}
-					if verdict == verdictReuse || verdict == verdictExtend {
-						eid := captureGateSource(r, repo, res.Candidate, actor)
-						if eid == "" {
-							a.Support = nil
-							continue
-						}
-						a.EvidenceIDs = append(a.EvidenceIDs, eid)
-						a.Support.EvidenceIDs = []string{eid}
-					}
-					for _, eid := range v.EvidenceIDs {
-						if !containsReviewID(a.EvidenceIDs, eid) {
-							a.EvidenceIDs = append(a.EvidenceIDs, eid)
-						}
-						if !containsReviewID(a.Support.EvidenceIDs, eid) {
-							a.Support.EvidenceIDs = append(a.Support.EvidenceIDs, eid)
-						}
-					}
-					valid = verdict != verdictUnclr && strings.TrimSpace(v.Why) != "" && (verdict != verdictNew || adequateReviewSearch(r.Review.Policy.Packet, a.EvidenceIDs...)) && (verdict == verdictNew || strings.TrimSpace(v.MatchingBehavior) != "") && (verdict != verdictExtend || strings.TrimSpace(v.MissingBehavior) != "") && a.Validate(reviewItem{SchemaVersion: evidenceSchemaVersion, ID: it.ID, Revision: it.Revision, Package: it.Package, Requirement: it.Text, Checks: []string{"reuse"}}, r.Review.Policy.Packet, r.Subject, r.Review.Policy.CurrentHashes) == nil
-				}
-				// A bounded supporting repair may replace only this exact unresolved
-				// claim. Changed judgments/candidates remain competing claims. Findings,
-				// especially accepted blockers, are never superseded by answer repair.
-				if valid && strings.HasSuffix(pass, "#retry") && previous.AnswerID != "" && previous.AnswerID != answerID && previous.Verdict == res.Verdict && previous.Candidate == res.Candidate && strings.TrimSuffix(previous.Pass, "#retry") == actor {
-					for j, old := range r.Review.Answers {
-						if old.ID == previous.AnswerID && old.ItemID == it.ID && old.ItemRevision == it.Revision && old.CheckID == "reuse" {
-							r.Review.Repairs = append(r.Review.Repairs, reviewAnswerRepair{Previous: old, ReplacementID: answerID, Actor: actor, Rationale: "Bounded support repair of the same judgment and candidate"})
-							r.Review.Answers = append(r.Review.Answers[:j], r.Review.Answers[j+1:]...)
-							break
-						}
-					}
-				}
-				res.AnswerID = answerID
-				res.AnswerValid = &valid
-			}
-		}
-	}
-}
-
 // covered requires a valid candidate for reuse/extend, not just a verdict word.
 func (r gateItemResult) covered() bool {
 	if r.AnswerValid != nil && !*r.AnswerValid {
@@ -399,23 +248,6 @@ func (r gateItemResult) covered() bool {
 		return true
 	}
 	return false
-}
-
-// missingItems lists the items that still need a supported verdict.
-func (r *gateRecord) missingItems(items []gateItem) []gateItem {
-	done := map[string]bool{}
-	for _, res := range r.Items {
-		if res.covered() {
-			done[res.ID] = true
-		}
-	}
-	var out []gateItem
-	for _, it := range items {
-		if !done[it.ID] {
-			out = append(out, it)
-		}
-	}
-	return out
 }
 
 // coverageLine is the summary shown on stdout, in the report and by compare.
@@ -436,19 +268,38 @@ func (r *gateRecord) coverageLine() string {
 		len(r.Items), len(r.Items)-none, n[verdictReuse], n[verdictExtend], n[verdictNew], n[verdictUnclr], none)
 }
 
-// itemEntry is the part of a group reply the verdict pass reads back.
-type itemsReply struct {
-	Packages []groupEntry `json:"packages"`
+// plainChecklistHeader is the header of the reuse checklist.
+const plainChecklistHeader = "### 3a. Reuse checklist (each requirement remains a separate decision)"
+
+// plainChecklist is the reuse checklist: the items of the spec with their
+// author's pointers and search lines as plain text. No lookup ran for it, so it
+// holds no candidates.
+func plainChecklist(items []gateItem) string {
+	if len(items) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("\n\n" + plainChecklistHeader + "\nNo code lookups were run for this list: decide reuse or new for every item, one entry each, and search the repo yourself before you claim an existing match.\n")
+	for _, it := range items {
+		fmt.Fprintf(&b, "- `%s` %s\n", it.ID, it.Text)
+		for _, p := range it.Reuse {
+			fmt.Fprintf(&b, "  author's pointer: `%s`\n", p)
+		}
+		for _, q := range it.Queries {
+			fmt.Fprintf(&b, "  search: `%s` (not run)\n", q)
+		}
+	}
+	return b.String()
 }
 
-// retryAnswers decodes a coverage retry; only a complete JSON reply can
-// establish coverage.
-func retryAnswers(raw string) ([]groupEntry, bool) {
-	var r itemsReply
-	if err := extractJSON(raw, &r); err == nil {
-		return r.Packages, true
+// specItems lists the items of every package of the spec, by package, and the
+// package ids in spec order.
+func specItems(sp *spec) (map[string][]gateItem, []string) {
+	items := map[string][]gateItem{}
+	var order []string
+	for _, p := range sp.packages {
+		order = append(order, p.id)
+		items[p.id] = packageItems(p)
 	}
-	// A fragment can be retained for diagnosis by the group decoder, but
-	// cannot establish review completion or item coverage.
-	return nil, false
+	return items, order
 }

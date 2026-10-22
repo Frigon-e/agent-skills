@@ -443,13 +443,9 @@ func benchRecordWith(a *app, source, suite, label, arm string, opts benchRecordO
 			r.Inputs.Repo = benchSourceRepo(dir)
 		}
 		r.Config.Runners = rec.PassRunners
-		r.Config.Dossier = rec.Dossier
 		r.Config.Cache = rec.Cache
 		r.Config.CtxTool = rec.CtxTool
 		r.Config.ContextFiles = rec.ContextFiles
-		if r.Config.Shadow == "" {
-			r.Config.Shadow = rec.Shadow
-		}
 		names := map[string]bool{}
 		for k := range rec.PassSeconds {
 			names[k] = true
