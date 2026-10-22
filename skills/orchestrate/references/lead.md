@@ -44,7 +44,10 @@ branch changed compared to `main`: tests in changed test files, tests in
 `x_test.go` and `x_*_test.go` for each changed `x.go`, and tests that mention
 a declaration the diff added or changed. `--print` shows the pattern and count
 without running; `--run-extra <regex>` adds tests; `--base` changes the
-comparison branch. Do not run the full suite; `--all` exists but needs the
+comparison branch. When your change alters a default or a mode, search the
+tests for the old default (`orch ctx text`) and run the neighbouring test
+files by hand: it selects only tests that reference changed code. Do not run
+the full suite; `--all` exists but needs the
 user's say-so.
 
 ## Context budget

@@ -133,9 +133,10 @@ type gateRecord struct {
 	PassTokens        map[string]passTokens        `json:"pass_tokens,omitempty"`  // model usage per pass, when its session recorded any
 	Dossier           string                       `json:"dossier,omitempty"`      // off, code or plan
 	DossierChars      map[string]int               `json:"dossier_chars,omitempty"`
-	Cache             string                       `json:"cache,omitempty"`  // short or long: the provider prompt-cache retention asked for
-	Items             []gateItemResult             `json:"items,omitempty"`  // one result per item of a package, with its verdict
-	Shadow            string                       `json:"shadow,omitempty"` // the shadow judges that ran (record only)
+	Checklist         string                       `json:"checklist,omitempty"` // plain: the reuse checklist of --dossier off, spec text only, no candidates
+	Cache             string                       `json:"cache,omitempty"`     // short or long: the provider prompt-cache retention asked for
+	Items             []gateItemResult             `json:"items,omitempty"`     // one result per item of a package, with its verdict
+	Shadow            string                       `json:"shadow,omitempty"`    // the shadow judges that ran (record only)
 	Notes             []string                     `json:"notes,omitempty"`
 	Experiment        string                       `json:"experiment,omitempty"`
 	Only              []string                     `json:"only,omitempty"`
@@ -955,12 +956,21 @@ func buildGatePasses(code, src, rel string, sp *spec, groups map[string][]string
 		if dos != nil && dos.verdicts && dos.hasItems(ids) {
 			gitems = dos.itemsOf(ids)
 		}
+		plain := ""
+		if dos == nil {
+			var gi []gateItem
+			for _, pkg := range g {
+				gi = append(gi, packageItems(pkg)...)
+			}
+			plain = plainChecklist(gi)
+		}
 		mk := func() gatePass {
 			own, with := gatePackageOwn(joined), ""
 			if dos != nil {
 				own += dos.section(ids)
 				with = dossierSentence
 			}
+			own += plain
 			reuseTask := ` (3) reuse: for each package, list the things it says it will newly build (files, functions, tables, endpoints, templates, jobs) for which the repo already has something that does the same job. Search with grep and find before you claim it, and cite the existing code as path:line. An empty list is a valid answer. Do not list things the package is told to modify or extend.`
 			schema := `{"packages":[{"id":"","will_change":["path"],"claims":[{"claim":"","evidence":"path:line"}],"questions":[{"question":"","answered_by":"","changes_result":false}],"reuse":[{"builds":"","existing":"","evidence":"path:line","why":""}]}]}`
 			budget := budgetSentence(gateTurnsBase + gateTurnsPerPackage*len(ids))
@@ -1219,7 +1229,7 @@ func cmdGate(a *app, args []string) (retErr error) {
 		return err
 	}
 	if opts.verdicts && opts.dossier == "off" {
-		return fail("--verdicts needs a dossier")
+		return fail("--verdicts needs lookup results; use --dossier code or plan (off carries only the plain checklist)")
 	}
 	var only map[string]bool
 	var onlyList []string
@@ -1229,7 +1239,7 @@ func cmdGate(a *app, args []string) (retErr error) {
 		}
 	}
 	if *dump != "" && (!*dry || opts.dossier == "off") {
-		return fail("--dump-dossier needs --dry-run and a dossier (--dossier code or plan)")
+		return fail("--dump-dossier needs --dry-run and a dossier (--dossier code or plan; off has no dossier files)")
 	}
 	if *dry {
 		return gateDryRun(a, pos[0], hash, code, src, rel, s.cfg, sp, opts, only, *dump, *dumpDec)
@@ -1296,6 +1306,18 @@ func cmdGate(a *app, args []string) (retErr error) {
 	for _, p := range passes {
 		if rec.BenchConfig.Budgets != nil {
 			rec.BenchConfig.Budgets[p.name] = p.budget
+		}
+	}
+	if dos == nil {
+		items, order := specItems(sp)
+		if err := writeItems(runDir, items, order); err != nil {
+			rec.PassErrors["all"] = err.Error()
+		}
+		for _, its := range items {
+			if len(its) > 0 {
+				rec.Checklist = "plain"
+				break
+			}
 		}
 	}
 	if dos != nil {
@@ -2093,6 +2115,9 @@ func writeGate(dir string, rec *gateRecord) error {
 	if len(rec.DossierChars) > 0 {
 		fmt.Fprintf(&r, "Dossier: %s\n\n", dossierSummary(rec.Dossier, rec.DossierChars))
 	}
+	if rec.Checklist == "plain" {
+		r.WriteString("Reuse checklist: plain (spec text and author pointers; no lookups, no candidates)\n\n")
+	}
 	if c := rec.coverageLine(); c != "" {
 		r.WriteString(c + "\n\n")
 	}
@@ -2207,7 +2232,7 @@ func gateDryRun(a *app, specArg, hash, code, src, rel string, cfg config, sp *sp
 	passes := buildGatePasses(code, src, rel, sp, groups, dos, opts.dossier == "plan", only)
 	if dumpDec != "" {
 		if dos == nil {
-			return fail("--dump-decider needs a dossier")
+			return fail("--dump-decider needs candidates from lookups; use --dossier code or plan (off carries only the plain checklist)")
 		}
 		model := cfg.TriageModel
 		if model == "" {
@@ -2251,6 +2276,14 @@ func gateDryRun(a *app, specArg, hash, code, src, rel string, cfg config, sp *sp
 		cache = "short"
 	}
 	fmt.Fprintf(a.out, "dossier: %s; cache: %s\n", opts.dossier, cache)
+	if dos == nil {
+		items, _ := specItems(sp)
+		n := 0
+		for _, its := range items {
+			n += len(its)
+		}
+		fmt.Fprintf(a.out, "reuse checklist: %d item(s), plain (spec text only; no lookups, no candidates)\n", n)
+	}
 	if dos != nil {
 		n, withC := 0, 0
 		for _, p := range sp.packages {
