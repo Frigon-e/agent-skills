@@ -22,6 +22,7 @@ type spec struct {
 	sections map[string]string
 	packages []*specPackage
 	problems []string
+	lines    map[string][2]int // 1-based line ranges in the spec file: "## Name" sections and "### id" packages
 }
 
 func (sp *spec) add(format string, a ...any) {
@@ -386,6 +387,7 @@ func cmdPlan(a *app, args []string) error {
 	}
 	sp := parseSpec(string(src))
 	sp.validate()
+	sp.lines = specRanges(string(src))
 	if !*skipGate {
 		if passed, reason := gateApproval(s.root, top, src); !passed {
 			sp.add("the gate has not passed for this version of the spec and checkout (%s): run `orch gate %s`, fix what it reports, and rerun (or pass --skip-gate with the user's agreement)", reason, pos[0])
@@ -545,31 +547,103 @@ func (sp *spec) taskOpts(p *specPackage, rel, base string) taskOpts {
 	if in == "" {
 		in = "research only, no repo edits"
 	}
-	var others []string
-	for _, q := range sp.packages {
-		if q != p {
-			others = append(others, q.owns...)
-		}
-	}
-	out := "anything not listed in In"
-	if len(others) > 0 {
-		out = "files owned by other packages of this spec: " + strings.Join(others, ", ")
-	}
+	out := sp.scopeOut(p, rel)
 	auth := sp.sections["Authority"]
 	return taskOpts{
 		id: p.id, kind: p.kind, harness: p.harness, model: p.model, effort: p.effort, base: base,
 		deps: p.deps, spec: rel + "#" + p.id, owns: p.owns, specHash: specInputsHash(p),
 		fill: map[string]string{
-			"Intent": fmt.Sprintf("%s: %s. The whole feature is in `%s`; read its Behaviour and Design rules first.", sp.title, p.title, rel),
+			"Intent": fmt.Sprintf("%s: %s. The feature is specified in `%s`; read the sections under Pointers, not the whole file.", sp.title, p.title, rel),
 			"Scope":  "In: " + in + "\nOut: " + out,
-			"Pointers": fmt.Sprintf("`%s` ## Behaviour - what the feature does\n`%s` ## Design rules - decisions already made\n`%s` ### %s - this package",
-				rel, rel, rel, p.id),
+			"Pointers": fmt.Sprintf("%s - what the feature does\n%s - decisions already made\n%s - this package",
+				sp.cite(rel, "## Behaviour", "Behaviour"), sp.cite(rel, "## Design rules", "Design rules"), sp.cite(rel, "### "+p.id, p.id)),
 			"Spec":       specText(p),
 			"Acceptance": p.acceptance,
 			"Authority": fmt.Sprintf("May decide: %s\nMust escalate: %s\nNever: %s",
 				labelled(auth, "May decide"), labelled(auth, "Must escalate"), labelled(auth, "Never")),
 		},
 	}
+}
+
+// scopeOutMax is the longest file list a brief's Out line spells out; past it
+// the line names the other packages and points at their owns lines.
+const scopeOutMax = 1000
+
+// scopeOut is the Out line of a package's Scope.
+func (sp *spec) scopeOut(p *specPackage, rel string) string {
+	var others, ids []string
+	for _, q := range sp.packages {
+		if q != p {
+			others = append(others, q.owns...)
+			ids = append(ids, q.id)
+		}
+	}
+	if len(others) == 0 {
+		return "anything not listed in In"
+	}
+	list := strings.Join(others, ", ")
+	if len(list) <= scopeOutMax {
+		return "files owned by other packages of this spec: " + list
+	}
+	return fmt.Sprintf("every file owned by another package of this spec (%d files cut from this list; each package's `owns:` line is in %s): %s",
+		len(others), sp.cite(rel, "## Packages", "Packages"), strings.Join(ids, ", "))
+}
+
+// cite is a pointer to a spec section as `path:first-last`, or the heading
+// when the line range is not known.
+func (sp *spec) cite(rel, heading, key string) string {
+	if r, ok := sp.lines[key]; ok {
+		return fmt.Sprintf("`%s:%d-%d` %s", rel, r[0], r[1], heading)
+	}
+	return fmt.Sprintf("`%s` %s", rel, heading)
+}
+
+// specRanges maps "## Name" sections (by name) and "### id: title" packages
+// (by id) to their 1-based line ranges in src. A range ends before the next
+// heading of the same or a higher level; headings inside fences are ignored.
+func specRanges(src string) map[string][2]int {
+	out := map[string][2]int{}
+	type open struct {
+		key   string
+		level int
+		start int
+	}
+	var stack []open
+	closeTo := func(level, end int) {
+		for len(stack) > 0 && stack[len(stack)-1].level >= level {
+			o := stack[len(stack)-1]
+			stack = stack[:len(stack)-1]
+			out[o.key] = [2]int{o.start, end}
+		}
+	}
+	lines := strings.Split(strings.ReplaceAll(src, "\r\n", "\n"), "\n")
+	fenced := false
+	for i, l := range lines {
+		if strings.HasPrefix(strings.TrimSpace(l), "```") {
+			fenced = !fenced
+			continue
+		}
+		if fenced {
+			continue
+		}
+		switch {
+		case strings.HasPrefix(l, "## "):
+			closeTo(2, i)
+			stack = append(stack, open{strings.TrimSpace(l[3:]), 2, i + 1})
+		case strings.HasPrefix(l, "### "):
+			closeTo(3, i)
+			id, _, _ := strings.Cut(strings.TrimSpace(l[4:]), ":")
+			stack = append(stack, open{strings.TrimSpace(id), 3, i + 1})
+		}
+	}
+	closeTo(2, len(lines))
+	for k, r := range out {
+		for r[1] > r[0] && strings.TrimSpace(lines[r[1]-1]) == "" {
+			r[1]--
+		}
+		out[k] = r
+	}
+	return out
 }
 
 // specText is the Spec section of a task: the package body, then its Builds

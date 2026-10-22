@@ -84,6 +84,13 @@ None.
   decisions in Design rules, but keep a rule that concerns one area inside
   that package's body: every lead and every per-package gate pass reads the
   shared sections in full.
+- **Size.** Every character of a brief is re-read by its lead on every turn,
+  so a package body is a cost to each lead: keep a brief under 15 KB
+  (`orch check` warns above 15000 characters and names the three largest
+  sections). Cite other docs and spec sections by line range
+  (`path:first-last`), do not paste them into a package, and do not point a
+  package at a whole file larger than 8 KB. A package body is never cut to
+  save space: split the package instead.
 - **`## Packages`** holds one `### <id>: <title>` block per package:
   - `<id>` becomes the task id (lowercase, starts with a letter, at most
     27 characters).
@@ -227,8 +234,11 @@ by a task from somewhere else.
 Each task.md points to the spec (`spec: <path>#<id>` in its front matter)
 and copies only the package's own text: Intent names the feature and the
 package, Scope In is `owns` and Scope Out is the other packages' files,
-Pointers name the spec's sections, Spec is the package body, Acceptance
-and Authority come from the spec. A rerun skips tasks it made before
+Pointers cite the spec's sections as `path:first-last` line ranges, Spec is
+the package body, Acceptance and Authority come from the spec. Scope Out
+lists the other packages' files while that list stays under 1000
+characters; past that it names the other packages and says where their
+`owns:` lines are. A rerun skips tasks it made before
 (`exists`), so it is safe to run again after adding packages. A task also
 stores `spec_hash`; if its package changed since, the rerun reports it
 `stale`, exits 1 and rewrites nothing. Close its lead, remove the task

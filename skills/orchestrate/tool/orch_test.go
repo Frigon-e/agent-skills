@@ -2652,9 +2652,9 @@ func TestPlan(t *testing.T) {
 	b, _ := os.ReadFile(filepath.Join(h.dir("api"), "task.md"))
 	text := string(b)
 	wantContains(t, text, "id: api\nspec: spec.md#api\n", "owns: internal/api.go\n", "depends_on: [store]", "effort: medium",
-		"Transfer queue: Package api. The whole feature is in `spec.md`",
+		"Transfer queue: Package api. The feature is specified in `spec.md`; read the sections under Pointers",
 		"In: internal/api.go\nOut: files owned by other packages of this spec: internal/store.go, migrations/\n",
-		"`spec.md` ### api - this package", "Build api.", "Tests for api pass.",
+		"`spec.md:", "### api - this package", "Build api.", "Tests for api pass.",
 		"May decide: names\nMust escalate: API shape\nNever: push")
 	if strings.Contains(text, "{{") {
 		t.Errorf("placeholders left:\n%s", text)
@@ -2669,6 +2669,61 @@ func TestPlan(t *testing.T) {
 	problems, _, _ = checkTask(h.a.siteRoot(t), "api")
 	if len(problems) != 1 || !strings.Contains(problems[0], `depends_on: "store" is not done yet`) {
 		t.Errorf("api should only wait on store: %v", problems)
+	}
+}
+
+func TestCheckWarnsOnLargeBrief(t *testing.T) {
+	h := setup(t)
+	h.commitSpec(threePkgSpec())
+	h.must("plan", "spec.md", "--skip-gate")
+	root := h.a.siteRoot(t)
+	_, warnings, err := checkTask(root, "store")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, w := range warnings {
+		if strings.Contains(w, "characters") {
+			t.Errorf("small brief warned about size: %s", w)
+		}
+	}
+	path := filepath.Join(h.dir("store"), "task.md")
+	b, _ := os.ReadFile(path)
+	big := strings.Replace(string(b), "\n# Acceptance\n", "\n# Padding\n\n"+strings.Repeat("x", briefCharLimit)+"\n\n# Acceptance\n", 1)
+	if err := os.WriteFile(path, []byte(big), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	problems, warnings, err := checkTask(root, "store")
+	if err != nil || len(problems) != 0 {
+		t.Fatalf("a large brief must only warn: %v %v", problems, err)
+	}
+	found := false
+	for _, w := range warnings {
+		if strings.Contains(w, "characters") && strings.Contains(w, "Largest sections: Padding (") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("no size warning naming Padding: %v", warnings)
+	}
+}
+
+func TestPlanScopeOutIsCapped(t *testing.T) {
+	h := setup(t)
+	spec := planHeader
+	for i := 0; i < 30; i++ {
+		spec += planPkg(fmt.Sprintf("pkg%d", i), "kind: ship\nowns: "+strings.Repeat("internal/some/long/dir/name/", 2)+fmt.Sprintf("file%d.go", i), "")
+	}
+	h.commitSpec(spec + planTail)
+	h.must("plan", "spec.md", "--skip-gate")
+	b, _ := os.ReadFile(filepath.Join(h.dir("pkg3"), "task.md"))
+	text := string(b)
+	wantContains(t, text, "Out: every file owned by another package of this spec (29 files cut from this list;", "pkg0, pkg1,", "`spec.md:")
+	if strings.Contains(text, "file0.go") {
+		t.Errorf("file list not cut:\n%s", text)
+	}
+	problems, _, _ := checkTask(h.a.siteRoot(t), "pkg3")
+	if len(problems) != 0 {
+		t.Errorf("capped brief should pass check: %v", problems)
 	}
 }
 

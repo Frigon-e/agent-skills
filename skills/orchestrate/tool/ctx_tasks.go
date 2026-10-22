@@ -10,7 +10,7 @@ import (
 // it never fails the command, is skipped with a note when the tools are missing
 // and is left out with --no-ctx. A brief is not rewritten once a lead runs.
 
-const taskBriefChars = 8000
+const taskBriefChars = 5000
 
 var (
 	taskCtxMu   sync.Mutex
