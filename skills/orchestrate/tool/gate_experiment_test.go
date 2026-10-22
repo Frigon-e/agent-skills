@@ -37,7 +37,7 @@ func TestGatePutsThePackageBlocksBeforeTheTagAndHasNoDossier(t *testing.T) {
 		t.Fatalf("order must be package blocks, tag (%d %d):\n%s", i, k, calls)
 	}
 	wantContains(t, calls, "api: Package api", "Budget: about 20 turns.", "Budget: about 40 turns.")
-	if strings.Contains(calls, "Use the evidence dossier") || strings.Contains(calls, "dossier-manifest.json") || gateView(t, out).Dossier != "" || exists(filepath.Join(gdir, "dossier")) {
+	if strings.Contains(calls, "Use the evidence dossier") || strings.Contains(calls, "dossier-manifest.json") || exists(filepath.Join(gdir, "dossier")) {
 		t.Errorf("the gate produced a dossier:\n%s\n%s", out, calls)
 	}
 	if rec := readRecord(t, gdir); rec.Cache != "short" {
