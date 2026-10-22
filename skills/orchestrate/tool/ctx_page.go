@@ -72,9 +72,6 @@ func pageFooter(lo, hi, total, limit, page int, atLeast, batch bool, narrow stri
 	if hi <= lo || hi <= 0 {
 		return ""
 	}
-	if ctxTune.SlimFooter {
-		return pageFooterSlim(lo, hi, total, page, atLeast, batch, narrow)
-	}
 	more := hi < total || atLeast
 	if !more && page == 1 {
 		return ""
@@ -145,9 +142,6 @@ const (
 // ctxRestFiles is how many files a footer names for the hits it left out.
 const ctxRestFiles = 5
 
-// ctxLeftOutMax is the most files the lean footer names; past it nothing is.
-const ctxLeftOutMax = 8
-
 // restNote names the files of the hits a page left out, with how many hits each
 // holds, so the agent can tell from the footer whether the next page is worth a
 // call.
@@ -163,14 +157,6 @@ func restNote(paths []string) string {
 		}
 		count[p]++
 	}
-	if ctxTune.SlimFooter {
-		// A list of files that fits is worth naming; the first five of two
-		// hundred are not. The fullest files come first.
-		if len(order) > ctxLeftOutMax {
-			return ""
-		}
-		sort.SliceStable(order, func(i, j int) bool { return count[order[i]] > count[order[j]] })
-	}
 	var parts []string
 	for _, p := range order[:min(ctxRestFiles, len(order))] {
 		parts = append(parts, fmt.Sprintf("%s (%d)", p, count[p]))
@@ -178,50 +164,5 @@ func restNote(paths []string) string {
 	if more := len(order) - ctxRestFiles; more > 0 {
 		parts = append(parts, fmt.Sprintf("+%d more files", more))
 	}
-	sep := "; left out: "
-	if ctxTune.SlimFooter {
-		sep = " | left out: "
-	}
-	return sep + strings.Join(parts, ", ")
-}
-
-// slimNarrow is each narrowing hint as the slim footer writes it: the CLI flags
-// and the lookup keys.
-var slimNarrow = map[string][2]string{
-	narrowText: {"--glob/-p", "glob=/path="},
-	narrowFind: {"-p", "path="},
-	narrowSym:  {"--in", "in="},
-}
-
-// pageFooterSlim is the footer without what the header already says (the
-// counts): how to get more, how to narrow, in one line. The last page of a list
-// says so; the only page of a list says nothing.
-func pageFooterSlim(lo, hi, total, page int, atLeast, batch bool, narrow string) string {
-	more := hi < total || atLeast
-	if !more {
-		if page == 1 {
-			return ""
-		}
-		return "last page"
-	}
-	suggest := page <= ctxPageSuggest
-	var parts []string
-	if suggest {
-		next := fmt.Sprintf("--page %d", page+1)
-		if batch {
-			next = fmt.Sprintf("page=%d", page+1)
-		}
-		parts = append(parts, "more: "+next)
-	}
-	if !suggest || total > ctxNarrowAbove {
-		n := narrow
-		if forms, ok := slimNarrow[narrow]; ok {
-			n = forms[0]
-			if batch {
-				n = forms[1]
-			}
-		}
-		parts = append(parts, "narrow: "+n)
-	}
-	return strings.Join(parts, " | ")
+	return "; left out: " + strings.Join(parts, ", ")
 }

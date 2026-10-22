@@ -116,8 +116,8 @@ func TestGatePaneTypesOneShortLineAndKeepsThePanesPath(t *testing.T) {
 			h.sessionPi(gatePasses(nil))
 			t.Setenv("ORCH_FAKE_CLAUDE_REPO", h.repo)
 			long := "/var/folders/" + strings.Repeat("deep/", 60) + "guard.jsonl"
-			t.Setenv("ORCH_TOOL_GUARD_LOG", long)
-			t.Setenv("ORCH_TOOL_GUARD_HINT", "it's \"quoted\" $HOME `x`")
+			t.Setenv("ORCH_TOOL_GUARD_STATE_DIR", long)
+			t.Setenv("ORCH_TOOL_GUARD_SKIP", "it's \"quoted\" $HOME `x`")
 			t.Setenv("ORCH_TSLS", long+"-tsls")
 			runner := "pi:" + gateModelDef
 			if harness == "claude" {
@@ -162,7 +162,7 @@ func TestGatePaneTypesOneShortLineAndKeepsThePanesPath(t *testing.T) {
 			}
 			// The env reached the agent byte for byte through the launcher's quoting.
 			env := string(mustRead(t, filepath.Join(h.fake+".panes", flagValue(starts[0].Args, "--pane")+".launch.env")))
-			for _, want := range []string{"ORCH_TOOL_GUARD_LOG=" + long + "\x00", "ORCH_TOOL_GUARD_HINT=it's \"quoted\" $HOME `x`\x00", "PI_CACHE_RETENTION=long\x00"} {
+			for _, want := range []string{"ORCH_TOOL_GUARD_STATE_DIR=" + long + "\x00", "ORCH_TOOL_GUARD_SKIP=it's \"quoted\" $HOME `x`\x00", "PI_CACHE_RETENTION=long\x00"} {
 				if harness == "claude" && strings.HasPrefix(want, "ORCH_TOOL_GUARD") {
 					continue // the pi tool guard's knobs are only for pi
 				}
@@ -245,21 +245,4 @@ func TestGateToggleValidationAndExperiment(t *testing.T) {
 	}
 	out := h.must("gate", "compare", "spec.md", "cli", "default")
 	wantContains(t, out, "ctx_tool: off; context_files: on", "ctx_tool: on; context_files: off")
-}
-
-func TestGatePassCarriesTheCtxProfileOnlyWhenSet(t *testing.T) {
-	h := setup(t)
-	env := func(profile string) string {
-		got, err := gateAgentPass(h.repo, "pi", gatePass{name: "a", shared: "s", task: "t", prompt: "st", ctxTool: true, ctxProfile: profile})
-		if err != nil {
-			t.Fatal(err)
-		}
-		return strings.Join(got.cli.Env, " ")
-	}
-	if strings.Contains(env(""), "ORCH_CTX_PROFILE") {
-		t.Error("the default profile sets no variable")
-	}
-	if !strings.Contains(env("lean"), "ORCH_CTX_PROFILE=lean") {
-		t.Error("ORCH_CTX_PROFILE=lean missing from the pass environment")
-	}
 }

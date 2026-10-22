@@ -89,9 +89,6 @@ func gateAgentPass(repo, harness string, p gatePass) (gatePass, error) {
 		cli.Env = append(cli.Env, "ORCH_CTX_ONLY_READY="+cli.Ready)
 		cli.Notice += "\n" + ctxOnlyNotice
 	}
-	if p.ctxProfile != "" {
-		cli.Env = append(cli.Env, "ORCH_CTX_PROFILE="+p.ctxProfile)
-	}
 	if v, ok := os.LookupEnv("ORCH_TSLS"); ok {
 		// The pane shell does not inherit orch's environment, so name the user's
 		// TypeScript server override for paneAgentEnv. The value is never logged.
@@ -157,11 +154,14 @@ func piGuardArgs(p gatePass) []string {
 	return nil
 }
 
-// guardEnv picks the guard's ORCH_TOOL_GUARD* settings out of env.
+// guardEnv picks the guard's settings out of env: the switch, the skip list and
+// the state directory.
 func guardEnv(env []string) []string {
 	var out []string
 	for _, kv := range env {
-		if strings.HasPrefix(kv, "ORCH_TOOL_GUARD") {
+		key, _, _ := strings.Cut(kv, "=")
+		switch key {
+		case "ORCH_TOOL_GUARD", "ORCH_TOOL_GUARD_SKIP", "ORCH_TOOL_GUARD_STATE_DIR":
 			out = append(out, kv)
 		}
 	}
