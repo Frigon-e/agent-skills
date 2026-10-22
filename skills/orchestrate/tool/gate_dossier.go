@@ -2,12 +2,15 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
+	"time"
 )
 
 // The gate's use of the retrieval layer: a dossier per spec package, built by
@@ -36,7 +39,99 @@ func newDossierSet(e *ctxEnv, sp *spec, blocks map[string]string) *dossierSet {
 	return &dossierSet{e: e, sp: sp, blocks: blocks, docs: map[string]*ctxBrief{}, items: map[string][]gateItem{}, cands: map[string][]itemCands{}}
 }
 
-// build computes the dossiers of the packages with these ids.
+// dossierJob is one text or concept search of the dossier. A text job looks
+// name up in the tracked files; a concept job searches query within tree.
+type dossierJob struct {
+	text       bool
+	name, tree string
+}
+
+// jobOut is what a job returned and when it ran.
+type jobOut struct {
+	text    rgResult
+	hits    []codeHit
+	err     error
+	started time.Time
+	elapsed time.Duration
+}
+
+const (
+	// dossierPoolWidth is the most concept searches the dossier keeps in flight,
+	// below the slot cap: the service answers 429 when it is asked too fast, and
+	// a refused search is a lookup the dossier loses. Measured on the CRM spec
+	// (4 packages): width 4 had no refusal, 6 had 3, 8 had 25, 16 had 64.
+	dossierPoolWidth = 5
+	// dossierRateRounds is how many times the searches the service refused are
+	// asked again, after the cooldown, one half as wide each time.
+	dossierRateRounds = 2
+)
+
+// dossierCooldownWait waits until jbcontext is out of its cooldown, at most as
+// long as the cooldown plus a margin. A variable so a test need not wait.
+var dossierCooldownWait = func(bin string) {
+	for end := time.Now().Add(jbCooldown + 5*time.Second); jbCooling(bin) && time.Now().Before(end); {
+		time.Sleep(250 * time.Millisecond)
+	}
+}
+
+// runJobs runs the jobs and returns their answers in job order, whatever the
+// order they finished in. The text searches run a few at a time; the concept
+// searches run as one pool, as wide as the slot cap allows up to
+// dossierPoolWidth, at the same time. A concept search the service refused for
+// rate is asked again after the cooldown; its timing is that of the last ask.
+func (e *ctxEnv) runJobs(jobs []dossierJob) []jobOut {
+	outs := make([]jobOut, len(jobs))
+	var texts, concepts []int
+	for i, j := range jobs {
+		if j.text {
+			texts = append(texts, i)
+		} else {
+			concepts = append(concepts, i)
+		}
+	}
+	run := func(i int) {
+		j := jobs[i]
+		o := &outs[i]
+		o.started = time.Now()
+		if j.text {
+			o.text, o.err = e.Text(rgQuery{Pattern: j.name, Fixed: true, PerFile: 3, AllFiles: true, CaseSensitive: true})
+		} else {
+			o.hits, o.err = e.Concept(j.name, j.tree, dossierConceptHits)
+		}
+		o.elapsed = time.Since(o.started)
+	}
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		e.parallel(len(texts), func(k int) { run(texts[k]) })
+	}()
+	width := min(jbSlotCount(), dossierPoolWidth)
+	go func() {
+		defer wg.Done()
+		fanOut(width, len(concepts), func(k int) { run(concepts[k]) })
+		for round := 1; round <= dossierRateRounds; round++ {
+			var again []int
+			for _, i := range concepts {
+				if errors.Is(outs[i].err, errJBRateLimited) {
+					again = append(again, i)
+				}
+			}
+			if len(again) == 0 {
+				return
+			}
+			dossierCooldownWait(e.JB)
+			fanOut(max(1, width>>round), len(again), func(k int) { run(again[k]) })
+		}
+	}()
+	wg.Wait()
+	return outs
+}
+
+// build computes the dossiers of the packages with these ids. Every search of
+// every package is planned first, then the symbol lookups, the text searches and
+// the concept searches all run at once, and only then are the answers put
+// together, package by package, in the order the searches were planned.
 func (d *dossierSet) build(ids []string) {
 	var ins []briefInput
 	for _, id := range ids {
@@ -46,24 +141,50 @@ func (d *dossierSet) build(ids []string) {
 			}
 		}
 	}
-	for _, b := range d.e.Briefs(ins) {
-		d.docs[b.ID] = b
-	}
-	for _, in := range ins {
-		var p *specPackage
+	br := d.e.briefsPrepare(ins)
+	pkgs := make([]*specPackage, len(ins))
+	rps := make([]*reusePlan, len(ins))
+	jobs := append([]dossierJob{}, br.jobs...)
+	cut := []int{len(jobs)} // cut[i+1] is where the jobs of ins[i] end
+	for i, in := range ins {
 		for _, q := range d.sp.packages {
 			if q.id == in.ID {
-				p = q
+				pkgs[i] = q
 			}
 		}
-		items := packageItems(p)
+		items := packageItems(pkgs[i])
 		d.items[in.ID] = items
 		if len(items) > 0 {
-			d.cands[in.ID] = d.e.reuseCandidates(items, p.owns, p.title)
+			rps[i] = d.e.planReuse(items, pkgs[i].owns)
+			jobs = append(jobs, rps[i].run.jobs...)
+		}
+		cut = append(cut, len(jobs))
+	}
+	// One lane for the symbol lookups, in the order they ran one after the other
+	// before, beside the searches.
+	var lane sync.WaitGroup
+	lane.Add(1)
+	go func() {
+		defer lane.Done()
+		br.symbols()
+		for _, rp := range rps {
+			if rp != nil {
+				rp.run.symbols()
+			}
+		}
+	}()
+	outs := d.e.runJobs(jobs)
+	lane.Wait()
+	for _, b := range br.finish(outs[:len(br.jobs)]) {
+		d.docs[b.ID] = b
+	}
+	for i, in := range ins {
+		if rps[i] != nil {
+			d.cands[in.ID] = rps[i].finish(outs[cut[i]:cut[i+1]])
 			d.docs[in.ID].ReuseItems = d.cands[in.ID]
 			d.docs[in.ID].Reuse = renderChecklist(d.cands[in.ID], nil, d.e.Code)
 		}
-		d.docs[in.ID].Foreign = d.foreign(p)
+		d.docs[in.ID].Foreign = d.foreign(pkgs[i])
 	}
 }
 
@@ -787,6 +908,10 @@ type dossierManifest struct {
 	Budget       int                  `json:"budget_bytes"`
 	Requirements []dossierRequirement `json:"requirements"`
 	Omissions    []dossierOmission    `json:"omissions"`
+	// LookupTiming has one entry for each lookup that ran a search: when it
+	// started and how long it took. A symbol lookup carries the time of the
+	// batch it was answered in.
+	LookupTiming []lookupTiming `json:"lookup_timing,omitempty"`
 }
 
 func (s *dossierSet) manifest(subject *gateSubject) *dossierManifest {
@@ -878,6 +1003,11 @@ func (s *dossierSet) manifest(subject *gateSubject) *dossierManifest {
 			m.Evidence = append(m.Evidence, er)
 		}
 		m.Omissions = append(m.Omissions, d.Omissions...)
+	}
+	for _, l := range m.Lookups {
+		if l.Timing != nil {
+			m.LookupTiming = append(m.LookupTiming, *l.Timing)
+		}
 	}
 	return m
 }

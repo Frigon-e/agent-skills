@@ -163,6 +163,31 @@ func (e *ctxEnv) parallel(n int, fn func(i int)) {
 	wg.Wait()
 }
 
+// fanOut runs fn for every index with at most width at once, starting them in
+// index order. It takes no slot of e.sem: for concept searches the width is the
+// jbcontext slot cap and the slots themselves limit the processes.
+func fanOut(width, n int, fn func(i int)) {
+	if width < 1 {
+		width = 1
+	}
+	next := make(chan int)
+	var wg sync.WaitGroup
+	for w := 0; w < min(width, n); w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := range next {
+				fn(i)
+			}
+		}()
+	}
+	for i := 0; i < n; i++ {
+		next <- i
+	}
+	close(next)
+	wg.Wait()
+}
+
 // files lists the tracked files of the checkout.
 func (e *ctxEnv) files() []string {
 	e.trkOnce.Do(func() {
