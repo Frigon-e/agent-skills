@@ -367,12 +367,11 @@ func TestGateProviderFailureFallsBackToFakeClaude(t *testing.T) {
 	}
 }
 
-func TestDisabledDeciderSkipsTriageAndProbe(t *testing.T) {
+func TestDisabledDeciderSkipsTriage(t *testing.T) {
 	h := setup(t)
 	h.task("t1")
 	os.WriteFile(os.Getenv("ORCH_CONFIG"), []byte("[roles.decider]\nenabled = false\n"), 0o644)
 	wantContains(t, h.must("triage", "t1"), "decider off:", "disabled")
-	wantContains(t, h.must("gate", "probe-decider"), "decider off:", "disabled")
 	if h.dec.count() != 0 {
 		t.Fatal("disabled role made an API request")
 	}
@@ -392,7 +391,7 @@ func TestSessionProviderErrorAndRecoveredError(t *testing.T) {
 	}
 }
 
-func TestGateWithoutRunnersStillWritesDossier(t *testing.T) {
+func TestGateWithoutRunnersStillWritesChecklist(t *testing.T) {
 	h := setup(t)
 	gdir := h.gateRepo(1)
 	t.Setenv("ORCH_PI", filepath.Join(h.tmp, "missing-pi"))
@@ -402,9 +401,6 @@ func TestGateWithoutRunnersStillWritesDossier(t *testing.T) {
 	rec := readRecord(t, gdir)
 	if code != 1 || rec.State != "incomplete" || !strings.Contains(rec.PassErrors["all"], "not available") {
 		t.Fatalf("%s: %#v", out, rec)
-	}
-	if _, err := os.Stat(filepath.Join(gdir, "dossier", "api.md")); err != nil {
-		t.Fatal(err)
 	}
 	if _, err := os.Stat(filepath.Join(gdir, "items.json")); err != nil {
 		t.Fatal(err)

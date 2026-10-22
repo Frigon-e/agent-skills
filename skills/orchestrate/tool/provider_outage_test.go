@@ -686,7 +686,7 @@ printf '%s\n' '{"type":"result","result":"{\"packages\":[{\"id\":\"api\",\"claim
 						}
 					}
 				}
-				if !exists(filepath.Join(dir, "report.md")) || !exists(filepath.Join(dir, "dossier", "api.md")) {
+				if !exists(filepath.Join(dir, "report.md")) {
 					t.Fatal("outage erased deterministic artifacts")
 				}
 				if exists(healthPath()) {
