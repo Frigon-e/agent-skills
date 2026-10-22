@@ -460,10 +460,12 @@ Results are cached per HEAD and working-tree fingerprint under
 `~/.cache/orchestrate/ctx/`; incomplete/error results are not cached as
 successful search facts. This is not a guarantee of exhaustive server coverage.
 The JetBrains service rate limits (HTTP 429), so jbcontext searches are
-throttled: identical searches in one process share one call, at most 16 run at
+throttled: identical searches in one process share one call, at most 5 run at
 once machine-wide (flock slots under `~/.cache/orchestrate/jb-slots/`; set
-`ORCH_JB_SLOTS` to 1-32, invalid values give 16; measured: 32 concurrent searches
-and 3 minutes at 16 at once gave no 429 with a valid token), the first call after
+`ORCH_JB_SLOTS` to 1-32 to raise it for light workloads, invalid values give 5;
+measured: the dossier workload, 132 lookups, got 429s at width 6/8/16 = 3/25/64
+and none at 4 and 5, while a plain search burst (limit 3, one client) stayed clean
+up to 32, so the limit depends on the request kind), the first call after
 10 minutes without one runs alone so a stale token is exchanged once, and a
 429 is retried 3 times with backoff. After that the lookup fails with
 `jbcontext rate limited (429)` and the query it skipped, jbcontext is skipped for
