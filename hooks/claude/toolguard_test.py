@@ -35,6 +35,7 @@ SCRIPTS = [
     "deny-cat-head-tail.sh",
     "deny-grep-rg.sh",
     "deny-builtin-search.sh",
+    "deny-big-read.sh",
 ]
 
 # Which script owns a rule. Plain find shares deny-find-chains.sh, and the two
@@ -52,6 +53,7 @@ HOOK_FOR_RULE = {
 # The built-in search hook: a PreToolUse event for one of Claude's own search
 # tools, with the harness-neutral tool name of the shared table.
 BUILTIN_HOOK = "deny-builtin-search.sh"
+BIG_READ_HOOK = "deny-big-read.sh"
 BUILTIN_HOOK_TOOL = {"content-search": "Grep", "file-search": "Glob"}
 BUILTIN_REPLACEMENT = {"builtin-grep": "orch ctx batch", "builtin-glob": "orch ctx batch"}
 
@@ -326,6 +328,109 @@ def check_builtin_search(checker, workdir, cases):
             env=checker.env("orch"),
             cwd=REPO_ROOT or ROOT,
         )
+        if done.returncode != 0 or done.stderr.strip():
+            failures.append(f"{name}: did not allow cleanly: {done.stderr.strip()}")
+    return failures, blocked, allowed
+
+
+def read_hook(checker, payload, situation="orch", extra=None):
+    """One deny-big-read hook run, the way Claude Code drives it."""
+    return subprocess.run(
+        [os.path.join(ROOT, BIG_READ_HOOK)],
+        input=payload if isinstance(payload, str) else json.dumps(payload),
+        text=True,
+        capture_output=True,
+        env=checker.env(situation, extra),
+    )
+
+
+def check_big_read(checker, workdir, cases):
+    """The big-read hook: the shared table, the reason, the switches and the
+    fail-open payloads. Returns the failures and the table's counts."""
+    failures = []
+    blocked = allowed = 0
+    files = os.path.join(workdir, "big-read-files")
+    os.makedirs(files)
+
+    def event(path, extra=None):
+        tool_input = {"file_path": path}
+        tool_input.update(extra or {})
+        return {"hook_event_name": "PreToolUse", "tool_name": "Read", "tool_input": tool_input}
+
+    big = os.path.join(files, "big.txt")
+    for case in cases:
+        path = os.path.join(files, case["file"])
+        kind = case.get("kind", "file")
+        if kind == "dir":
+            os.makedirs(path, exist_ok=True)
+        elif kind == "file" and not os.path.exists(path):
+            with open(path, "wb") as handle:
+                handle.write(b"x" * case["bytes"])
+        payload = event(path, case["input"])
+        if not case["block"]:
+            allowed += 1
+            done = read_hook(checker, payload, case["situation"])
+            if done.returncode != 0 or done.stderr.strip():
+                failures.append(f"{case['name']}: exit {done.returncode}, want 0: {done.stderr.strip()}")
+            continue
+        blocked += 1
+        for attempt in ("first", "retry"):
+            label = case["name"] + (" (retry)" if attempt == "retry" else "")
+            done = read_hook(checker, payload, case["situation"])
+            if done.returncode != 2:
+                failures.append(f"{label}: exit {done.returncode}, want 2: {done.stderr.strip()}")
+                continue
+            reason = done.stderr.strip()
+            lines = [entry for entry in reason.splitlines() if entry.strip()]
+            if "(deny-big-read)" not in reason or GUARD_MARKER not in reason:
+                failures.append(f"{label}: reason does not name the rule and the guard: {reason}")
+            if not 2 <= len(lines) <= 5:
+                failures.append(f"{label}: reason is {len(lines)} lines, want 2 to 5: {reason}")
+            if f"{os.path.getsize(path) / 1024:.0f} KB" not in reason:
+                failures.append(f"{label}: reason does not name the size in KB: {reason}")
+            if "offset and limit" not in reason:
+                failures.append(f"{label}: reason does not name offset and limit: {reason}")
+            has_ctx = "orch ctx" in reason
+            if (case["situation"] == "orch") != has_ctx:
+                failures.append(f"{label}: orch ctx named wrongly for {case['situation']}: {reason}")
+            if case["situation"] != "orch" and "rg -n" not in reason:
+                failures.append(f"{label}: reason must name rg -n without a healthy orch: {reason}")
+            if done.stdout:
+                failures.append(f"{label}: block wrote to stdout: {done.stdout.strip()}")
+
+    # A retry with a limit passes where the bare read was blocked.
+    if read_hook(checker, event(big)).returncode != 2 or read_hook(checker, event(big, {"limit": 100})).returncode != 0:
+        failures.append("the bare read was not blocked, or the retry with limit was not allowed")
+
+    # The switches: ORCH_TOOL_GUARD=off, the short and the full rule name.
+    for extra, label in (
+        ({"ORCH_TOOL_GUARD": "off"}, "ORCH_TOOL_GUARD=off"),
+        ({"ORCH_TOOL_GUARD_SKIP": "big-read"}, "the big-read skip"),
+        ({"ORCH_TOOL_GUARD_SKIP": "deny-big-read"}, "the deny-big-read skip"),
+        ({"ORCH_TOOL_GUARD_SKIP": "grep-rg, big-read"}, "a skip list"),
+    ):
+        done = read_hook(checker, event(big), "orch", extra)
+        if done.returncode != 0 or done.stderr.strip():
+            failures.append(f"{label} did not disable the rule: {done.stderr.strip()}")
+    done = read_hook(checker, event(big), "orch", {"ORCH_TOOL_GUARD_SKIP": "builtin-search,grep-rg"})
+    if done.returncode != 2:
+        failures.append("another rule's skip also disabled big-read")
+
+    # Fail open on anything but a Read of a path.
+    payloads = [
+        ("broken JSON", "not json"),
+        ("a JSON list", "[]"),
+        ("another tool", {"tool_name": "Grep", "tool_input": {"file_path": big}}),
+        ("no tool name", {"tool_input": {"file_path": big}}),
+        ("no tool input", {"tool_name": "Read"}),
+        ("a broken tool_input", {"tool_name": "Read", "tool_input": big}),
+        ("no file_path", {"tool_name": "Read", "tool_input": {}}),
+        ("an empty file_path", {"tool_name": "Read", "tool_input": {"file_path": " "}}),
+        ("a number as file_path", {"tool_name": "Read", "tool_input": {"file_path": 5}}),
+        ("a NUL in file_path", {"tool_name": "Read", "tool_input": {"file_path": big + "\0"}}),
+    ]
+    for name, payload in payloads:
+        done = read_hook(checker, payload)
         if done.returncode != 0 or done.stderr.strip():
             failures.append(f"{name}: did not allow cleanly: {done.stderr.strip()}")
     return failures, blocked, allowed
@@ -694,6 +799,8 @@ def main():
             checker, workdir, data["builtinCases"]
         )
         failures.extend(builtin_failures)
+        read_failures, read_blocked, read_allowed = check_big_read(checker, workdir, data["readCases"])
+        failures.extend(read_failures)
         failures.extend(check_generic_reasons(checker))
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
@@ -704,6 +811,7 @@ def main():
         f"{len(cases)} cases: {checker.blocked} blocked, {checker.allowed} allowed; "
         f"{builtin_blocked + builtin_allowed} built-in cases: {builtin_blocked} blocked, "
         f"{builtin_allowed} allowed; "
+        f"{read_blocked + read_allowed} read cases: {read_blocked} blocked, {read_allowed} allowed; "
         f"{len(SCRIPTS)} scripts checked with bash -n"
         + (" and shellcheck" if shutil.which("shellcheck") else "")
         + f"; {len(failures)} failure(s)"

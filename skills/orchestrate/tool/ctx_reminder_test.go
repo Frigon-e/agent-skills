@@ -843,6 +843,17 @@ type sharedToolguardFile struct {
 		Path      string            `json:"path"`
 		Rule      map[string]string `json:"rule"`
 	} `json:"builtinCases"`
+	// ReadCases is the fourth table: a whole-file read of a big file. File is a
+	// name made in a temp directory; Kind is file (default), dir or missing.
+	ReadCases []struct {
+		Name      string         `json:"name"`
+		Situation string         `json:"situation"`
+		File      string         `json:"file"`
+		Kind      string         `json:"kind"`
+		Bytes     int            `json:"bytes"`
+		Input     map[string]any `json:"input"`
+		Block     bool           `json:"block"`
+	} `json:"readCases"`
 }
 
 func sharedGuardFile(t *testing.T) sharedToolguardFile {
@@ -1064,5 +1075,71 @@ func TestCtxReminderSharedBuiltinSearchCases(t *testing.T) {
 			_, quiet, blocked := checkReminder(t, got, cases)
 			t.Logf("shared built-in cases, %s PATH: %d blocked, %d allowed", situation, blocked, quiet)
 		})
+	}
+}
+
+// The read table: pi's read tool takes the same decision as Claude's Read, a
+// whole-file read of a file over 30720 bytes is refused and a range passes.
+func TestCtxReminderSharedReadCases(t *testing.T) {
+	file := sharedGuardFile(t)
+	if len(file.ReadCases) == 0 {
+		t.Fatal("the shared case file has no readCases")
+	}
+	dir := t.TempDir()
+	for situation, spec := range file.PathSituations {
+		t.Run(situation, func(t *testing.T) {
+			var cases []reminderCase
+			for _, c := range file.ReadCases {
+				if c.Situation != situation {
+					continue
+				}
+				path := filepath.Join(dir, situation+"-"+c.File)
+				switch c.Kind {
+				case "dir":
+					if err := os.MkdirAll(path, 0o755); err != nil {
+						t.Fatal(err)
+					}
+				case "missing":
+				default:
+					if err := os.WriteFile(path, []byte(strings.Repeat("x", c.Bytes)), 0o644); err != nil {
+						t.Fatal(err)
+					}
+				}
+				input := map[string]any{"path": path}
+				for k, v := range c.Input {
+					input[k] = v
+				}
+				blocks := ""
+				if c.Block {
+					blocks = "big-read"
+				}
+				needs := []string(nil)
+				if c.Block {
+					needs = []string{"offset and limit"}
+				}
+				cases = append(cases, reminderCase{Name: c.Name, Tool: "read", Input: input, Blocks: blocks, Needs: needs})
+			}
+			if len(cases) == 0 {
+				t.Skip("no read cases for this PATH situation")
+			}
+			got := runCtxReminderWithBroken(t, spec.Tools, spec.Broken, nil, cases)
+			_, quiet, blocked := checkReminder(t, got, cases)
+			t.Logf("shared read cases, %s PATH: %d blocked, %d allowed", situation, blocked, quiet)
+		})
+	}
+}
+
+// The read switches: ORCH_TOOL_GUARD=off and the rule's short and full names.
+func TestCtxReminderBigReadSwitches(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "big.txt")
+	if err := os.WriteFile(path, []byte(strings.Repeat("x", 31744)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	bare := reminderCase{Name: "bare read", Tool: "read", Input: map[string]any{"path": path}}
+	blocked := bare
+	blocked.Blocks = "big-read"
+	checkReminder(t, runCtxReminder(t, nil, []reminderCase{blocked}), []reminderCase{blocked})
+	for _, env := range []string{"ORCH_TOOL_GUARD=off", "ORCH_TOOL_GUARD_SKIP=big-read", "ORCH_TOOL_GUARD_SKIP=deny-big-read"} {
+		checkReminder(t, runCtxReminder(t, []string{env}, []reminderCase{bare}), []reminderCase{bare})
 	}
 }
