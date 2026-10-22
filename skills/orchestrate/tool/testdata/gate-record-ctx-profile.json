@@ -1,0 +1,24 @@
+{
+  "schema_version": 2,
+  "state": "experiment",
+  "experiment": "lean-vs-default",
+  "spec": "spec.md",
+  "hash": "0123456789ab",
+  "at": 1760000000,
+  "dossier": "code",
+  "cache": "short",
+  "only": ["group"],
+  "ctx_tool": "on",
+  "context_files": "off",
+  "ctx_profile": "lean",
+  "ctx_shell": "ctx-only",
+  "review_policy": {
+    "version": "1",
+    "ctx_tool": "on",
+    "context_files": "off",
+    "ctx_shell": "ctx-only",
+    "ctx_profile": "lean",
+    "dossier": "code",
+    "verdicts": false
+  }
+}

@@ -18,7 +18,7 @@
 // to their result instead, and to a built-in search that does run.
 import type { ExtensionAPI, ToolCallEvent, ToolResultEvent } from "@earendil-works/pi-coding-agent";
 import { spawnSync } from "node:child_process";
-import { accessSync, appendFileSync, constants, realpathSync, statSync } from "node:fs";
+import { accessSync, constants, realpathSync, statSync } from "node:fs";
 import { delimiter, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 const marker = "orch ctx reminder";
@@ -55,9 +55,6 @@ type rule = {
 	id: string;
 	match: (line: string, tools: tools) => boolean;
 	reason: (tools: tools) => string;
-	// A rule may add one line built from the pattern the model typed. Empty
-	// when there is nothing to build it from.
-	tuned?: (line: string, tools: tools) => string;
 };
 
 // A built-in tool call: pi's own tools reach the tree without a shell, so a
@@ -65,7 +62,7 @@ type rule = {
 type builtinCall = { name: string; input: Record<string, unknown> };
 
 type builtinRule = {
-	// The full name the reason shows, and the short name the log records.
+	// The full name the reason shows, and the short name ORCH_TOOL_GUARD_SKIP takes.
 	name: string;
 	id: string;
 	// The one ORCH_TOOL_GUARD_SKIP name that disables every built-in rule.
@@ -73,34 +70,7 @@ type builtinRule = {
 	match: (call: builtinCall) => boolean;
 	// The reason is fixed: the rule only matches while orch answers.
 	reason: string;
-	// The kind of the pattern the model typed, for the log.
-	kind: (input: Record<string, unknown>) => string;
-	// One line built from the arguments the model typed, like a shell rule's.
-	tuned: (input: Record<string, unknown>) => string;
 };
-
-// ORCH_TOOL_GUARD_HINT=pattern appends one line built from the blocked
-// pattern, so the two messages can be A/B tested against each other. Unset or
-// ORCH_TOOL_GUARD_HINT=generic keeps the generic text.
-type hintMode = "generic" | "pattern";
-
-function guardHintMode(): hintMode {
-	return process.env.ORCH_TOOL_GUARD_HINT === "pattern" ? "pattern" : "generic";
-}
-
-// ORCH_TOOL_GUARD_LOG=<path> appends one JSON line per block, for the A/B
-// count: which harness, which rule, which hint, which pattern kind and the
-// command. Off by default, and a guard never fails a call because of it.
-function guardLog(harness: string, rule: string, hint: hintMode, kind: string, line: string): void {
-	const path = process.env.ORCH_TOOL_GUARD_LOG;
-	if (!path) return;
-	const entry = { ts: new Date().toISOString(), harness, rule, hint, kind, command: line.slice(0, 200) };
-	try {
-		appendFileSync(path, `${JSON.stringify(entry)}\n`);
-	} catch {
-		// Not writable: the block still has to happen.
-	}
-}
 
 // The probe's timeout in milliseconds. `orch --version` prints a fingerprint
 // and starts nothing else, so a healthy wrapper answers at once; one that
@@ -137,20 +107,6 @@ function orchAnswers(): { ok: boolean; detail: string } {
 	}
 }
 
-// ORCH_TOOL_GUARD_LOG also records a probe that found a broken orch, once per
-// probe, so a session where the guard could not name its tool is visible next
-// to the blocks.
-function healthLog(detail: string): void {
-	const path = process.env.ORCH_TOOL_GUARD_LOG;
-	if (!path) return;
-	const entry = { ts: new Date().toISOString(), harness: "pi", event: "orch-unhealthy", detail };
-	try {
-		appendFileSync(path, `${JSON.stringify(entry)}\n`);
-	} catch {
-		// Not writable: the block still has to happen.
-	}
-}
-
 // True when an executable of this name is on PATH, so the reminder is harmless
 // in repos and sessions that never installed the skill or the search tools.
 function onPath(name: string): boolean {
@@ -177,10 +133,7 @@ function installed(): tools {
 	if (present) {
 		const probe = orchAnswers();
 		healthy = probe.ok;
-		if (!healthy) {
-			detail = probe.detail;
-			healthLog(detail);
-		}
+		if (!healthy) detail = probe.detail;
 	}
 	return { orch: healthy, fd: onPath("fd"), rg: onPath("rg"), broken: detail };
 }
@@ -457,136 +410,6 @@ function searchTargets(args: string[]): string[] {
 	return out;
 }
 
-// The pattern of a grep: the value of -e or --regexp, else its first word that
-// is not a flag.
-function searchPattern(args: string[]): string {
-	for (let at = 0; at < args.length; at += 1) {
-		const arg = args[at];
-		if (arg === "-e" || arg === "--regexp") return args[at + 1] ?? "";
-		if (arg.startsWith("-") && arg !== "-") {
-			if (grepValue.has(arg)) at += 1;
-			continue;
-		}
-		return arg;
-	}
-	return "";
-}
-
-// What a blocked pattern asks for. The same three shapes are classified by
-// hooks/claude/toolguard.py, so a change here needs the twin change there and
-// a case in hooks/claude/toolguard_cases.json.
-type searchKind = "symbol" | "text" | "concept";
-
-// One identifier and nothing else: letters, digits, _ and . only.
-const identifierShape = /^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*$/;
-const questionWords = new Set(["how", "what", "which", "where", "when", "why", "who"]);
-// A character class escape says regex, so the pattern is a mix and not a name.
-const charClass = /\\[wWdDsS]/;
-
-// Alternation branches, ignoring an escaped pipe.
-function branches(pattern: string): number {
-	let count = 1;
-	for (let at = 0; at < pattern.length; at += 1) {
-		if (pattern[at] === "\\") {
-			at += 1;
-			continue;
-		}
-		if (pattern[at] === "|") count += 1;
-	}
-	return count;
-}
-
-// .* or .+ with words on both sides: the model is describing a gap, not a
-// string.
-function wildcardBetweenWords(pattern: string): boolean {
-	for (const marker of [".*", ".+"]) {
-		const at = pattern.indexOf(marker);
-		if (at > 0 && at + marker.length < pattern.length) return true;
-	}
-	return false;
-}
-
-// Three kinds by shape alone: concept is a broad query, symbol one identifier,
-// text anything else (a string, a route, a path, a short regex with simple
-// anchors only).
-function patternKind(pattern: string): searchKind {
-	const trimmed = pattern.trim();
-	if (!trimmed) return "text";
-	const words = trimmed.split(/\s+/);
-	if (branches(trimmed) >= 3) return "concept";
-	if (wildcardBetweenWords(trimmed)) return "concept";
-	if (words.length >= 4) return "concept";
-	if (trimmed.includes("?") || questionWords.has(words[0].toLowerCase())) return "concept";
-	if (charClass.test(trimmed)) return "concept";
-	if (identifierShape.test(trimmed)) return "symbol";
-	return "text";
-}
-
-// The directory a grep searches, which the text line scopes with --glob: a
-// file names its own directory, and no target or `.` searches the root.
-function searchDir(args: string[]): string {
-	const targets = searchTargets(args);
-	if (!targets.length) return "";
-	const first = targets[0].replace(/\/+$/, "");
-	if (!first || first === ".") return "";
-	const parts = first.split("/");
-	const last = parts[parts.length - 1] ?? "";
-	if (last.includes(".")) return parts.slice(0, -1).join("/");
-	return first;
-}
-
-// One shell word, safe to paste into a command.
-function shellQuoted(text: string): string {
-	return `'${text.replaceAll("'", "'\\''")}'`;
-}
-
-// A concept query already begins with this, so a pattern that carries it does
-// not get it twice.
-const leadingCodeThat = /^code that\s+/i;
-
-// The concept phrase: the model's own words with the regex syntax dropped.
-function conceptWords(pattern: string): string {
-	const words = pattern
-		.replaceAll(/\\./g, " ")
-		.replaceAll(/\.\*|\.\+/g, " ")
-		.replaceAll(/[|^$*+?()[\]{}]/g, " ")
-		.replaceAll(/\s+/g, " ")
-		.trim();
-	return words.replace(leadingCodeThat, "");
-}
-
-// The one line a pattern hint adds: the ctx query that fits what was typed.
-// Empty when the grep has no pattern to build it from.
-function patternHint(segment: segment): string {
-	const { name, args } = command(segment);
-	const pattern = searchPattern(name === "git" ? args.slice(1) : args);
-	if (!pattern) return "";
-	const kind = patternKind(pattern);
-	if (kind === "symbol") return `Use orch ctx sym ${pattern} --refs 3.`;
-	const dir = searchDir(name === "git" ? args.slice(1) : args);
-	const words = conceptWords(pattern);
-	if (kind === "concept" && words) {
-		const phrase = `Code that ${words}`.replaceAll(/([\\$`"])/g, "\\$1");
-		return (
-			`Use orch ctx find "${phrase}" (a broader search; use it when no name or string is known).`
-		);
-	}
-	return textHint(pattern, dir);
-}
-
-// The literal-string line, in the batch form the rest of the guard shows: the
-// pattern in single quotes inside the query, the query one double-quoted shell
-// word. A pattern or directory that cannot sit in both keeps the single command.
-function textHint(pattern: string, dir: string): string {
-	if (!pattern.includes("'") && !(dir && /[\s'"\\$`]/.test(dir))) {
-		const escaped = pattern.replaceAll(/([\\$`"])/g, "\\$1");
-		return `Use orch ctx batch -q "text:'${escaped}'${dir ? ` glob=${dir}/**` : ""}".`;
-	}
-	return dir
-		? `Use orch ctx text --glob ${shellQuoted(`${dir}/**`)} -- ${shellQuoted(pattern)}.`
-		: `Use orch ctx text -- ${shellQuoted(pattern)}.`;
-}
-
 // The root of the git repository the session runs in, found by walking up from
 // the working directory (a worktree root has a .git file rather than a
 // directory, so any entry counts), or "" outside one. Resolved once: the working
@@ -626,76 +449,6 @@ function insideRepository(path: string): boolean {
 	return rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel);
 }
 
-// The directory a built-in search starts from, scoped the way the shell hint
-// scopes it: a file names its own directory, and no path or `.` is the root.
-function builtinDir(input: Record<string, unknown>): string {
-	const path = String(input.path ?? "").trim().replace(/\/+$/, "");
-	if (!path || path === ".") return "";
-	const parts = path.split("/");
-	const last = parts[parts.length - 1] ?? "";
-	if (last.includes(".")) return parts.slice(0, -1).join("/");
-	return path;
-}
-
-// The name or glob a built-in find asks for. The installed pi passes `pattern`;
-// `name` and `glob` are read too so a build that names the argument otherwise
-// still gets a hint instead of a generic reason.
-function builtinFindPattern(input: Record<string, unknown>): string {
-	for (const key of ["pattern", "name", "glob"]) {
-		const value = String(input[key] ?? "").trim();
-		if (value) return value;
-	}
-	return "";
-}
-
-// The one ctx line a built-in search's pattern lands on, in the batch syntax the
-// other hints use: a name is a symbol, a broad phrase is a concept, and a string
-// is a text lookup scoped by the directory the model named.
-function builtinHint(kind: searchKind, pattern: string, dir: string): string {
-	if (kind === "symbol") return `Use orch ctx batch -q "symbol:${pattern} refs=3".`;
-	const words = conceptWords(pattern);
-	if (kind === "concept" && words) {
-		const query = `find:Code that ${words}`.replaceAll(/([\\$`"])/g, "\\$1");
-		return `Use orch ctx batch -q "${query}".`;
-	}
-	return textHint(pattern, dir);
-}
-
-// The built-in grep's pattern picks one of the same three kinds as the shell
-// rule, so a name, a string and a broad phrase each get their own query.
-function builtinGrepHint(input: Record<string, unknown>): string {
-	const pattern = String(input.pattern ?? "").trim();
-	if (!pattern) return "";
-	return builtinHint(patternKind(pattern), pattern, builtinDir(input));
-}
-
-// The built-in find's name or glob argument is a file name, and no ctx kind
-// lists files by name: a concept asks for a concept search, and anything else is
-// a text lookup scoped by the directory, which is what `glob=` is for.
-function builtinFindHint(input: Record<string, unknown>): string {
-	const pattern = builtinFindPattern(input);
-	if (!pattern) return "";
-	const kind = patternKind(pattern) === "concept" ? "concept" : "text";
-	return builtinHint(kind, pattern, builtinDir(input));
-}
-
-// The line the log records for a built-in call: the tool and the arguments the
-// model typed, in the shape a shell command would have.
-function builtinLogLine(tool: string, input: Record<string, unknown>): string {
-	const parts = [tool];
-	for (const key of ["pattern", "name", "path", "glob"]) {
-		const value = String(input[key] ?? "").trim();
-		if (value) parts.push(`${key}=${value}`);
-	}
-	return parts.join(" ");
-}
-
-// The grep segment a block names, so a hint is built from the pattern the
-// model typed and not from a generic example.
-function grepSegment(line: string, tools: tools): segment | undefined {
-	return segments(line).find((segment) => grepSearches(segment, tools));
-}
-
 // One segment is a raw content search over files.
 function grepSearches(segment: segment, tools: tools): boolean {
 	const { name, args } = command(segment);
@@ -707,15 +460,6 @@ function grepSearches(segment: segment, tools: tools): boolean {
 	const recurses =
 		recursiveByDefault.has(name) || args.some((arg) => arg.startsWith("--recursive") || recursive.test(arg));
 	return recurses && !segment.stdinPipe;
-}
-
-// The kind of the blocked grep's pattern, for the log.
-function grepKind(line: string, tools: tools): string {
-	const segment = grepSegment(line, tools);
-	if (!segment) return "";
-	const { name, args } = command(segment);
-	const pattern = searchPattern(name === "git" ? args.slice(1) : args);
-	return pattern ? patternKind(pattern) : "";
 }
 
 // A grep with a file or directory argument, or one that recurses, searches
@@ -800,10 +544,6 @@ const rules: rule[] = [
 							: `Use the built-in grep tool; orch ctx and rg are not installed.`),
 				broken,
 			),
-		tuned: (line, tools) => {
-			const segment = grepSegment(line, tools);
-			return segment ? patternHint(segment) : "";
-		},
 	},
 	{
 		name: "deny-cat-head-tail",
@@ -829,11 +569,6 @@ const builtinRules: builtinRule[] = [
 		reason:
 			`${guardMarker} (deny-builtin-grep): the built-in grep tool is blocked; orch ctx answers searches here.\n` +
 			`One orch ctx batch replaces it: orch ctx batch -q "text:pattern glob=dir/**" -q "symbol:Name refs=3" (a concept: find:...).`,
-		kind: (input) => {
-			const pattern = String(input.pattern ?? "").trim();
-			return pattern ? patternKind(pattern) : "";
-		},
-		tuned: builtinGrepHint,
 	},
 	{
 		name: "deny-builtin-find",
@@ -843,11 +578,6 @@ const builtinRules: builtinRule[] = [
 		reason:
 			`${guardMarker} (deny-builtin-find): the built-in find tool is blocked; orch ctx answers file searches here.\n` +
 			`One orch ctx batch replaces it: orch ctx batch -q "find:Code that ..." -q "text:pattern glob=dir/**" (--compact shortens it).`,
-		kind: (input) => {
-			const pattern = builtinFindPattern(input);
-			return pattern ? patternKind(pattern) : "";
-		},
-		tuned: builtinFindHint,
 	},
 ];
 
@@ -915,10 +645,9 @@ export default function (pi: ExtensionAPI) {
 	// then let every later search through so the retry always runs.
 	let fallbackReminded = false;
 
-	// The reason a block carries: the rule's own text, the tailored line when the
-	// hint mode asks for one, and the give-way line from the third block in a row.
-	const blockReason = (reason: string, tuned: string) =>
-		reason + (tuned ? `\n${tuned}` : "") + (blocksInRow >= 3 ? giveWay : "");
+	// The reason a block carries: the rule's own text, and the give-way line from
+	// the third block in a row.
+	const blockReason = (reason: string) => reason + (blocksInRow >= 3 ? giveWay : "");
 
 	pi.on("tool_call", async (event: ToolCallEvent) => {
 		const input = event.input as Record<string, unknown>;
@@ -932,9 +661,7 @@ export default function (pi: ExtensionAPI) {
 			: undefined;
 		if (builtin) {
 			blocksInRow += 1;
-			const mode = guardHintMode();
-			guardLog("pi", builtin.id, mode, builtin.kind(input), builtinLogLine(event.toolName, input));
-			return { block: true, reason: blockReason(builtin.reason, mode === "pattern" ? builtin.tuned(input) : "") };
+			return { block: true, reason: blockReason(builtin.reason) };
 		}
 		const line = event.toolName === "bash" ? String(input.command ?? "").trim() : "";
 		if (!line) {
@@ -944,12 +671,7 @@ export default function (pi: ExtensionAPI) {
 		for (const rule of active) {
 			if (!rule.match(line, ready)) continue;
 			blocksInRow += 1;
-			const mode = guardHintMode();
-			// The pattern hint is one extra line, and only when the reason can
-			// name the tool it points at.
-			const tuned = mode === "pattern" && ready.orch && rule.tuned ? rule.tuned(line, ready) : "";
-			guardLog("pi", rule.id, mode, rule.id === "grep-rg" ? grepKind(line, ready) : "", line);
-			return { block: true, reason: blockReason(rule.reason(ready), tuned) };
+			return { block: true, reason: blockReason(rule.reason(ready)) };
 		}
 		blocksInRow = 0;
 		if (!ready.orch || !guard || remindersByResult || fallbackReminded) return undefined;

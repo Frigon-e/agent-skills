@@ -5,7 +5,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"sort"
 	"strings"
 	"testing"
 )
@@ -465,6 +464,12 @@ func TestCtxReminderGuardDenyGrepRg(t *testing.T) {
 	got := runCtxReminder(t, nil, cases)
 	reminded, quiet, blocked := checkReminder(t, got, cases)
 	t.Logf("deny-grep-rg: %d blocked, %d allowed, %d reminded", blocked, quiet, reminded)
+
+	// The reason is fixed, byte for byte.
+	first := runCtxReminder(t, nil, []reminderCase{{Name: "grep", Tool: "bash", Input: bash(`grep -rn Normalize src`), Blocks: "grep-rg"}})
+	if reason := first.Out["grep"].Block; reason != oldGrepReason {
+		t.Errorf("the deny-grep-rg reason changed: %q", reason)
+	}
 }
 
 // deny-builtin-grep and deny-builtin-find: pi's own grep and find reach the tree
@@ -473,30 +478,25 @@ func TestCtxReminderGuardDenyGrepRg(t *testing.T) {
 // the fallback, so nothing is blocked and nothing is appended.
 func TestCtxReminderGuardBuiltinSearch(t *testing.T) {
 	orch := []string{"orch ctx batch"}
-	// The two generic reasons, byte for byte.
+	// The two reasons, byte for byte.
 	const grepReason = "orch tool guard (deny-builtin-grep): the built-in grep tool is blocked; orch ctx answers searches here.\n" +
 		`One orch ctx batch replaces it: orch ctx batch -q "text:pattern glob=dir/**" -q "symbol:Name refs=3" (a concept: find:...).`
 	const findReason = "orch tool guard (deny-builtin-find): the built-in find tool is blocked; orch ctx answers file searches here.\n" +
 		`One orch ctx batch replaces it: orch ctx batch -q "find:Code that ..." -q "text:pattern glob=dir/**" (--compact shortens it).`
 
-	// The two generic reasons, byte for byte, each the first block of its run so
-	// the give-way line cannot join them.
-	t.Run("generic reason is fixed", func(t *testing.T) {
+	// The two reasons, byte for byte, each the first block of its run so the
+	// give-way line cannot join them.
+	t.Run("reason is fixed", func(t *testing.T) {
 		cases := []reminderCase{
 			{Name: "grep", Tool: "grep", Input: map[string]any{"pattern": "Gateway"}, Blocks: "builtin-grep", Needs: orch},
 			{Name: "find", Tool: "find", Input: map[string]any{"pattern": "*.go"}, Blocks: "builtin-find", Needs: orch},
 		}
-		for name, env := range map[string][]string{
-			"unset":   nil,
-			"generic": {"ORCH_TOOL_GUARD_HINT=generic"},
-		} {
-			got := runCtxReminder(t, env, cases)
-			if reason := got.Out["grep"].Block; reason != grepReason {
-				t.Errorf("%s mode changed the generic grep reason: %q", name, reason)
-			}
-			if reason := got.Out["find"].Block; reason != findReason {
-				t.Errorf("%s mode changed the generic find reason: %q", name, reason)
-			}
+		got := runCtxReminder(t, nil, cases)
+		if reason := got.Out["grep"].Block; reason != grepReason {
+			t.Errorf("the grep reason changed: %q", reason)
+		}
+		if reason := got.Out["find"].Block; reason != findReason {
+			t.Errorf("the find reason changed: %q", reason)
 		}
 	})
 
@@ -582,38 +582,6 @@ func TestCtxReminderGuardBuiltinSearch(t *testing.T) {
 		}
 	})
 
-	// The same classifier as deny-grep-rg, in the batch syntax: a name is a
-	// symbol, a string is text scoped by the directory, a broad pattern is a
-	// concept, and a file name goes on the glob with a text query.
-	t.Run("pattern hint is one extra line", func(t *testing.T) {
-		cases := []reminderCase{
-			{Name: "grep symbol", Tool: "grep", Input: map[string]any{"pattern": "Normalize", "path": "internal"}, Blocks: "builtin-grep"},
-			{Name: "grep text", Tool: "grep", Input: map[string]any{"pattern": "cannot find user", "path": "internal"}, Blocks: "builtin-grep"},
-			{Name: "grep text no path", Tool: "grep", Input: map[string]any{"pattern": "/api/users"}, Blocks: "builtin-grep"},
-			{Name: "grep concept", Tool: "grep", Input: map[string]any{"pattern": "refund.*failed", "path": "src"}, Blocks: "builtin-grep"},
-			{Name: "find name", Tool: "find", Input: map[string]any{"pattern": "*.go", "path": "internal"}, Blocks: "builtin-find"},
-			{Name: "find file path", Tool: "find", Input: map[string]any{"pattern": "*.go", "path": "internal/gateway.go"}, Blocks: "builtin-find"},
-			{Name: "find concept", Tool: "find", Input: map[string]any{"pattern": "refund.*failed", "path": "src"}, Blocks: "builtin-find"},
-		}
-		want := map[string]string{
-			"grep symbol":       `Use orch ctx batch -q "symbol:Normalize refs=3".`,
-			"grep text":         `Use orch ctx batch -q "text:'cannot find user' glob=internal/**".`,
-			"grep text no path": `Use orch ctx batch -q "text:'/api/users'".`,
-			"grep concept":      `Use orch ctx batch -q "find:Code that refund failed".`,
-			"find name":         `Use orch ctx batch -q "text:'*.go' glob=internal/**".`,
-			"find file path":    `Use orch ctx batch -q "text:'*.go' glob=internal/**".`,
-			"find concept":      `Use orch ctx batch -q "find:Code that refund failed".`,
-		}
-		tuned := runCtxReminder(t, []string{"ORCH_TOOL_GUARD_HINT=pattern"}, cases)
-		generic := runCtxReminder(t, []string{"ORCH_TOOL_GUARD_HINT=generic"}, cases)
-		for _, c := range cases {
-			extra := undrop(strings.Split(tuned.Out[c.Name].Block, "\n"), strings.Split(generic.Out[c.Name].Block, "\n"))
-			if extra != want[c.Name] {
-				t.Errorf("%q: the tailored line is %q, want %q", c.Name, extra, want[c.Name])
-			}
-		}
-	})
-
 	t.Run("third block carries the give-way line", func(t *testing.T) {
 		cases := []reminderCase{
 			{Name: "grep first", Tool: "grep", Input: map[string]any{"pattern": "Gateway"}, Blocks: "builtin-grep"},
@@ -671,39 +639,6 @@ func TestCtxReminderGuardBuiltinSearch(t *testing.T) {
 		}
 	})
 
-	// The A/B log names the built-in rule and the arguments the model typed.
-	t.Run("log names the built-in rule", func(t *testing.T) {
-		log := filepath.Join(t.TempDir(), "guard.log")
-		cases := []reminderCase{
-			{Name: "grep", Tool: "grep", Input: map[string]any{"pattern": "Normalize", "path": "internal"}, Blocks: "builtin-grep"},
-			{Name: "find", Tool: "find", Input: map[string]any{"pattern": "*.go"}, Blocks: "builtin-find"},
-		}
-		runCtxReminder(t, []string{"ORCH_TOOL_GUARD_HINT=pattern", "ORCH_TOOL_GUARD_LOG=" + log}, cases)
-		raw, err := os.ReadFile(log)
-		if err != nil {
-			t.Fatalf("the log was not written: %v", err)
-		}
-		entries := strings.Split(strings.TrimSpace(string(raw)), "\n")
-		if len(entries) != 2 {
-			t.Fatalf("the log must hold one line per block, got %d: %q", len(entries), raw)
-		}
-		want := []struct{ rule, kind, command string }{
-			{"builtin-grep", "symbol", "grep pattern=Normalize path=internal"},
-			{"builtin-find", "text", "find pattern=*.go"},
-		}
-		for at, entry := range entries {
-			var record map[string]any
-			if err := json.Unmarshal([]byte(entry), &record); err != nil {
-				t.Fatalf("the log line is not JSON: %v %q", err, entry)
-			}
-			if record["harness"] != "pi" || record["hint"] != "pattern" {
-				t.Errorf("the log line names the wrong harness or hint: %v", record)
-			}
-			if record["rule"] != want[at].rule || record["kind"] != want[at].kind || record["command"] != want[at].command {
-				t.Errorf("the log line names the wrong block: %v, want %v", record, want[at])
-			}
-		}
-	})
 }
 
 func TestCtxReminderBuiltinRepositoryBoundary(t *testing.T) {
@@ -736,58 +671,6 @@ func TestCtxReminderBuiltinRepositoryBoundary(t *testing.T) {
 		cases[i].Blocks = ""
 	}
 	checkReminder(t, runCtxReminder(t, []string{"ORCH_TEST_CWD=" + root}, cases), cases)
-}
-
-func TestCtxReminderBuiltinHintsPreserveShellArguments(t *testing.T) {
-	cases := []struct {
-		pattern string
-		path    string
-		want    []string
-	}{
-		{"$(printf EXPANDED)", "", []string{"ctx", "batch", "-q", "text:'$(printf EXPANDED)'"}},
-		{"`printf EXPANDED`", "", []string{"ctx", "batch", "-q", "text:'`printf EXPANDED`'"}},
-		{"it's $HOME", "", []string{"ctx", "text", "--", "it's $HOME"}},
-		{"a\"b\\c", "", []string{"ctx", "batch", "-q", "text:'a\"b\\c'"}},
-		{"/api/users", "dir space'\"\\$HOME`printf EXPANDED`", []string{"ctx", "text", "--glob", "dir space'\"\\$HOME`printf EXPANDED`/**", "--", "/api/users"}},
-		{"refund.*`printf EXPANDED`", "", []string{"ctx", "batch", "-q", "find:Code that refund `printf EXPANDED`"}},
-		{"--bad'query", "", []string{"ctx", "text", "--", "--bad'query"}},
-		{"--scoped'query", "dir space", []string{"ctx", "text", "--glob", "dir space/**", "--", "--scoped'query"}},
-	}
-	inputs := make([]reminderCase, len(cases))
-	for i, c := range cases {
-		inputs[i] = reminderCase{Name: c.pattern, Tool: "grep", Input: map[string]any{"pattern": c.pattern, "path": c.path}, Blocks: "builtin-grep"}
-	}
-	got := runCtxReminder(t, []string{"ORCH_TOOL_GUARD_HINT=pattern"}, inputs)
-	rgPath, err := exec.LookPath("rg")
-	if err != nil {
-		t.Fatal(err)
-	}
-	c := newCtxHarness(t)
-	t.Setenv("ORCH_RG", rgPath)
-	if err := os.MkdirAll(filepath.Join(c.repo, "dir space"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	writeFiles(t, c.repo, map[string]string{"dir space/dash.txt": "--bad'query\n--scoped'query\n"})
-	for _, tc := range cases {
-		var hint string
-		for _, line := range strings.Split(got.Out[tc.pattern].Block, "\n") {
-			if strings.HasPrefix(line, "Use ") {
-				hint = strings.TrimSuffix(strings.TrimPrefix(line, "Use "), ".")
-			}
-		}
-		if hint == "" {
-			t.Fatalf("no generated hint for %q", tc.pattern)
-		}
-		cmd := exec.Command("/bin/sh", "-c", `orch() { printf '%s\000' "$@"; }; `+hint)
-		out, err := cmd.CombinedOutput()
-		want := strings.Join(tc.want, "\x00") + "\x00"
-		if err != nil || string(out) != want {
-			t.Errorf("hint for %q at %q produced %q, want %q: %v", tc.pattern, tc.path, out, want, err)
-		} else if strings.HasPrefix(tc.pattern, "--") {
-			argv := strings.Split(strings.TrimSuffix(string(out), "\x00"), "\x00")
-			wantContains(t, c.must(argv...), "path: dir space/dash.txt")
-		}
-	}
 }
 
 // Without orch on PATH every rule still blocks, pointing at the built-ins, and
@@ -960,12 +843,6 @@ type sharedToolguardFile struct {
 		Path      string            `json:"path"`
 		Rule      map[string]string `json:"rule"`
 	} `json:"builtinCases"`
-	// PatternKinds is the classifier table: the kind deny-grep-rg must give a
-	// pattern, shared with the Claude guard so the tailored hint cannot drift.
-	PatternKinds []struct {
-		Pattern string `json:"pattern"`
-		Kind    string `json:"kind"`
-	} `json:"patternKinds"`
 }
 
 func sharedGuardFile(t *testing.T) sharedToolguardFile {
@@ -978,121 +855,9 @@ func sharedGuardFile(t *testing.T) sharedToolguardFile {
 	return file
 }
 
-// kindLines is the one tailored line each kind adds, and the generic reason
-// each one replaces.
-var kindLines = map[string]string{
-	"symbol":  "orch ctx sym",
-	"text":    `orch ctx batch -q "text:'`,
-	"concept": "orch ctx find",
-}
-
-// oldGrepReason is deny-grep-rg's reason today, which generic and unset must
-// keep byte for byte.
+// oldGrepReason is deny-grep-rg's reason, which must stay byte for byte.
 const oldGrepReason = "orch tool guard (deny-grep-rg): a plain grep, rg, ag or git grep over files is blocked.\n" +
 	`One orch ctx batch replaces it: orch ctx batch -q "text:pattern glob=dir/**" -q "symbol:Name refs=3" (a concept: find:...).`
-
-// The pattern hint: the shared classifier table, and the one line
-// ORCH_TOOL_GUARD_HINT=pattern adds to a deny-grep-rg block. Generic and unset
-// keep today's text byte for byte, and without orch nothing is added.
-func TestCtxReminderPatternHint(t *testing.T) {
-	file := sharedGuardFile(t)
-	if len(file.PatternKinds) == 0 {
-		t.Fatal("the shared case file has no patternKinds")
-	}
-	// The examples the task names, whole line: the shared table already fixes
-	// their kind, so this pins the wording too.
-	examples := []struct{ command, line string }{
-		{`grep -rn "refund.*failed" src`, `Use orch ctx find "Code that refund failed" (a broader search; use it when no name or string is known).`},
-		{`grep -rn Normalize src`, `Use orch ctx sym Normalize --refs 3.`},
-		{`rg "cannot find user" internal/`, `Use orch ctx batch -q "text:'cannot find user' glob=internal/**".`},
-		{`grep -rn 'a$b' .`, `Use orch ctx batch -q "text:'a\$b'".`},
-		{`grep -rn "it's here" lib`, `Use orch ctx text --glob 'lib/**' -- 'it'\''s here'.`},
-	}
-	var cases []reminderCase
-	kinds := map[string]string{}
-	for _, c := range file.PatternKinds {
-		if _, seen := kinds[c.Pattern]; seen {
-			t.Fatalf("the shared case file lists %q twice", c.Pattern)
-		}
-		kinds[c.Pattern] = c.Kind
-		cases = append(cases, reminderCase{Name: c.Pattern, Tool: "bash", Input: bash("grep -rn '" + c.Pattern + "' src")})
-	}
-	for _, example := range examples {
-		if _, seen := kinds[example.command]; seen {
-			t.Fatalf("duplicate case %q", example.command)
-		}
-		cases = append(cases, reminderCase{Name: example.command, Tool: "bash", Input: bash(example.command)})
-	}
-	tuned := runCtxReminder(t, []string{"ORCH_TOOL_GUARD_HINT=pattern"}, cases)
-	generic := runCtxReminder(t, []string{"ORCH_TOOL_GUARD_HINT=generic"}, cases)
-	counts := map[string]int{}
-	for _, c := range file.PatternKinds {
-		marker, ok := kindLines[c.Kind]
-		if !ok {
-			t.Fatalf("%q has an unknown kind %q", c.Pattern, c.Kind)
-		}
-		counts[c.Kind]++
-		reason := tuned.Out[c.Pattern].Block
-		if !strings.Contains(reason, "(deny-grep-rg)") {
-			t.Fatalf("%q must be blocked by deny-grep-rg: %s", c.Pattern, reason)
-		}
-		for kind, other := range kindLines {
-			if strings.Contains(reason, other) != (kind == c.Kind) {
-				t.Errorf("%q must render the %s line and no other: %s", c.Pattern, c.Kind, reason)
-			}
-		}
-		// The tailored line is exactly one extra line, never a rewrite.
-		plain := generic.Out[c.Pattern].Block
-		extra := undrop(strings.Split(reason, "\n"), strings.Split(plain, "\n"))
-		if extra == "" {
-			t.Errorf("%q: the pattern hint is not the generic reason plus one line: %s", c.Pattern, reason)
-		} else if !strings.Contains(extra, marker) {
-			t.Errorf("%q: the extra line is not the %s line: %q", c.Pattern, c.Kind, extra)
-		}
-		if strings.Contains(generic.Out[c.Pattern].Block, marker) {
-			t.Errorf("%q: generic mode rendered the tailored line: %s", c.Pattern, generic.Out[c.Pattern].Block)
-		}
-	}
-	for kind, count := range counts {
-		if count < 8 {
-			t.Errorf("only %d shared cases for %s, want at least 8", count, kind)
-		}
-	}
-	for _, example := range examples {
-		var found bool
-		for _, line := range strings.Split(tuned.Out[example.command].Block, "\n") {
-			if line == example.line {
-				found = true
-			}
-		}
-		if !found {
-			t.Errorf("%s: missing the tailored line %q: %s", example.command, example.line, tuned.Out[example.command].Block)
-		}
-	}
-	// Unset is generic, byte for byte.
-	sample := []reminderCase{{Name: "grep", Tool: "bash", Input: bash(`grep -rn Normalize src`), Blocks: "grep-rg"}}
-	unset := runCtxReminder(t, nil, sample)
-	plainGeneric := runCtxReminder(t, []string{"ORCH_TOOL_GUARD_HINT=generic"}, sample)
-	if got := unset.Out["grep"].Block; got != oldGrepReason {
-		t.Errorf("unset mode changed the reason: %q", got)
-	}
-	if got := plainGeneric.Out["grep"].Block; got != oldGrepReason {
-		t.Errorf("generic mode changed the reason: %q", got)
-	}
-	t.Logf("pattern kinds: symbol %d, text %d, concept %d", counts["symbol"], counts["text"], counts["concept"])
-}
-
-// undrop removes one line from tuned and reports it, or "" when tuned is not
-// generic plus exactly one line.
-func undrop(tuned, generic []string) string {
-	for at := range tuned {
-		rest := append(append([]string{}, tuned[:at]...), tuned[at+1:]...)
-		if strings.Join(rest, "\n") == strings.Join(generic, "\n") {
-			return tuned[at]
-		}
-	}
-	return ""
-}
 
 // lines counts the non-empty lines of a reason.
 func lines(reason string) int {
@@ -1105,10 +870,9 @@ func lines(reason string) int {
 	return count
 }
 
-// Without orch there is nothing to name, so the pattern hint adds no line.
-// An orch that is on PATH but cannot answer counts as absent, and the block says
-// so instead of pointing at it.
-func TestCtxReminderPatternHintNeedsOrch(t *testing.T) {
+// Without orch there is nothing to name, so a grep block stays two lines and
+// does not point at orch ctx.
+func TestCtxReminderGrepBlockWithoutOrch(t *testing.T) {
 	cases := []reminderCase{{
 		Name:   "grep",
 		Tool:   "bash",
@@ -1116,17 +880,13 @@ func TestCtxReminderPatternHintNeedsOrch(t *testing.T) {
 		Blocks: "grep-rg",
 	}}
 	for _, onPath := range [][]string{{"fd", "rg"}, nil} {
-		for _, mode := range []string{"ORCH_TOOL_GUARD_HINT=pattern", "ORCH_TOOL_GUARD_HINT=generic"} {
-			got := runCtxReminderWith(t, onPath, []string{mode}, cases)
-			reason := got.Out["grep"].Block
-			if count := lines(reason); count != 2 {
-				t.Errorf("%s with %v: %d lines, want 2: %s", mode, onPath, count, reason)
-			}
-			for kind, marker := range kindLines {
-				if strings.Contains(reason, marker) {
-					t.Errorf("%s with %v: the %s line appeared without orch: %s", mode, onPath, kind, reason)
-				}
-			}
+		got := runCtxReminderWith(t, onPath, nil, cases)
+		reason := got.Out["grep"].Block
+		if count := lines(reason); count != 2 {
+			t.Errorf("with %v: %d lines, want 2: %s", onPath, count, reason)
+		}
+		if strings.Contains(reason, "orch ctx batch") {
+			t.Errorf("with %v: the block named orch ctx without orch: %s", onPath, reason)
 		}
 	}
 }
@@ -1205,32 +965,6 @@ func TestCtxReminderOrchHealth(t *testing.T) {
 		}
 	})
 
-	t.Run("one log line per probe", func(t *testing.T) {
-		log := filepath.Join(t.TempDir(), "guard.log")
-		cases := []reminderCase{{Name: "orch ctx text", Tool: "bash", Input: bash(`orch ctx text Gateway`)}}
-		runCtxReminderWithBroken(t, []string{"orch"}, []string{"orch"}, []string{"ORCH_TOOL_GUARD_LOG=" + log}, cases)
-		raw, err := os.ReadFile(log)
-		if err != nil {
-			t.Fatalf("the broken probe was not logged: %v", err)
-		}
-		var record map[string]any
-		if err := json.Unmarshal([]byte(strings.TrimSpace(string(raw))), &record); err != nil {
-			t.Fatalf("the log line is not JSON: %v %q", err, raw)
-		}
-		want := []string{"detail", "event", "harness", "ts"}
-		actual := make([]string, 0, len(record))
-		for key := range record {
-			actual = append(actual, key)
-		}
-		sort.Strings(actual)
-		if strings.Join(actual, ",") != strings.Join(want, ",") {
-			t.Errorf("the health log line has the wrong fields: %v", actual)
-		}
-		if record["harness"] != "pi" || record["event"] != "orch-unhealthy" || record["detail"] != brokenDetail {
-			t.Errorf("the health log line names the wrong probe: %v", record)
-		}
-	})
-
 	t.Run("detail is the first line cut at 120 characters", func(t *testing.T) {
 		long := strings.Repeat("x", 200)
 		stub := "#!/bin/sh\necho \"" + long + "\" >&2\necho \"second line\" >&2\nexit 1\n"
@@ -1244,52 +978,6 @@ func TestCtxReminderOrchHealth(t *testing.T) {
 			t.Errorf("the detail is more than the first line: %q", reason)
 		}
 	})
-}
-
-// ORCH_TOOL_GUARD_LOG appends one JSON line per block for the A/B count, and
-// writes nothing for a call that runs.
-func TestCtxReminderGuardLog(t *testing.T) {
-	log := filepath.Join(t.TempDir(), "guard.log")
-	long := "grep -rn " + strings.Repeat("A", 300) + " src"
-	cases := []reminderCase{
-		{Name: "symbol", Tool: "bash", Input: bash(`grep -rn Normalize src`), Blocks: "grep-rg"},
-		{Name: "long", Tool: "bash", Input: bash(long), Blocks: "grep-rg"},
-		{Name: "allowed", Tool: "bash", Input: bash(`orch ctx text Normalize`)},
-	}
-	env := []string{"ORCH_TOOL_GUARD_HINT=pattern", "ORCH_TOOL_GUARD_LOG=" + log}
-	got := runCtxReminder(t, env, cases)
-	if got.Out["allowed"].Block != "" {
-		t.Fatalf("the allowed call was blocked: %s", got.Out["allowed"].Block)
-	}
-	raw, err := os.ReadFile(log)
-	if err != nil {
-		t.Fatalf("the log was not written: %v", err)
-	}
-	entries := strings.Split(strings.TrimSpace(string(raw)), "\n")
-	if len(entries) != 2 {
-		t.Fatalf("the log must hold one line per block, got %d: %q", len(entries), raw)
-	}
-	for _, entry := range entries {
-		var record map[string]any
-		if err := json.Unmarshal([]byte(entry), &record); err != nil {
-			t.Fatalf("the log line is not JSON: %v %q", err, entry)
-		}
-		want := []string{"command", "harness", "hint", "kind", "rule", "ts"}
-		actual := make([]string, 0, len(record))
-		for key := range record {
-			actual = append(actual, key)
-		}
-		sort.Strings(actual)
-		if strings.Join(actual, ",") != strings.Join(want, ",") {
-			t.Errorf("the log line has the wrong fields: %v", actual)
-		}
-		if record["harness"] != "pi" || record["rule"] != "grep-rg" || record["hint"] != "pattern" || record["kind"] != "symbol" {
-			t.Errorf("the log line names the wrong block: %v", record)
-		}
-		if command, ok := record["command"].(string); !ok || len(command) > 200 {
-			t.Errorf("the log command is not a string cut at 200 chars: %v", record["command"])
-		}
-	}
 }
 
 func TestCtxReminderSharedToolguardCases(t *testing.T) {

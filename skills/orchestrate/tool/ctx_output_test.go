@@ -868,22 +868,3 @@ func TestACommentUnderAClosedFunctionBelongsToNoFunction(t *testing.T) {
 		t.Errorf("a statement in B is in %q", got)
 	}
 }
-
-func TestLeanConstShowsItsDeclarationOrItsFunctionNotItsNeighbours(t *testing.T) {
-	var src strings.Builder
-	src.WriteString("package pay\n\nvar ErrA = errors.New(\"a\")\nvar ErrB = errors.New(\"b\")\nvar ErrC = errors.New(\"c\")\n\nfunc Setup() {\n\tconst retries = 3\n")
-	for i := 1; i <= 40; i++ {
-		fmt.Fprintf(&src, "\tstep%d()\n", i)
-	}
-	src.WriteString("}\n")
-	ls := strings.Split(src.String(), "\n")
-	if s, e := leanConstWindow(ls, 4, "a.go"); s != 4 || e != 4 {
-		t.Errorf("a top-level var is its own line: %d-%d", s, e)
-	}
-	if s, e := leanConstWindow(ls, 8, "a.go"); s != 7 || e != 21 {
-		t.Errorf("a const near its function's start shows 15 lines from the function: %d-%d", s, e)
-	}
-	if s, e := leanConstWindow(nil, 8, "a.go"); e >= s {
-		t.Errorf("an empty file gives an empty window: %d-%d", s, e)
-	}
-}

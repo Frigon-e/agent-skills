@@ -33,24 +33,6 @@ Start with the cheapest tool that can answer, and move up only when it cannot:
 3. `find` (concept) only when you do not know any name to search for.
 4. `batch` whenever you have two or more independent lookups.
 
-When the tool guard blocks a raw grep or rg, one line of its reason is built
-from the pattern you typed (`ORCH_TOOL_GUARD_HINT=pattern`; without it the
-reason stays generic). One identifier such as `Normalize` or `Parser.Parse`
-names `orch ctx sym`, a string, route or path such as `cannot find user` or
-`/api/users` names `orch ctx text`, and a broad pattern names `orch ctx find`:
-an alternation of three or more, a `.*` gap between words, four or more words,
-a question, or a regex character class. Take the kind it names rather than
-widening the same grep: `find` is for the case where no single name or string
-is known yet, and `text` answers faster when one is.
-
-The same three kinds cover a built-in search (pi's `grep` and `find`, Claude's
-`Grep` and `Glob`), written in the batch syntax so the line can be pasted with
-your other lookups: `orch ctx batch -q "symbol:Name refs=3"`,
-`orch ctx batch -q "text:'<pattern>' glob=<dir>/**"`, and
-`orch ctx batch -q "find:Code that ..."`. A `find` or `Glob` name pattern is a
-file name, and no ctx kind lists files by name, so it goes on `glob=` with a
-text query unless the pattern is broad enough to be a concept.
-
 The guard names `orch ctx` only when `orch --version` answers (exit 0 within
 three seconds). When `orch` is on PATH and fails that probe, for example a
 wrapper that cannot find the `tool` directory next to it, the guard treats it
@@ -555,7 +537,7 @@ rely on that copy: a pi pass with `--ctx-tool on --ctx-shell open` (headless and
 pane) starts with `--no-extensions -e <cli-dir>/orch-ctx-reminder.ts`, the copy
 embedded in the binary and written next to the ctx shim, so a guarded gate run
 tests the code in the checkout. Ctx-only and ctx off do not load it. The
-`ORCH_TOOL_GUARD*` settings in orch's environment reach the headless pi by
+`ORCH_TOOL_GUARD`, `ORCH_TOOL_GUARD_SKIP` and `ORCH_TOOL_GUARD_STATE_DIR` settings in orch's environment reach the headless pi by
 inheritance and the pane's pi through the pane shell exports. `ORCH_TSLS`, when
 set in orch's environment, reaches the pane's `orch ctx` the same way in any
 ctx-tool pass. The guard carries five

@@ -113,7 +113,7 @@ type gateRecord struct {
 	Reasons           []string                     `json:"reasons,omitempty"` // incomplete review or execution failures
 	CtxTool           string                       `json:"ctx_tool"`
 	ContextFiles      string                       `json:"context_files"`
-	CtxProfile        string                       `json:"ctx_profile,omitempty"` // a named orch ctx tuning, empty for the default
+	CtxProfile        string                       `json:"ctx_profile,omitempty"` // read from old records only
 	CtxShell          string                       `json:"ctx_shell,omitempty"`   // effective shell policy: open or ctx-only
 	TreeChanged       []string                     `json:"tree_changed,omitempty"`
 	TreeChangedPasses []string                     `json:"tree_changed_passes,omitempty"`
@@ -851,8 +851,7 @@ type gatePass struct {
 	effort       string // runner-specific thinking effort
 	noTools      bool   // the pass gets no tools at all
 	ctxTool      bool
-	ctxOnly      bool   // pi: read tool plus a shell limited to orch ctx
-	ctxProfile   string // orch ctx tuning profile for the pass, empty for the default
+	ctxOnly      bool // pi: read tool plus a shell limited to orch ctx
 	contextFiles bool
 	cli          CtxCLI
 	ctx          context.Context
@@ -1028,7 +1027,6 @@ type gateOpts struct {
 	runner       *roleRun
 	ctxTool      bool
 	ctxOnly      bool
-	ctxProfile   string
 	contextFiles bool
 	guard        *checkoutGuard
 }
@@ -1093,12 +1091,18 @@ func cmdGate(a *app, args []string) (retErr error) {
 	ctxTool := fs.String("ctx-tool", "on", "on or off: read-only orch ctx CLI in gate agents (default on)")
 	contextFiles := fs.String("context-files", "off", "on or off: load repository context files (default off)")
 	ctxShell := fs.String("ctx-shell", "ctx-only", "open or ctx-only: pi with ctx-tool on defaults to read plus an orch ctx-only shell; open opts out; ignored by Claude and with ctx-tool off")
-	ctxProfile := fs.String("ctx-profile", "default", "orch ctx tuning for the gate agents: "+ctxProfileNames+" (default default)")
 	runnerF := fs.String("runner", "", "ordered harness:model[:effort],... choices for this run")
 	degraded := fs.Bool("degraded", false, "allow degraded role choices approved by the user")
 	for _, arg := range args {
-		if name, _, _ := strings.Cut(strings.TrimLeft(arg, "-"), "="); name == "dossier" && strings.HasPrefix(arg, "-") {
+		if arg == "--" {
+			break
+		}
+		name, _, _ := strings.Cut(strings.TrimLeft(arg, "-"), "=")
+		if name == "dossier" && strings.HasPrefix(arg, "-") {
 			return fail("--dossier was removed; the gate runs without a dossier")
+		}
+		if name == "ctx-profile" && strings.HasPrefix(arg, "-") {
+			return fail("--ctx-profile was removed")
 		}
 	}
 	pos, err := parseArgs(fs, args)
@@ -1122,9 +1126,6 @@ func cmdGate(a *app, args []string) (retErr error) {
 	if *ctxShell != "open" && *ctxShell != "ctx-only" {
 		return fail("--ctx-shell is open or ctx-only, not %q", *ctxShell)
 	}
-	if _, ok := ctxProfiles[*ctxProfile]; !ok {
-		return fail("--ctx-profile is %s, not %q", ctxProfileNames, *ctxProfile)
-	}
 	switch *cacheF {
 	case "", "short", "long":
 	default:
@@ -1136,7 +1137,7 @@ func cmdGate(a *app, args []string) (retErr error) {
 	if *expF != "" && !experimentRe.MatchString(*expF) {
 		return fail("--experiment %q: use lowercase letters, digits, '.', '_' and '-'", *expF)
 	}
-	opts := gateOpts{ctxTool: *ctxTool == "on", ctxOnly: *ctxShell == "ctx-only" && *ctxTool == "on", ctxProfile: profileArg(*ctxProfile), contextFiles: *contextFiles == "on", cache: *cacheF, keep: *keep || *expF != "", headless: *headless || os.Getenv("ORCH_HEADLESS") == "1"}
+	opts := gateOpts{ctxTool: *ctxTool == "on", ctxOnly: *ctxShell == "ctx-only" && *ctxTool == "on", contextFiles: *contextFiles == "on", cache: *cacheF, keep: *keep || *expF != "", headless: *headless || os.Getenv("ORCH_HEADLESS") == "1"}
 	if err := paneOrchOnPath(opts, *dry); err != nil {
 		return fail("%v", err)
 	}
@@ -1178,8 +1179,7 @@ func cmdGate(a *app, args []string) (retErr error) {
 	if opts.ctxOnly {
 		rec.CtxShell = "ctx-only"
 	}
-	rec.ReviewPolicy = &gateReviewPolicy{Version: gateReviewPolicyVersion, CtxTool: rec.CtxTool, ContextFiles: rec.ContextFiles, CtxShell: rec.CtxShell, CtxProfile: opts.ctxProfile}
-	rec.CtxProfile = opts.ctxProfile
+	rec.ReviewPolicy = &gateReviewPolicy{Version: gateReviewPolicyVersion, CtxTool: rec.CtxTool, ContextFiles: rec.ContextFiles, CtxShell: rec.CtxShell}
 	rec.BenchBuild = benchBuildNow()
 	rec.BenchInputs = benchInputs{Repo: code, SpecPath: rel, SpecHash: hash, SpecSHA256: benchHash([]byte(src))}
 	rec.BenchConfig = benchConfig{Roles: s.cfg.Roles, Flags: append([]string(nil), args...), Command: benchCommand(args), Budgets: map[string]int{}}
@@ -1425,7 +1425,7 @@ func runGatePasses(dir, code, model string, passes []gatePass, rec *gateRecord, 
 					return fmt.Errorf("%s: %w", lastRoute, err)
 				}
 				run1 := func(q gatePass) (string, string, error) {
-					q.ctxTool, q.ctxOnly, q.ctxProfile, q.contextFiles, q.ctx = opts.ctxTool, opts.ctxOnly, opts.ctxProfile, opts.contextFiles, passCtx
+					q.ctxTool, q.ctxOnly, q.contextFiles, q.ctx = opts.ctxTool, opts.ctxOnly, opts.contextFiles, passCtx
 					job := strings.TrimSuffix(q.name, "#retry")
 					repair := calls[job] > 0
 					calls[job]++
@@ -1849,7 +1849,7 @@ func writeGate(dir string, rec *gateRecord) error {
 	} else if label := storedGateResultLabel(rec); label != "" {
 		fmt.Fprintf(&r, "Historical result: **%s** (legacy record, not a v2 state)\n\n", label)
 	}
-	fmt.Fprintf(&r, "ctx_tool: %s; context_files: %s; ctx_shell: %s; ctx_profile: %s\n\n", orDefault(rec.CtxTool, "off (legacy)"), orDefault(rec.ContextFiles, "off (legacy)"), orDefault(rec.CtxShell, "open"), orDefault(rec.CtxProfile, "default"))
+	fmt.Fprintf(&r, "ctx_tool: %s; context_files: %s; ctx_shell: %s%s\n\n", orDefault(rec.CtxTool, "off (legacy)"), orDefault(rec.ContextFiles, "off (legacy)"), orDefault(rec.CtxShell, "open"), legacyCtxProfile(rec))
 	if t := rec.tokenSummary(); t != "" {
 		fmt.Fprintf(&r, "Tokens: %s\n\n", t)
 	}

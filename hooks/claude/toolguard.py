@@ -31,7 +31,6 @@ import re
 import subprocess
 import sys
 import time
-from datetime import datetime, timezone
 
 GUARD_MARKER = "orch tool guard"
 
@@ -70,19 +69,6 @@ SEARCH_SOURCE = frozenset({"find", "fd", "rg", "ag"})
 SEARCH_SINK = frozenset({"grep", "rg", "ag"})
 PLAIN_SEARCH = frozenset({"grep", "egrep", "fgrep", "rg", "ag"})
 RECURSIVE_BY_DEFAULT = frozenset({"rg", "ag"})
-# What a blocked pattern asks for. The same three shapes are classified by
-# skills/orchestrate/tool/pi_ctx_reminder.ts, so a change here needs the twin
-# change there and a case in toolguard_cases.json.
-IDENTIFIER_SHAPE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*$")
-QUESTION_WORDS = frozenset({"how", "what", "which", "where", "when", "why", "who"})
-# A character class escape says regex, so the pattern is a mix and not a name.
-CHAR_CLASS = re.compile(r"\\[wWdDsS]")
-ESCAPE = re.compile(r"\\.")
-WILDCARD = re.compile(r"\.\*|\.\+")
-CONCEPT_STRIP = re.compile(r"[|^$*+?()\[\]{}]")
-# A concept query already begins with this, so a pattern carrying it does not
-# get it twice.
-LEADING_CODE_THAT = re.compile(r"^code that ", re.IGNORECASE)
 GREP_VALUE = frozenset(
     {
         "-e",
@@ -207,25 +193,6 @@ def write_health(path, health):
         pass
 
 
-def health_log(detail):
-    """ORCH_TOOL_GUARD_LOG records a broken orch once per probe, so a session
-    where the guard could not name its tool is visible next to the blocks."""
-    path = os.environ.get("ORCH_TOOL_GUARD_LOG")
-    if not path:
-        return
-    entry = {
-        "ts": datetime.now(timezone.utc).isoformat(),
-        "harness": "claude",
-        "event": "orch-unhealthy",
-        "detail": detail,
-    }
-    try:
-        with open(path, "a", encoding="utf-8") as handle:
-            handle.write(json.dumps(entry) + "\n")
-    except OSError:
-        pass
-
-
 def orch_health():
     """The probe result, cached for HEALTH_TTL seconds across hook calls."""
     path = health_path()
@@ -234,8 +201,6 @@ def orch_health():
         return cached
     health = probe_orch()
     write_health(path, health)
-    if not health["ok"]:
-        health_log(health["detail"])
     return health
 
 
@@ -473,134 +438,6 @@ def search_targets(args):
     return out
 
 
-def search_pattern(args):
-    """The pattern of a grep: the -e/--regexp value, else its first non-flag
-    word."""
-    at = 0
-    total = len(args)
-    while at < total:
-        arg = args[at]
-        if arg in ("-e", "--regexp"):
-            return args[at + 1] if at + 1 < total else ""
-        if arg.startswith("-") and arg != "-":
-            if arg in GREP_VALUE:
-                at += 1
-            at += 1
-            continue
-        return arg
-    return ""
-
-
-def branches(pattern):
-    """Alternation branches, ignoring an escaped pipe."""
-    count = 1
-    at = 0
-    total = len(pattern)
-    while at < total:
-        if pattern[at] == "\\":
-            at += 2
-            continue
-        if pattern[at] == "|":
-            count += 1
-        at += 1
-    return count
-
-
-def wildcard_between_words(pattern):
-    """.* or .+ with words on both sides: the model is describing a gap."""
-    for marker in (".*", ".+"):
-        at = pattern.find(marker)
-        if at > 0 and at + len(marker) < len(pattern):
-            return True
-    return False
-
-
-def pattern_kind(pattern):
-    """Three kinds by shape alone, the same in the pi guard: concept is a broad
-    query, symbol one identifier, text anything else (a string, a route, a path,
-    a short regex with simple anchors only)."""
-    trimmed = pattern.strip()
-    if not trimmed:
-        return "text"
-    words = trimmed.split()
-    if branches(trimmed) >= 3:
-        return "concept"
-    if wildcard_between_words(trimmed):
-        return "concept"
-    if len(words) >= 4:
-        return "concept"
-    if "?" in trimmed or words[0].lower() in QUESTION_WORDS:
-        return "concept"
-    if CHAR_CLASS.search(trimmed):
-        return "concept"
-    if IDENTIFIER_SHAPE.match(trimmed):
-        return "symbol"
-    return "text"
-
-
-def search_dir(args):
-    """The directory a grep searches, which the text line scopes with --glob: a
-    file names its own directory, and no target or `.` searches the root."""
-    targets = search_targets(args)
-    if not targets:
-        return ""
-    first = targets[0].rstrip("/")
-    if not first or first == ".":
-        return ""
-    parts = first.split("/")
-    if "." in parts[-1]:
-        return "/".join(parts[:-1])
-    return first
-
-
-def shell_quoted(text):
-    """One shell word, safe to paste into a command."""
-    return "'" + text.replace("'", "'\\''") + "'"
-
-
-def text_hint(pattern, where):
-    """The literal-string line, in the batch form the rest of the guard shows: the
-    pattern in single quotes inside the query, the query one double-quoted shell
-    word. A pattern or directory that cannot sit in both keeps the single command."""
-    if "'" not in pattern and not (where and re.search(r"[\s'\"\\$`]", where)):
-        escaped = re.sub(r'([\\$`"])', r"\\\1", pattern)
-        glob = f" glob={where}/**" if where else ""
-        return f'Use orch ctx batch -q "text:\'{escaped}\'{glob}".'
-    if where:
-        return f"Use orch ctx text --glob {shell_quoted(where + '/**')} -- {shell_quoted(pattern)}."
-    return f"Use orch ctx text -- {shell_quoted(pattern)}."
-
-
-def concept_words(pattern):
-    """The concept phrase: the model's own words with the regex dropped."""
-    cleaned = ESCAPE.sub(" ", pattern)
-    cleaned = WILDCARD.sub(" ", cleaned)
-    cleaned = CONCEPT_STRIP.sub(" ", cleaned)
-    return LEADING_CODE_THAT.sub("", " ".join(cleaned.split()))
-
-
-def pattern_hint(segment):
-    """The one line a pattern hint adds: the ctx query that fits what was typed.
-    Empty when the grep has no pattern to build it from."""
-    name, args = command(segment)
-    if name == "git":
-        args = args[1:]
-    pattern = search_pattern(args)
-    if not pattern:
-        return ""
-    kind = pattern_kind(pattern)
-    if kind == "symbol":
-        return f"Use orch ctx sym {pattern} --refs 3."
-    words = concept_words(pattern)
-    if kind == "concept" and words:
-        phrase = re.sub(r'([\\$`"])', r"\\\1", "Code that " + words)
-        return (
-            f'Use orch ctx find "{phrase}" '
-            "(a broader search; use it when no name or string is known)."
-        )
-    return text_hint(pattern, search_dir(args))
-
-
 def repository_root(start=None):
     """The root of the git repository the hook runs in, or "" outside one.
 
@@ -631,58 +468,6 @@ def inside_repository(path):
     return resolved == root or resolved.startswith(root.rstrip(os.sep) + os.sep)
 
 
-def builtin_dir(path):
-    """The directory a built-in search starts from, scoped the way the shell hint
-    scopes it: a file names its own directory, and no path or `.` is the root."""
-    where = (path or "").strip().rstrip("/")
-    if not where or where == ".":
-        return ""
-    parts = where.split("/")
-    if "." in parts[-1]:
-        return "/".join(parts[:-1])
-    return where
-
-
-def builtin_hint(kind, pattern, path):
-    """The one ctx line a built-in search's pattern lands on, in the batch syntax
-    the shell hints use: a name is a symbol, a broad phrase is a concept, and a
-    string is a text lookup scoped by the directory the model named."""
-    if kind == "symbol":
-        return f'Use orch ctx batch -q "symbol:{pattern} refs=3".'
-    words = concept_words(pattern)
-    if kind == "concept" and words:
-        query = re.sub(r'([\\$`"])', r"\\\1", "find:Code that " + words)
-        return f'Use orch ctx batch -q "{query}".'
-    return text_hint(pattern, builtin_dir(path))
-
-
-def builtin_grep_hint(pattern, tool_input):
-    """The Grep tool's pattern picks one of the same three kinds as the shell
-    rule, so a name, a string and a broad phrase each get their own query."""
-    path = tool_input.get("path")
-    return builtin_hint(pattern_kind(pattern), pattern, path if isinstance(path, str) else "")
-
-
-def builtin_file_hint(pattern, tool_input):
-    """The Glob tool's name or glob argument is a file name, and no ctx kind lists
-    files by name: a concept asks for a concept search, and anything else is a
-    text lookup scoped by the directory, which is what glob= is for."""
-    kind = "concept" if pattern_kind(pattern) == "concept" else "text"
-    path = tool_input.get("path")
-    return builtin_hint(kind, pattern, path if isinstance(path, str) else "")
-
-
-def builtin_log_line(tool, tool_input):
-    """The line the log records for a built-in call: the tool and the arguments
-    the model typed, in the shape a shell command would have."""
-    parts = [tool]
-    for key in ("pattern", "path", "glob"):
-        value = tool_input.get(key)
-        if isinstance(value, str) and value.strip():
-            parts.append(f"{key}={value.strip()}")
-    return " ".join(parts)
-
-
 def grep_searches(segment, tools):
     """One segment is a raw content search over files."""
     name, args = command(segment)
@@ -702,66 +487,11 @@ def grep_searches(segment, tools):
     return recurses and not segment["stdin"]
 
 
-def grep_segment(line, tools):
-    """The grep segment a block names, so the hint is built from the model's own
-    pattern and not from a generic example."""
-    for segment in segments(line):
-        if grep_searches(segment, tools):
-            return segment
-    return None
-
-
-def grep_kind(line, tools):
-    """The kind of the blocked grep's pattern, for the log."""
-    segment = grep_segment(line, tools)
-    if segment is None:
-        return ""
-    name, args = command(segment)
-    if name == "git":
-        args = args[1:]
-    pattern = search_pattern(args)
-    return pattern_kind(pattern) if pattern else ""
-
-
-def grep_tuned(line, tools):
-    """The one line a deny-grep-rg block adds in pattern mode."""
-    segment = grep_segment(line, tools)
-    return pattern_hint(segment) if segment else ""
-
-
 def deny_grep_rg(line, tools):
     """A grep with a file or directory argument, or one that recurses, searches
     files. One reading stdin is a filter. With no orch, rg is the preferred grep
     rather than a raw search, so rg itself stays allowed."""
     return any(grep_searches(segment, tools) for segment in segments(line))
-
-
-def hint_mode():
-    """ORCH_TOOL_GUARD_HINT=pattern appends one line built from the blocked
-    pattern, so the two messages can be A/B tested. Unset or generic keeps the
-    generic text."""
-    return "pattern" if os.environ.get("ORCH_TOOL_GUARD_HINT") == "pattern" else "generic"
-
-
-def guard_log(rule, hint, kind, line):
-    """ORCH_TOOL_GUARD_LOG=<path> appends one JSON line per block, for the A/B
-    count. Off by default, and a guard never fails a call because of it."""
-    path = os.environ.get("ORCH_TOOL_GUARD_LOG")
-    if not path:
-        return
-    entry = {
-        "ts": datetime.now(timezone.utc).isoformat(),
-        "harness": "claude",
-        "rule": rule,
-        "hint": hint,
-        "kind": kind,
-        "command": line[:200],
-    }
-    try:
-        with open(path, "a", encoding="utf-8") as handle:
-            handle.write(json.dumps(entry) + "\n")
-    except OSError:
-        pass
 
 
 def deny_cat_head_tail(line):
@@ -841,7 +571,6 @@ def rules():
             "name": "deny-grep-rg",
             "id": "grep-rg",
             "match": deny_grep_rg,
-            "tuned": grep_tuned,
             "reason": lambda tools: (
                 f"{GUARD_MARKER} (deny-grep-rg): a plain grep"
                 + (", rg" if tools["orch"] else "")
@@ -886,7 +615,6 @@ def builtin_rules():
                 'One orch ctx batch replaces it: orch ctx batch -q "text:pattern glob=dir/**" '
                 '-q "symbol:Name refs=3" (a concept: find:...).'
             ),
-            "tuned": builtin_grep_hint,
         },
         {
             "script": "builtin-search",
@@ -899,7 +627,6 @@ def builtin_rules():
                 'One orch ctx batch replaces it: orch ctx batch -q "find:Code that ..." '
                 '-q "text:pattern glob=dir/**" (--compact shortens it).'
             ),
-            "tuned": builtin_file_hint,
         },
     ]
 
@@ -942,14 +669,7 @@ def builtin_search(event):
     tools = installed()
     if not tools["orch"]:
         return 0
-    mode = hint_mode()
-    guard_log(rule["id"], mode, pattern_kind(pattern), builtin_log_line(tool, tool_input))
-    reason = rule["reason"]
-    if mode == "pattern":
-        tuned = rule["tuned"](pattern, tool_input)
-        if tuned:
-            reason += "\n" + tuned
-    sys.stderr.write(reason + "\n")
+    sys.stderr.write(rule["reason"] + "\n")
     return 2
 
 
@@ -994,19 +714,9 @@ def main(argv):
     tools = installed()
     for rule in active:
         if rule["match"](line, tools):
-            mode = hint_mode()
-            # The pattern hint is one extra line, and only when the reason can
-            # name the tool it points at.
-            tuned = ""
-            if mode == "pattern" and tools["orch"] and rule.get("tuned"):
-                tuned = rule["tuned"](line, tools)
-            kind = grep_kind(line, tools) if rule["id"] == "grep-rg" else ""
-            guard_log(rule["id"], mode, kind, line)
             reason = rule["reason"](tools)
             if tools["broken"] and rule["id"] in SEARCH_RULES:
                 reason += "\n" + broken_line(tools["broken"])
-            if tuned:
-                reason += "\n" + tuned
             sys.stderr.write(reason + "\n")
             return 2
     return 0

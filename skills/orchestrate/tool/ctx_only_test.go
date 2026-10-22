@@ -141,6 +141,36 @@ func TestGateCtxShellCompareKeepsLegacyOpen(t *testing.T) {
 	}
 }
 
+// A record written while --ctx-profile existed still loads, and its profile still
+// shows; a record without one shows none. The flag itself is gone.
+func TestGateRecordWithRemovedCtxProfileStillLoads(t *testing.T) {
+	var old gateRecord
+	if err := json.Unmarshal(mustRead(t, filepath.Join("testdata", "gate-record-ctx-profile.json")), &old); err != nil {
+		t.Fatal(err)
+	}
+	if old.CtxProfile != "lean" || old.ReviewPolicy == nil || old.ReviewPolicy.CtxProfile != "lean" {
+		t.Fatalf("the stored profile was lost: %+v", old)
+	}
+	var out strings.Builder
+	describeExperiment(&out, "A", "lean-vs-default", &old, t.TempDir())
+	wantContains(t, out.String(), "ctx_shell: ctx-only; ctx_profile: lean")
+	out.Reset()
+	describeExperiment(&out, "B", "new", &gateRecord{CtxShell: "ctx-only"}, t.TempDir())
+	if strings.Contains(out.String(), "ctx_profile") {
+		t.Errorf("a new record shows a ctx profile: %s", out.String())
+	}
+}
+
+func TestGateCtxProfileFlagWasRemoved(t *testing.T) {
+	h := setup(t)
+	for _, arg := range []string{"--ctx-profile", "-ctx-profile", "--ctx-profile=lean"} {
+		code, out := h.run("gate", "spec.md", arg, "lean")
+		if code == 0 || !strings.Contains(out, "--ctx-profile was removed") {
+			t.Errorf("%s: exit %d, output %q", arg, code, out)
+		}
+	}
+}
+
 func TestGateCtxOnlyExtensionWriteFailsClosed(t *testing.T) {
 	h := setup(t)
 	dir := h.gateRepo(1)
