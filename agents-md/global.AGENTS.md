@@ -1,10 +1,10 @@
 ## Commits & PRs
 
-- No AI attribution anywhere — no `Co-Authored-By` trailers, no "Generated with …" lines in commit messages, PR bodies, or code comments. Write them as the human developer would.
+- No AI attribution anywhere - no `Co-Authored-By` trailers, no "Generated with …" lines in commit messages, PR bodies, or code comments. Write them as the human developer would.
 
 ## Command & Tool Preferences
 
-- **Text Searching:** Always use `rg` (ripgrep) for searching file contents. Do not use `grep`, `egrep`, or `fgrep`.
+- **Text Searching:** Where `orch` works, search in this order: `orch ctx` first (text, sym, find, batch), then `fd`/`rg`, then the built-in Grep/Glob. Without `orch`, use `rg` for file contents. Never use `grep`, `egrep`, or `fgrep`.
 - **File Finding:** Always use `fd` for finding file names or paths. Only use `find` if `fd` is unavailable.
 - **File Reading:** Always use the read tool, never `sed`, `cat`, `head` or `tail`. For part of a file pass `offset` and `limit` (several reads can go in one reply). Read output has line numbers, so cited `path:line` stay correct.
 - **Syntax Mapping:** `rg` syntax differs from traditional `grep`.

@@ -18,7 +18,7 @@
 
 # Workflow Preferences
 
-- Don't push code without asking
+- Don't push code without asking, except where a project memory or the user's message authorizes it
 - Don't create new files unless necessary - prefer editing existing ones
 - Explain changes before making them
 - Use conventional commits unless the repo's own agent instructions set a different commit style
