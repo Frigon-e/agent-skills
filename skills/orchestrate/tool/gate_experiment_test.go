@@ -29,7 +29,7 @@ func TestGateDossierCodeGoesAfterThePackageBlocksAndOffIsToday(t *testing.T) {
 	gdir := h.gateRepo(2)
 	h.sessionPi(gatePasses(nil))
 	t.Setenv("HERDR_ENV", "")
-	out := h.must("gate", "spec.md")
+	out := h.must("gate", "spec.md", "--dossier", "code")
 	wantContains(t, wantGateState(t, out, "pass").Dossier, "code, 2 package(s),", "chars (~")
 	calls := piCalls(t, h)
 	var group string
@@ -66,11 +66,26 @@ func TestGateDossierCodeGoesAfterThePackageBlocksAndOffIsToday(t *testing.T) {
 	}
 }
 
+func TestGateWithoutDossierFlagUsesOffAndWritesNoDossierFiles(t *testing.T) {
+	h := setup(t)
+	gdir := h.gateRepo(2)
+	h.sessionPi(gatePasses(nil))
+	t.Setenv("HERDR_ENV", "")
+	out := h.must("gate", "spec.md")
+	calls := piCalls(t, h)
+	if strings.Contains(calls, dossierTitle) || strings.Contains(calls, "Use the evidence dossier") || gateView(t, out).Dossier != "" || exists(filepath.Join(gdir, "dossier")) {
+		t.Errorf("a run without --dossier produced a dossier:\n%s\n%s", out, calls)
+	}
+	if rec := readRecord(t, gdir); rec.Dossier != "off" {
+		t.Errorf("record dossier %q, want off", rec.Dossier)
+	}
+}
+
 func TestGateDryRunShowsDossierSizesAndPlannerPass(t *testing.T) {
 	h := setup(t)
 	h.gateRepo(2)
 	dir := h.fakePi(gatePasses(nil))
-	out := h.must("gate", "spec.md", "--dry-run")
+	out := h.must("gate", "spec.md", "--dry-run", "--dossier", "code")
 	wantContains(t, out, "dossier: code; cache: short", "  dossier: code, 2 package(s),", "    api: ", "turn budget: 20 soft, 28 hard")
 	out = h.must("gate", "spec.md", "--dry-run", "--dossier", "plan", "--cache", "long")
 	wantContains(t, out, "dossier: plan; cache: long", "planner: plan:group:api+1", "tools: none", "section 5")
@@ -491,13 +506,13 @@ func TestGateDryRunDumpsTheDossierFilesARealPassGets(t *testing.T) {
 	h.sessionPi(gatePasses(nil))
 	t.Setenv("HERDR_ENV", "")
 	dump := filepath.Join(h.tmp, "dump")
-	out := h.must("gate", "spec.md", "--dry-run", "--only", "group:api+1", "--experiment", "x", "--dump-dossier", dump)
+	out := h.must("gate", "spec.md", "--dry-run", "--dossier", "code", "--only", "group:api+1", "--experiment", "x", "--dump-dossier", dump)
 	wantContains(t, out, "dossier files (2):", filepath.Join(dump, "api.md"), filepath.Join(dump, "p1.md"))
 	names, _ := os.ReadDir(dump)
 	if len(names) != 2 || exists(gdir) {
 		t.Errorf("the dump wrote %d files, gate dir exists: %v", len(names), exists(gdir))
 	}
-	h.must("gate", "spec.md", "--only", "group:api+1", "--experiment", "x")
+	h.must("gate", "spec.md", "--dossier", "code", "--only", "group:api+1", "--experiment", "x")
 	for _, id := range []string{"api", "p1"} {
 		want := mustRead(t, filepath.Join(gdir, "experiments", "x", "dossier", id+".md"))
 		if got := mustRead(t, filepath.Join(dump, id+".md")); string(got) != string(want) || len(got) == 0 {

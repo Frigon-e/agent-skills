@@ -302,7 +302,7 @@ func TestGateRunBudgetSchedulerRetriesShareUsage(t *testing.T) {
 			if kind == "coverage" {
 				dir = verdictRepo(t, h)
 				scriptPi(t, h, strings.Replace(cleanPackageReply, `"reuse":[]`, `"reuse":[],"items":[]`, 1), `{"packages":[{"id":"api","items":[]}]}`)
-				args = append(args, "--verdicts")
+				args = append(args, "--dossier", "code", "--verdicts")
 			} else {
 				dir = h.gateRepo(1)
 				if kind == "schema" {
@@ -396,7 +396,7 @@ func TestGateRunBudgetPartialCoverageKeepsCompletedChecks(t *testing.T) {
 	dir := verdictRepo(t, h)
 	scriptPi(t, h, strings.Replace(cleanPackageReply, `"reuse":[]`, `"reuse":[],"items":[]`, 1), `{"packages":[{"id":"api","items":[]}]}`)
 	writeFiles(t, filepath.Dir(userConfigPath()), map[string]string{filepath.Base(userConfigPath()): "[gate_budget]\nrepairs=0\n"})
-	code, out := h.run("gate", "spec.md", "--verdicts")
+	code, out := h.run("gate", "spec.md", "--dossier", "code", "--verdicts")
 	if code != 1 {
 		t.Fatalf("partial review passed: %s", out)
 	}

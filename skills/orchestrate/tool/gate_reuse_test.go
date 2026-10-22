@@ -307,7 +307,7 @@ func TestGroupVerdictsAreOffByDefaultAndTheRetryAsksOnlyForMissingItems(t *testi
 	dir := scriptPi(t, h, cleanPackageReply, retry)
 
 	// Off by default: no verdict is asked for and no retry runs.
-	out := h.must("gate", "spec.md")
+	out := h.must("gate", "spec.md", "--dossier", "code")
 	calls := string(mustRead(t, filepath.Join(dir, "calls.log")))
 	if strings.Contains(calls, "GATE-GROUP-ITEMS") || strings.Contains(calls, "answer every item") || strings.Contains(out, "items:") {
 		t.Errorf("verdicts leaked into a default run:\n%s\n%s", out, calls)
@@ -316,7 +316,7 @@ func TestGroupVerdictsAreOffByDefaultAndTheRetryAsksOnlyForMissingItems(t *testi
 
 	os.Remove(filepath.Join(dir, "calls.log"))
 	scriptPi(t, h, group, retry)
-	out = h.must("gate", "spec.md", "--verdicts")
+	out = h.must("gate", "spec.md", "--dossier", "code", "--verdicts")
 	calls = string(mustRead(t, filepath.Join(dir, "calls.log")))
 	if n := strings.Count(calls, "GATE-GROUP-ITEMS"); n != 1 {
 		t.Fatalf("retry passes = %d:\n%s", n, calls)
@@ -342,7 +342,7 @@ func TestGroupVerdictsAreOffByDefaultAndTheRetryAsksOnlyForMissingItems(t *testi
 
 	// A retry that still leaves an item out prevents approval.
 	scriptPi(t, h, group, `{"packages":[{"id":"api","items":[]}]}`)
-	code, out := h.run("gate", "spec.md", "--verdicts")
+	code, out := h.run("gate", "spec.md", "--dossier", "code", "--verdicts")
 	if code != 1 {
 		t.Fatalf("missing verdict passed: %d %s", code, out)
 	}
@@ -695,12 +695,12 @@ func TestGateShadowFlagRecordsRowsAndLeavesTheVerdictAlone(t *testing.T) {
 	t.Setenv("ORCH_TRIAGE_URL", srv.URL)
 	t.Setenv("ORCH_TRIAGE_KEY", "k")
 
-	base := h.must("gate", "spec.md")
+	base := h.must("gate", "spec.md", "--dossier", "code")
 	baseRecord := readRecord(t, gdir)
 	if posts != 0 || exists(filepath.Join(gdir, "shadow")) {
 		t.Fatalf("the default run called the decider (%d) or wrote shadow rows", posts)
 	}
-	out := h.must("gate", "spec.md", "--shadow", "decider")
+	out := h.must("gate", "spec.md", "--dossier", "code", "--shadow", "decider")
 	if posts == 0 {
 		t.Fatalf("no decider request:\n%s", out)
 	}
@@ -728,7 +728,7 @@ func TestGateShadowFlagRecordsRowsAndLeavesTheVerdictAlone(t *testing.T) {
 	if err := os.WriteFile(blocked, []byte("blocked"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	out = h.must("gate", "spec.md", "--shadow", "decider")
+	out = h.must("gate", "spec.md", "--dossier", "code", "--shadow", "decider")
 	failedShadow := readRecord(t, gdir)
 	for _, diagnostic := range []string{out, failedShadow.Shadow, strings.Join(failedShadow.Notes, "\n")} {
 		wantContains(t, diagnostic, "shadow persistence:", blocked)
@@ -738,7 +738,7 @@ func TestGateShadowFlagRecordsRowsAndLeavesTheVerdictAlone(t *testing.T) {
 	}
 	// the dry run prints a request without sending it
 	before := posts
-	dry := h.must("gate", "spec.md", "--dry-run", "--dump-decider", "first")
+	dry := h.must("gate", "spec.md", "--dry-run", "--dossier", "code", "--dump-decider", "first")
 	wantContains(t, dry, "decider request, NOT sent", `"state"`, `"implementation"`, "PutRecord", `"author_hint": true`, "candidate 1 (author hint)", `"relation"`, `"trigger_and_inputs"`, `"outputs_and_effects"`, `"placement"`)
 	if posts != before {
 		t.Error("--dump-decider sent a request")

@@ -1145,7 +1145,7 @@ func cmdGate(a *app, args []string) (retErr error) {
 		}
 	}()
 	dry := fs.Bool("dry-run", false, "show the passes, their sizes and the deterministic checks; call no model and write nothing")
-	dossier := fs.String("dossier", "code", "off, code (facts gathered by code, no model) or plan (code facts plus lookups a tool-less planner pass asked for)")
+	dossier := fs.String("dossier", "off", "off (default: the plain prompt), code (facts gathered by code, no model) or plan (code facts plus lookups a tool-less planner pass asked for)")
 	onlyF := fs.String("only", "", "experiment: run only these group passes (comma-separated keys); needs --experiment")
 	expF := fs.String("experiment", "", "experiment: write everything under the gate dir's experiments/<name>/ and leave the real gate record alone")
 	benchSuiteF := fs.String("bench-suite", "", "durable benchmark suite for experiment runs (default: user bench_suite, or none)")
