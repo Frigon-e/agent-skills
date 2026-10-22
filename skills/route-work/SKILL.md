@@ -68,7 +68,11 @@ Every spawn pays for a large cached prompt prefix, so prefer one implementer ove
 
 ## 4. Writing a plan worth delegating
 
-Give the delegate the excerpt or the exact `path:line-range`, not "read the spec" or "read task.md".
+Give the delegate the excerpt or the exact `path:line-range`, not "read the spec" or "read task.md". Never tell it to read a file that loads on its own (root and nested `CLAUDE.md`, skills it is given); point at the section it needs by `path:first-last`.
+
+Every subagent prompt, including for built-in types (Explore, general-purpose), carries this sentence verbatim:
+
+> Search with orch ctx (text, sym, find, batch); read files with Read and offset/limit (a file over about 30 KB needs a range). grep, rg over files, cat, head, tail, sed -n and find chains are blocked by hooks and each block wastes a turn.
 
 The implementer's quality ceiling is the plan's specificity. It's told to stop rather than guess, so gaps come back as "blocked" instead of silent mistakes. Cover the gaps up front:
 
